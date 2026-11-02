@@ -481,6 +481,9 @@ impl Renderer {
         self.sim.vapor(&self.device, &self.queue, vertices);
     }
     pub fn set_scenery(&mut self, scenery: &crate::scenery::Scenery) {
+        // A theater load builds more pipelines (city fill, vegetation) than the
+        // menu did, on the same driver, so it is GPU setup too.
+        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Game);
         self.sim = crate::sim_renderer::SimRenderer::new(
             &self.device,
             &self.queue,
@@ -489,6 +492,7 @@ impl Renderer {
             self.graphics,
             self.samples(self.graphics.anti_aliasing),
         );
+        crate::graphics_api::setup_ended();
         self.mirror_cadence = Default::default();
     }
     pub fn begin_cpu_frame(&mut self) {
@@ -561,6 +565,7 @@ impl Renderer {
         scenery: &crate::scenery::Scenery,
         graphics: crate::graphics::Options,
     ) -> AppResult<Self> {
+        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Game);
         crate::diagnostics::stage("game graphics instance and surface");
         let instance = crate::graphics_api::instance();
         let surface = {
@@ -1645,7 +1650,9 @@ impl Renderer {
         let present_log = crate::frame_log::span(crate::frame_log::Phase::Present);
         frame.present();
         drop(present_log);
-        self.first_frame.complete();
+        if self.first_frame.complete() {
+            crate::graphics_api::setup_ended();
+        }
         drop(draw_log);
         crate::frame_log::finish(gpu_ms);
         Ok(true)

@@ -2,9 +2,19 @@
 //! between Vulkan and DirectX 12, and the game never changes that by itself.
 //! Requested by John on 2026-11-02 after issue #8; docs/spec/graphics-options.md
 //! holds the contract. Other platforms have no choice and use wgpu's own.
+//!
+//! A player whose game dies during GPU setup never reaches a screen with the
+//! choice, so a launch that finds a dead marker asks first (`crate::graphics_prompt`).
+//! The marker is one file per process under `<data>/gpu-setup/`, holding an OS file
+//! lock for as long as the process lives. A later launch that can take the lock
+//! knows its owner is gone, so a sibling process still in its own setup is never
+//! mistaken for a dead one, and a kill or crash needs no cleanup to count.
 use crate::graphics::{GraphicsApi, Options};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The backend set handed to `wgpu::Instance::new`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +51,115 @@ pub(crate) fn resolve(
     }
 }
 
+/// Whether this launch writes a marker around GPU setup: only a player's launch.
+pub(crate) fn arms(platform: Platform, attended: bool) -> bool {
+    platform == Platform::Windows && attended
+}
+
+/// Whether this launch asks the player first. A flag has already answered.
+pub(crate) fn prompts(
+    platform: Platform,
+    attended: bool,
+    flag: Option<GraphicsApi>,
+    dead: DeadMarkers,
+) -> bool {
+    arms(platform, attended) && flag.is_none() && dead.any
+}
+
+/// What markers left by processes that are gone say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeadMarkers {
+    pub(crate) any: bool,
+    /// One died drawing the canvas, which the prompt uses too.
+    pub(crate) canvas: bool,
+}
+
+const MARKER_DIRECTORY: &str = "gpu-setup";
+const MARKER_SUFFIX: &str = ".marker";
+/// More dead markers than this are left for a later launch: the scan stays
+/// bounded however the directory came to be full.
+const MAX_MARKERS_SCANNED: usize = 64;
+
+/// What a marker says the process was setting up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Screen {
+    Canvas,
+    Game,
+}
+
+/// Reads and removes the markers of processes that are gone. A marker another
+/// live process holds is skipped: its lock is the proof it is alive. A marker
+/// that cannot be read still means something died.
+pub(crate) fn collect_dead_markers(data: &Path) -> DeadMarkers {
+    let mut dead = DeadMarkers::default();
+    let Ok(entries) = fs::read_dir(data.join(MARKER_DIRECTORY)) else {
+        return dead;
+    };
+    for entry in entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(MARKER_SUFFIX))
+        .take(MAX_MARKERS_SCANNED)
+    {
+        let path = entry.path();
+        let Ok(mut file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            continue;
+        };
+        if file.try_lock().is_err() {
+            continue;
+        }
+        let mut text = String::new();
+        let _ = file.read_to_string(&mut text);
+        dead.any = true;
+        dead.canvas |= text.lines().any(|line| line == "screen canvas");
+        log::info!(
+            "Graphics API: {} was left by a launch that did not finish GPU setup",
+            path.display()
+        );
+        drop(file);
+        if let Err(error) = fs::remove_file(&path) {
+            log::warn!("Could not remove {}: {error}", path.display());
+        }
+    }
+    dead
+}
+
+/// A marker this process holds; dropping the file releases the lock.
+pub(crate) struct Marker {
+    file: File,
+    path: PathBuf,
+}
+
+impl Marker {
+    pub(crate) fn create(data: &Path, screen: Screen) -> std::io::Result<Self> {
+        let directory = data.join(MARKER_DIRECTORY);
+        fs::create_dir_all(&directory)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = directory.join(format!("{}-{stamp}{MARKER_SUFFIX}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.try_lock().map_err(std::io::Error::other)?;
+        let screen = match screen {
+            Screen::Canvas => "canvas",
+            Screen::Game => "game",
+        };
+        file.write_all(format!("tore-gpu-setup 1\nscreen {screen}\n").as_bytes())?;
+        Ok(Self { file, path })
+    }
+    pub(crate) fn remove(self) {
+        let Self { file, path } = self;
+        drop(file);
+        if let Err(error) = fs::remove_file(&path) {
+            log::warn!("Could not remove {}: {error}", path.display());
+        }
+    }
+}
+
 struct Runtime {
     data: PathBuf,
     flag: Option<GraphicsApi>,
@@ -50,6 +169,10 @@ struct Runtime {
     saved: Mutex<GraphicsApi>,
     /// Resolved on first use, so a run with no window never touches a driver.
     current: Mutex<Option<Choice>>,
+    armed: bool,
+    marker: Mutex<Option<Marker>>,
+    /// Set when this launch should ask the player before anything else.
+    prompt: Mutex<Option<DeadMarkers>>,
 }
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -65,7 +188,15 @@ fn platform() -> Platform {
 /// Records the launch's flag and saved choice, before the first window, so that
 /// the first-run screen and the game agree. A later session in the same process
 /// (a re-import) picks up a value saved since, since it builds a new renderer too.
-pub(crate) fn select(data: &Path, flag: Option<GraphicsApi>, saved: GraphicsApi, saves: bool) {
+/// `attended` says a player is there to answer: not a headless, capture, validation,
+/// diagnostic, scripted or dialog-free run. Those neither write nor read markers.
+pub(crate) fn select(
+    data: &Path,
+    flag: Option<GraphicsApi>,
+    saved: GraphicsApi,
+    saves: bool,
+    attended: bool,
+) {
     if let Some(runtime) = RUNTIME.get() {
         if runtime.flag.is_none()
             && saved != GraphicsApi::Auto
@@ -76,12 +207,21 @@ pub(crate) fn select(data: &Path, flag: Option<GraphicsApi>, saved: GraphicsApi,
         }
         return;
     }
+    let armed = arms(platform(), attended);
+    let dead = if armed {
+        collect_dead_markers(data)
+    } else {
+        DeadMarkers::default()
+    };
     let _ = RUNTIME.set(Runtime {
         data: data.to_owned(),
         flag,
         saves,
         saved: Mutex::new(saved),
         current: Mutex::new(None),
+        armed,
+        marker: Mutex::new(None),
+        prompt: Mutex::new(prompts(platform(), attended, flag, dead).then_some(dead)),
     });
 }
 
@@ -189,6 +329,61 @@ pub(crate) fn choose(api: GraphicsApi) {
     }
 }
 
+/// Writes a marker, if this launch has them, before GPU setup can die.
+pub(crate) fn setup_starting(screen: Screen) {
+    let Some(runtime) = RUNTIME.get() else { return };
+    if !runtime.armed {
+        return;
+    }
+    let Ok(mut marker) = runtime.marker.lock() else {
+        return;
+    };
+    if marker.is_some() {
+        return;
+    }
+    match Marker::create(&runtime.data, screen) {
+        Ok(created) => *marker = Some(created),
+        Err(error) => log::warn!(
+            "Graphics API: could not write the GPU setup marker, so a failure here will not be noticed next launch: {error}"
+        ),
+    }
+}
+
+/// The setup window ended well, or the process is closing cleanly. A returned
+/// error and a panic do not come here: their marker stays, so the next launch
+/// offers the choice, and the cost of being wrong is one question.
+pub(crate) fn setup_ended() {
+    let Some(runtime) = RUNTIME.get() else { return };
+    let Ok(mut marker) = runtime.marker.lock() else {
+        return;
+    };
+    if let Some(marker) = marker.take() {
+        marker.remove();
+    }
+}
+
+/// If this launch should ask the player, the API to show as chosen. When the canvas
+/// itself died last time, the prompt draws with the other API, so that the way out
+/// cannot be the thing that keeps crashing.
+pub(crate) fn begin_prompt() -> Option<GraphicsApi> {
+    let runtime = RUNTIME.get()?;
+    let dead = runtime.prompt.lock().ok()?.take()?;
+    let shown = api_of(current());
+    if dead.canvas
+        && let Ok(mut current) = runtime.current.lock()
+    {
+        *current = Some(resolve(platform(), Some(other(shown)), shown, || true));
+    }
+    Some(shown)
+}
+
+fn other(api: GraphicsApi) -> GraphicsApi {
+    match api {
+        GraphicsApi::Dx12 => GraphicsApi::Vulkan,
+        _ => GraphicsApi::Dx12,
+    }
+}
+
 /// What the Graphics screen shows for a draft value: the saved choice, or the API
 /// in use when nothing is saved yet. Tests have no launch and see Vulkan.
 pub(crate) fn shown(draft: GraphicsApi) -> GraphicsApi {
@@ -262,6 +457,122 @@ mod tests {
                 assert_eq!(choice, Choice::Automatic);
             }
         }
+    }
+
+    fn profile(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "tore-graphics-api-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+    const DEAD: DeadMarkers = DeadMarkers {
+        any: true,
+        canvas: false,
+    };
+    const NONE: DeadMarkers = DeadMarkers {
+        any: false,
+        canvas: false,
+    };
+
+    #[test]
+    fn a_dead_marker_prompts_only_a_player_with_no_flag_on_windows() {
+        assert!(prompts(Platform::Windows, true, None, DEAD));
+        assert!(!prompts(Platform::Windows, true, None, NONE));
+        assert!(!prompts(Platform::Windows, false, None, DEAD), "unattended");
+        assert!(!prompts(Platform::Other, true, None, DEAD));
+        for flag in [Auto, Vulkan, Dx12] {
+            assert!(!prompts(Platform::Windows, true, Some(flag), DEAD));
+        }
+    }
+
+    #[test]
+    fn only_a_players_windows_launch_writes_a_marker() {
+        assert!(arms(Platform::Windows, true));
+        assert!(!arms(Platform::Windows, false));
+        assert!(!arms(Platform::Other, true));
+        assert!(!arms(Platform::Other, false));
+    }
+
+    #[test]
+    fn a_siblings_marker_is_left_alone_and_a_dead_ones_counts_once() {
+        let data = profile("sibling");
+        // Held through its own handle: another launch sees a locked file and must
+        // walk past it, as it does for a sibling game still in its own setup.
+        let live = Marker::create(&data, Screen::Game).unwrap();
+        assert_eq!(collect_dead_markers(&data), NONE);
+        assert!(live.path.exists());
+        // The holder goes away with no clean-up, as in a crash or kill.
+        let Marker { file, path } = live;
+        drop(file);
+        assert_eq!(collect_dead_markers(&data), DEAD);
+        assert!(!path.exists(), "a counted marker is consumed");
+        assert_eq!(collect_dead_markers(&data), NONE);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_clean_end_leaves_nothing_behind() {
+        let data = profile("clean");
+        Marker::create(&data, Screen::Game).unwrap().remove();
+        assert_eq!(collect_dead_markers(&data), NONE);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn a_dead_canvas_is_told_apart_and_an_empty_marker_still_counts() {
+        let data = profile("canvas");
+        let Marker { file, .. } = Marker::create(&data, Screen::Canvas).unwrap();
+        drop(file);
+        assert_eq!(
+            collect_dead_markers(&data),
+            DeadMarkers {
+                any: true,
+                canvas: true
+            }
+        );
+        fs::write(
+            data.join(MARKER_DIRECTORY)
+                .join(format!("x{MARKER_SUFFIX}")),
+            "",
+        )
+        .unwrap();
+        assert_eq!(collect_dead_markers(&data), DEAD);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn profiles_do_not_see_each_others_markers() {
+        let (first, second) = (profile("first"), profile("second"));
+        let Marker { file, .. } = Marker::create(&first, Screen::Game).unwrap();
+        drop(file);
+        assert_eq!(collect_dead_markers(&second), NONE);
+        assert_eq!(collect_dead_markers(&first), DEAD);
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
+    }
+
+    #[test]
+    fn a_leftover_state_file_from_the_test_build_changes_nothing() {
+        let data = profile("leftover");
+        fs::write(
+            data.join("gpu-fallback-v1.conf"),
+            "tore-gpu-fallback 1\nstate exhausted\nbuild 0.2.2\n",
+        )
+        .unwrap();
+        assert_eq!(collect_dead_markers(&data), NONE);
+        assert_eq!(on_windows(None, Auto, true), Choice::Vulkan);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn the_other_api_is_the_other_one() {
+        assert_eq!(other(Vulkan), Dx12);
+        assert_eq!(other(Dx12), Vulkan);
     }
 
     #[test]

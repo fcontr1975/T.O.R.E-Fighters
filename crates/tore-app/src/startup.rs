@@ -105,6 +105,7 @@ fn self_test_api(args: &[OsString]) -> AppResult<()> {
         flag,
         crate::graphics::GraphicsApi::Auto,
         false,
+        false,
     );
     Ok(())
 }
@@ -365,11 +366,14 @@ impl FirstFrame {
             *self = Self::Waiting;
         }
     }
-    pub(crate) fn complete(&mut self) {
+    /// True the one time the first frame is recorded.
+    pub(crate) fn complete(&mut self) -> bool {
         if matches!(self, Self::Waiting) {
             diagnostics::stage_done();
             log::info!("First frame presented successfully");
             *self = Self::Presented;
+            return true;
         }
+        false
     }
 }

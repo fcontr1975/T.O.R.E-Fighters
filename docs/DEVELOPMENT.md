@@ -566,7 +566,9 @@ The log's last `GPU setup:` line names the shader or pipeline being created when
 the driver stopped. Repeating `Watchdog: still in stage` lines mean the process hung
 rather than crashed, since a crashed process stops writing. On Windows the player
 [chooses Vulkan or DirectX 12](spec/graphics-options.md#graphics-api) on the import
-screen or in Pref > Graphics. `--graphics-api vulkan` or `dx12` chooses for one run,
+screen or in Pref > Graphics, and a launch that finds the last one
+[did not finish graphics setup](spec/graphics-options.md#when-a-launch-did-not-finish-graphics-setup)
+asks first. `--graphics-api vulkan` or `dx12` chooses for one run,
 and `--graphics-api dx12 --diagnostics-self-test=graphics` checks DirectX 12 without
 game media. Share the timestamped fatal report and session log when reporting a
 startup problem; logs can contain local paths and device names.

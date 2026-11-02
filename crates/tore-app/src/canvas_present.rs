@@ -55,6 +55,7 @@ pub(crate) struct CanvasPresenter {
 
 impl CanvasPresenter {
     pub(crate) async fn new(window: Arc<Window>) -> AppResult<Self> {
+        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Canvas);
         crate::diagnostics::stage("first-run graphics instance and surface");
         let instance = crate::graphics_api::instance();
         let surface = {
@@ -293,7 +294,11 @@ impl CanvasPresenter {
             self.window.pre_present_notify();
         }
         frame.present();
-        self.first_frame.complete();
+        // The canvas working says nothing about the game's own pipelines, which
+        // get their own marker, and a long import must not count as GPU setup.
+        if self.first_frame.complete() {
+            crate::graphics_api::setup_ended();
+        }
         Ok(true)
     }
 }

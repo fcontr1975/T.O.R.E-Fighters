@@ -184,6 +184,43 @@ The player can choose in two places:
   as a restart, since it builds a new renderer. Defaults leaves the row alone, because
   it may be what keeps the game running.
 
+### When a launch did not finish graphics setup
+
+A player whose game dies during GPU setup never reaches either screen: once media is
+imported, every launch goes straight to the game window. So the game notices, and
+asks. Nothing switches without the player.
+
+A **marker** is one file per process in `<data>/gpu-setup/`, holding an OS file lock
+for the life of the process. It exists while the first-run canvas draws its first
+frame, while the game renderer is built up to its first presented frame, and during
+each theater load, which builds more pipelines. A long import is never covered.
+
+A launch that can take a marker's lock knows its owner is gone, and removes it. Then,
+before anything else, it shows a small screen on the same canvas path as the import
+screen, with the choice, Continue and Quit, and one sentence saying the last launch
+did not finish graphics setup. Continue saves the choice and the game goes on, with
+no restart. That canvas is known to work on the machine in issue #8, which drew it on
+Vulkan. If a canvas is what died, the screen draws with the other API, so the way out
+cannot be the thing that keeps crashing.
+
+What leaves a marker behind:
+
+- **A native crash, a kill, or a Rust panic.** A kill during a slow compile counts,
+  and costs one question.
+- **A returned error during setup.** It has its own report and dialog too, but a
+  player whose driver cannot start needs the same way out.
+
+What does not:
+
+- **A clean close**, including a quit during setup. The marker is removed.
+- **A sibling game**, running several being allowed: its marker is locked and skipped.
+- **Another profile**: markers live in the data directory, so an isolated
+  `TORE_DATA_DIR` sees only its own.
+- **A run with no player**: headless, capture, smoke test, validation, perf,
+  scripted-input and diagnostic modes, or `TORE_NO_ERROR_DIALOG=1`, write no marker,
+  read none and never ask. A launch with `--graphics-api` writes one, since it can die
+  too, but it does not ask, because the flag has already answered.
+
 The first-run screen, the game, and the offline preview tools all use the same
 choice, through `graphics_api::instance`. A Clippy rule rejects any other
 `wgpu::Instance::new` outside tests.
