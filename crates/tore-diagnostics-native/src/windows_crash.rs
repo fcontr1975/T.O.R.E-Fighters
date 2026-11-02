@@ -780,6 +780,9 @@ fn show_dialog(
     let _ = crash_report::write_cause(&mut text, exception);
     let _ = write!(text, "{module_line}");
     let _ = writeln!(text, "Last GPU step: {step}");
+    if let Some(hint) = crash_report::gpu_setup_hint(stage, step) {
+        let _ = writeln!(text, "\n{hint}");
+    }
     let _ = write!(text, "\n{report_location}");
     let mut wide = [0u16; 4096];
     let wide = to_wide(text.as_str(), &mut wide);

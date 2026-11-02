@@ -118,6 +118,17 @@ pub struct Facts<'a> {
     pub main_thread: bool,
 }
 
+/// The line a report adds when the failure happened during GPU setup: the player
+/// can do something about those. The startup stages that touch the GPU name
+/// graphics or the first frame, and a step still running covers the pipelines
+/// built after startup. `step` is the last GPU step as `gpu_setup` records it.
+pub fn gpu_setup_hint(stage: &str, step: &str) -> Option<&'static str> {
+    (stage.contains("graphics") || stage.contains("first frame") || step.starts_with("in "))
+        .then_some(GPU_SETUP_HINT)
+}
+const GPU_SETUP_HINT: &str =
+    "The graphics API can be changed: use Pref > Graphics, or start with --graphics-api dx12.";
+
 fn or_none(text: &str) -> &str {
     if text.is_empty() { "none" } else { text }
 }
@@ -145,7 +156,11 @@ pub fn write_summary(out: &mut impl Write, facts: &Facts<'_>) -> fmt::Result {
         facts.thread
     )?;
     writeln!(out, "Last GPU step: {}", or_none(facts.step))?;
-    writeln!(out, "Graphics adapter: {}", or_none(facts.adapter))
+    writeln!(out, "Graphics adapter: {}", or_none(facts.adapter))?;
+    if let Some(hint) = gpu_setup_hint(facts.stage, facts.step) {
+        writeln!(out, "{hint}")?;
+    }
+    Ok(())
 }
 
 /// One line naming the exception, shared by the report, event and dialog.
@@ -216,6 +231,55 @@ mod tests {
         ] {
             assert!(report.contains(wanted), "{wanted} missing from {report}");
         }
+    }
+
+    #[test]
+    fn only_gpu_setup_failures_mention_the_graphics_api() {
+        for stage in [
+            "game graphics resources and pipelines",
+            "game graphics device creation",
+            "first-run graphics adapter selection",
+            "game first frame presentation",
+            "aircraft graphics preparation",
+        ] {
+            assert!(gpu_setup_hint(stage, "").is_some(), "{stage}");
+        }
+        // A pipeline built after startup has no stage, but its step is running.
+        assert!(gpu_setup_hint("", "in render pipeline 'Menu'").is_some());
+        // A step that returned, or the self-test's note, is not a GPU failure.
+        assert!(gpu_setup_hint("", "after render pipeline 'Menu' returned").is_none());
+        for stage in [
+            "diagnostics self-test: deliberate native crash",
+            "asset loading or import",
+            "game window creation",
+            "",
+        ] {
+            assert!(
+                gpu_setup_hint(stage, "deliberate self-test, no GPU step").is_none(),
+                "{stage}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crash_in_gpu_setup_says_the_api_can_change() {
+        let mut text = Text::<1024>::new();
+        write_summary(
+            &mut text,
+            &Facts {
+                unix_seconds: 0,
+                milliseconds: 0,
+                identity: "",
+                stage: "game graphics resources and pipelines",
+                step: "in render pipeline 'Menu'",
+                adapter: "",
+                exception: Exception::default(),
+                thread: 1,
+                main_thread: true,
+            },
+        )
+        .unwrap();
+        assert!(text.as_str().contains("--graphics-api dx12"));
     }
 
     #[test]

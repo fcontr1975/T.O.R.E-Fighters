@@ -615,13 +615,14 @@ fn fatal(reason: &str) -> String {
         return "No diagnostic log could be saved.".into();
     };
     let report = format!(
-        "{}\nT.O.R.E-Fighters {} commit={} target={}\nStage: {}\n{}\nSession log: {}\n",
+        "{}\nT.O.R.E-Fighters {} commit={} target={}\nStage: {}\n{}\n{}Session log: {}\n",
         timestamp(),
         crate::version::version(),
         crate::version::commit(),
         crate::version::target(),
         logger.stage_name(),
         bounded(reason, 32 * 1024),
+        gpu_setup_hint(logger).map_or(String::new(), |hint| format!("{hint}\n")),
         logger
             .path
             .as_ref()
@@ -692,13 +693,29 @@ fn fatal(reason: &str) -> String {
     let _ = tore_diagnostics_native::event_error(&event);
     location
 }
+/// Windows, where there is a graphics API to change: the line for a failure during
+/// GPU setup. The stage and step are the ones a native crash report would show.
+fn gpu_setup_hint(logger: &Logger) -> Option<&'static str> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let mut text = [0; crash_context::CELL_BYTES];
+    tore_diagnostics_native::crash_report::gpu_setup_hint(
+        logger.stage_name(),
+        crash_context::GPU_STEP.read(&mut text),
+    )
+}
 fn display(summary: &str, location: &str, interactive: bool) {
     if interactive
         && std::env::var_os("TORE_NO_ERROR_DIALOG").as_deref() != Some(std::ffi::OsStr::new("1"))
     {
         let stage = LOGGER.get().map(Logger::stage_name).unwrap_or("startup");
+        let hint = LOGGER
+            .get()
+            .and_then(gpu_setup_hint)
+            .map_or(String::new(), |hint| format!("{hint}\n\n"));
         let message = format!(
-            "T.O.R.E-Fighters failed during {stage}.\n\n{}\n\n{location}",
+            "T.O.R.E-Fighters failed during {stage}.\n\n{}\n\n{hint}{location}",
             bounded(summary, 4096)
         );
         if let Err(error) = tore_diagnostics_native::show_error("T.O.R.E-Fighters error", &message)
