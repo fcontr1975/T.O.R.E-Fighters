@@ -19,17 +19,10 @@ pub(crate) fn interactive() -> bool {
     if std::env::var_os("TORE_NO_ERROR_DIALOG").is_some_and(|v| v == "1") {
         return false;
     }
-    attended()
-}
-
-/// A player's launch, not a probe, capture, validation or diagnostic one. Unlike
-/// [`interactive`] it does not depend on whether dialogs are wanted.
-pub(crate) fn attended() -> bool {
     if [
         "TORE_ENVIRONMENT_PROBE",
         "TORE_AIRPORT_PROBE",
         "TORE_PERF_FRAMES",
-        "TORE_PERF_TICKS",
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some())
@@ -93,21 +86,26 @@ pub(crate) fn self_test() -> Option<AppResult<()>> {
 }
 
 /// The self-test stands alone, except that `--graphics-api VALUE` may come with
-/// it, so a media-free run can check an API. No marker: this is a diagnostic.
+/// it, so a media-free run can check an API.
 fn self_test_api(args: &[OsString]) -> AppResult<()> {
-    let setting = match args {
-        [_] => crate::graphics::GraphicsApi::Auto,
-        [first, value, _] if first == "--graphics-api" => {
-            crate::graphics::GraphicsApi::from_flag(&value.to_string_lossy())?
-        }
-        [_, first, value] if first == "--graphics-api" => {
-            crate::graphics::GraphicsApi::from_flag(&value.to_string_lossy())?
-        }
+    let flag = match args {
+        [_] => None,
+        [first, value, _] if first == "--graphics-api" => Some(
+            crate::graphics::GraphicsApi::from_flag(&value.to_string_lossy())?,
+        ),
+        [_, first, value] if first == "--graphics-api" => Some(
+            crate::graphics::GraphicsApi::from_flag(&value.to_string_lossy())?,
+        ),
         _ => {
             return Err("--diagnostics-self-test must be used alone or with --graphics-api".into());
         }
     };
-    crate::graphics_api::select(std::path::Path::new(""), setting, false, false);
+    crate::graphics_api::select(
+        std::path::Path::new(""),
+        flag,
+        crate::graphics::GraphicsApi::Auto,
+        false,
+    );
     Ok(())
 }
 
@@ -367,14 +365,11 @@ impl FirstFrame {
             *self = Self::Waiting;
         }
     }
-    /// True the one time the first frame is recorded.
-    pub(crate) fn complete(&mut self) -> bool {
+    pub(crate) fn complete(&mut self) {
         if matches!(self, Self::Waiting) {
             diagnostics::stage_done();
             log::info!("First frame presented successfully");
             *self = Self::Presented;
-            return true;
         }
-        false
     }
 }

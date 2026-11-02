@@ -484,30 +484,6 @@ pub(crate) fn reassert_crash_reporter() {
     }
 }
 
-/// The automatic graphics fallback has run out of options: a report the player
-/// can send, without losing the failure it follows.
-pub(crate) fn report_fallback_exhausted(message: &str, interactive: bool) {
-    let previous = DATA_DIR
-        .get()
-        .and_then(|directory| fs::read_to_string(directory.join("last-error.txt")).ok());
-    let reason = match &previous {
-        Some(previous) => format!(
-            "{message}\nThe report this one replaced in last-error.txt:\n{}",
-            bounded(previous, 8 * 1024)
-        ),
-        None => message.to_owned(),
-    };
-    let location = fatal(&reason);
-    if interactive
-        && let Err(error) = tore_diagnostics_native::show_error(
-            "T.O.R.E-Fighters graphics problem",
-            &format!("{message}\n\n{location}"),
-        )
-    {
-        stderr(&format!("Error display unavailable: {error}"));
-    }
-}
-
 pub fn init() {
     if LOGGER.get().is_some() {
         return;

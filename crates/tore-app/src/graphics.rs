@@ -299,9 +299,10 @@ impl Grass {
 }
 
 /// Which graphics API the game asks for. Opinionated, requested by John on
-/// 2026-11-02 after issue #8: Auto is what the game always did, the first adapter
-/// wgpu chooses, plus the automatic fallback in `crate::graphics_api`. Vulkan and
-/// DirectX 12 are explicit choices for Windows; elsewhere only Auto is offered.
+/// 2026-11-02 after issue #8. A Windows player sees Vulkan and DirectX 12. Auto is
+/// not offered: it means nothing is saved yet, and `crate::graphics_api` then uses
+/// Vulkan when a Vulkan adapter exists, otherwise DirectX 12. Elsewhere only Auto
+/// exists, which leaves the choice to wgpu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GraphicsApi {
     #[default]
@@ -311,6 +312,8 @@ pub enum GraphicsApi {
 }
 impl GraphicsApi {
     pub const ALL: [Self; 3] = [Self::Auto, Self::Vulkan, Self::Dx12];
+    /// What the player chooses between.
+    pub const CHOICES: [Self; 2] = [Self::Vulkan, Self::Dx12];
     pub fn key(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -322,7 +325,7 @@ impl GraphicsApi {
         match self {
             Self::Auto => "Auto",
             Self::Vulkan => "Vulkan",
-            Self::Dx12 => "DX12",
+            Self::Dx12 => "DirectX 12",
         }
     }
     pub fn parse(text: &str) -> Option<Self> {
@@ -569,8 +572,9 @@ pub struct Options {
     pub shadow_quality: ShadowQuality,
     /// Shadow reach, following trees by default.
     pub shadow_distance: ShadowDistance,
-    /// The graphics API for the next launch. Only Windows offers anything but
-    /// Auto; a file carried from Windows keeps its value elsewhere and is ignored.
+    /// The graphics API for the next launch; Auto until the player chooses. Only
+    /// Windows offers a choice; a file carried from Windows keeps its value
+    /// elsewhere and is ignored.
     pub graphics_api: GraphicsApi,
 }
 impl Default for Options {

@@ -205,7 +205,7 @@ impl Row {
                 "V-sync draws one frame per display refresh. 60, 100 and 200 cap the rate without waiting for the display: less delay, more power."
             }
             Row::GraphicsApi => {
-                "Which graphics system the game uses. Auto chooses for you and switches to DX12 if a start fails. Takes effect at next launch."
+                "Which graphics system the game uses. Try the other one if the game crashes or will not start. Restart the game to apply a change."
             }
             Row::FrameRate => {
                 "Shows frame rate, CPU/GPU milliseconds and the recent low. Keeps rendering while menus or flight are paused."
@@ -254,7 +254,7 @@ impl Row {
             Row::SpottingAid => SpottingAid::ALL.map(|a| a.label().to_owned()).to_vec(),
             Row::TerrainFiltering => vec!["Off".into(), "On".into()],
             Row::FrameLimit => FrameLimit::ALL.map(|a| a.label().to_owned()).to_vec(),
-            Row::GraphicsApi => GraphicsApi::ALL.map(|a| a.label().to_owned()).to_vec(),
+            Row::GraphicsApi => GraphicsApi::CHOICES.map(|a| a.label().to_owned()).to_vec(),
             Row::FrameRate => vec!["Off".into(), "On".into()],
             Row::BuildingDistance => BUILDING_DISTANCES.map(|n| format!("{n} nm")).to_vec(),
             Row::BuildingDetail => BUILDING_DETAILS.map(|n| format!("{n} nm")).to_vec(),
@@ -400,9 +400,9 @@ impl Editor {
                 .iter()
                 .position(|a| *a == d.frame_limit)
                 .unwrap_or(FrameLimit::ALL.len() - 1),
-            Row::GraphicsApi => GraphicsApi::ALL
+            Row::GraphicsApi => GraphicsApi::CHOICES
                 .iter()
-                .position(|a| *a == d.graphics_api)
+                .position(|a| *a == crate::graphics_api::shown(d.graphics_api))
                 .unwrap_or(0),
             Row::FrameRate => usize::from(d.show_frame_rate),
             Row::BuildingDistance => BUILDING_DISTANCES
@@ -458,7 +458,7 @@ impl Editor {
             Row::SpottingAid => d.spotting_aid = SpottingAid::ALL[i],
             Row::TerrainFiltering => d.terrain_filtering = i == 1,
             Row::FrameLimit => d.frame_limit = FrameLimit::ALL[i],
-            Row::GraphicsApi => d.graphics_api = GraphicsApi::ALL[i],
+            Row::GraphicsApi => d.graphics_api = GraphicsApi::CHOICES[i],
             Row::FrameRate => d.show_frame_rate = i == 1,
             Row::BuildingDistance => d.building_distance_nm = BUILDING_DISTANCES[i],
             Row::BuildingDetail => d.building_detail_nm = BUILDING_DETAILS[i],
@@ -533,7 +533,7 @@ impl Editor {
                 return crate::frame_pacing::Limit::overridden()
                     .then(|| "TORE_FRAME_LIMIT replaces this choice for this run.".into());
             }
-            Row::GraphicsApi => return crate::graphics_api::status_note(),
+            Row::GraphicsApi => return crate::graphics_api::status_note(self.draft.graphics_api),
             Row::AntiAliasing => {}
             _ => return None,
         }
@@ -573,7 +573,7 @@ impl Editor {
         self.set_choice(row, i);
         self.edited();
         self.message = if rows()[row] == Row::GraphicsApi {
-            format!("Graphics API set to {label}. Takes effect at next launch.")
+            format!("Graphics API set to {label}. Restart the game to apply.")
         } else {
             format!("{} set to {label}.", rows()[row].label())
         };
@@ -763,7 +763,12 @@ impl Editor {
         let r = self.row_rect(row)?;
         // Six distance choices must fit before the scroll bar too.
         let count = rows()[row].choices().len() as i32;
-        let width = CHOICE_W.min((BAR_X - 4 - CHOICE_X - (count - 1) * CHOICE_GAP) / count);
+        let width = if rows()[row] == Row::GraphicsApi {
+            // "DirectX 12" is wider than the numbers and short words elsewhere.
+            CHOICE_W * 3 / 2
+        } else {
+            CHOICE_W.min((BAR_X - 4 - CHOICE_X - (count - 1) * CHOICE_GAP) / count)
+        };
         Some((
             CHOICE_X + i as i32 * (width + CHOICE_GAP),
             r.1 + 1,
@@ -1125,18 +1130,14 @@ mod tests {
         assert!(ABOUT.1 + ABOUT.3 <= 438);
     }
     #[test]
-    fn the_graphics_api_row_is_windows_only_and_applies_next_launch() {
+    fn the_graphics_api_row_is_windows_only_and_says_restart() {
         assert!(rows_on(true).contains(&Row::GraphicsApi));
         assert!(!rows_on(false).contains(&Row::GraphicsApi));
         assert_eq!(Row::GraphicsApi.group(), "DISPLAY");
-        assert_eq!(Row::GraphicsApi.choices(), ["Auto", "Vulkan", "DX12"]);
-        assert!(Row::GraphicsApi.description().contains("next launch"));
-        // Windows shows it; here the same model is driven through the row list
-        // the Windows build uses.
-        let mut draft = Options::default();
-        assert_eq!(draft.graphics_api, GraphicsApi::Auto);
-        draft.graphics_api = GraphicsApi::ALL[2];
-        assert_eq!(draft.graphics_api, GraphicsApi::Dx12);
+        assert_eq!(Row::GraphicsApi.choices(), ["Vulkan", "DirectX 12"]);
+        assert!(Row::GraphicsApi.description().contains("Restart the game"));
+        assert_eq!(GraphicsApi::CHOICES[1], GraphicsApi::Dx12);
+        assert_eq!(crate::graphics_api::status_note(GraphicsApi::Vulkan), None);
     }
     #[test]
     fn defaults_keep_the_graphics_api_choice() {

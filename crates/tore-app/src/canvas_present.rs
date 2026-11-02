@@ -55,7 +55,6 @@ pub(crate) struct CanvasPresenter {
 
 impl CanvasPresenter {
     pub(crate) async fn new(window: Arc<Window>) -> AppResult<Self> {
-        crate::graphics_api::setup_starting();
         crate::diagnostics::stage("first-run graphics instance and surface");
         let instance = crate::graphics_api::instance();
         let surface = {
@@ -294,12 +293,7 @@ impl CanvasPresenter {
             self.window.pre_present_notify();
         }
         frame.present();
-        // The canvas working says nothing about the game's own pipelines, so it
-        // ends this setup window without counting as a good launch. A long import
-        // must not be mistaken for GPU setup either.
-        if self.first_frame.complete() {
-            crate::graphics_api::setup_ended();
-        }
+        self.first_frame.complete();
         Ok(true)
     }
 }

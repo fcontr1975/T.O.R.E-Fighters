@@ -150,83 +150,43 @@ warning. While it is set, the About panel says so under the Frame rate row.
 
 ## Graphics API
 
-**Opinionated**, requested by John on 2026-11-02 after issue #8. The states, the
-wording and the DirectX 12 compiler flag are agent decisions.
+**Opinionated.** John asked on 2026-11-02, after issue #8, for the player to pick
+Vulkan or DirectX 12 on the import screen and in the Graphics settings. The default
+rule, the DirectX 12 compiler flag and the wording are agent decisions.
 
-Which graphics API the game asks wgpu for: **Auto**, **Vulkan** or **DX12**. Auto
-is what the game has always done, the first adapter wgpu chooses, which on Windows
-is normally Vulkan. The row sits under Display in Pref > Graphics, on Windows only,
-and says that it takes effect at next launch. Defaults leaves it alone, because it
-may be what keeps the game running. `--graphics-api auto|vulkan|dx12` chooses for
-one run and is never saved, not even by an edit on the Graphics screen, unlike the
-other graphics flags. It is saved as `graphics-api` in `graphics-v1.conf` only when
-it is not Auto, so a default file is unchanged. A value this build does not know
-falls back to Auto alone, without costing the rest of the file. Outside Windows only
-Auto exists: the flag explains that for `vulkan` and `dx12`, and a value in a copied
-file is kept but ignored with a warning.
+Windows only. The player sees two values, **Vulkan** and **DirectX 12**, and the
+game never changes the choice by itself. Linux and macOS show nothing and leave the
+choice to wgpu, as they always have.
+
+The value is saved as `graphics-api` in `graphics-v1.conf`, only once the player has
+chosen, so a default file is unchanged. Until then the game uses Vulkan when a
+Vulkan adapter exists, otherwise DirectX 12. A value this build does not know counts
+as not chosen, without costing the rest of the file.
+
+`--graphics-api vulkan|dx12` chooses for one run and is never saved, not even by an
+edit on the Graphics screen, unlike the other graphics flags. `--graphics-api auto`
+asks for the default rule for one run, ignoring the saved value. Outside Windows
+only `auto` is accepted, and the flag explains that for the other two.
+
+The player can choose in two places:
+
+- **The import screen** (the first-run [Locate Fighters Anthology](first-run-import.md)
+  screen, also reached by Pref > Re-import media) shows the choice on its title line,
+  usable before, during and after an import. It is saved at once and applies **with
+  no restart**: every route from that screen into the game builds a new renderer and
+  a new wgpu instance after it, in the same process, and each instance reads the
+  choice in effect. The screen says so when the choice changes. The screen itself
+  keeps drawing with the API it opened on.
+- **Pref > Graphics**, the Graphics API row under Display. It is saved like the other
+  rows but **does not apply live**: the running renderer keeps its API, and the
+  message says to restart the game. While the row differs from the API in use, the
+  note under it names both. A later Pref > Re-import media in the same process counts
+  as a restart, since it builds a new renderer. Defaults leaves the row alone, because
+  it may be what keeps the game running.
 
 The first-run screen, the game, and the offline preview tools all use the same
 choice, through `graphics_api::instance`. A Clippy rule rejects any other
 `wgpu::Instance::new` outside tests.
-
-### Automatic fallback
-
-On Windows with Auto, a launch that dies during GPU setup makes the next launch try
-DirectX 12. No other platform or setting does this.
-
-A **marker** is one file per process in `<data>/gpu-setup/`, holding an OS file
-lock for the life of the process, written before GPU setup and naming the API
-attempted. It is removed when setup ends well. A later launch that can take the
-lock knows the owner is gone, which is how a crash, a kill or a hang the player
-ended all count, and how a sibling game still in its own setup (running several
-is allowed) does not: its marker is locked. Markers live in the data directory, so
-an isolated `TORE_DATA_DIR` sees only its own.
-
-GPU setup here means the game renderer up to its first presented frame, plus each
-theater load, which builds more pipelines. The first-run canvas is also covered up
-to its first frame, but that removes the marker without counting as a success,
-because in issue #8 the canvas worked and the game did not. A long import is never
-inside a setup window.
-
-The remembered state is `gpu-fallback-v1.conf`, separate from the player's choice:
-
-| State | This launch | Marker | If it dies | If a game frame is presented |
-| --- | --- | --- | --- | --- |
-| none | Auto | yes | becomes trying, next launch uses DX12 | stays none |
-| trying | DX12 | yes | exhausted | dx12 |
-| dx12 | DX12 | yes | exhausted | stays dx12 |
-| exhausted | Auto, no marker | no | stays exhausted | none |
-
-So a failing machine goes Auto, then DX12, then stops: **it never alternates**. When
-DirectX 12 dies too, the next launch writes a report saying both failed, shows one
-dialog on an attended launch, keeps the previous `last-error.txt` text inside the
-report, and from then on uses the automatic choice and switches nothing, with a
-WARN each launch. A new build clears exhausted, since it may be the fix. A remembered
-dx12 survives updates, because Vulkan crashing once per update would help nobody.
-A launch that was already on DirectX 12 under Auto and dies goes straight to
-exhausted, there being nothing else to try.
-
-The first fallback launch logs a WARN saying why, and shows a brief notice on the
-main menu. A remembered dx12 logs how to retry on each launch: start once with
-`--graphics-api vulkan`, choose Vulkan in Pref > Graphics, or delete the state
-file. Any game frame presented on something other than DirectX 12 clears the state
-and any old markers, so a good Vulkan run returns the game to normal.
-
-What counts as dying during setup:
-
-- **A native crash, a kill, or a Rust panic counts.** A wgpu validation failure in
-  setup arrives as a panic, and a different API can help with those. A panic with
-  another cause costs at most one trip through the table.
-- **A clean exit and a quit do not.** The marker is removed. A quit during a DX12
-  trial leaves the state at trying, so the next launch tries again.
-- **A returned error does not count on Auto.** It already has its report and dialog,
-  and it cannot be told from an error unrelated to the GPU. The log names the flag.
-  It **does** count during a DX12 trial, or a DirectX 12 that keeps returning errors
-  would be retried forever.
-
-Explicit Vulkan or DX12 choices never fall back and write no marker. Nothing here
-runs in headless, capture, smoke test, validation, perf, scripted-input or
-diagnostic modes: they use the flag or Auto, read no state and write none.
 
 ### DirectX 12 shader compilation
 
@@ -236,27 +196,28 @@ model 5.1 when each pipeline is created. There is no disk cache, so this repeats
 every launch, and it runs on the main thread, so the window stops responding. The
 game retitles the window while it happens.
 
+Every DirectX 12 instance passes `InstanceFlags::DEBUG`, which is wgpu's one way to
+ask FXC to skip optimization. The GPU driver still optimizes what it receives. Other
+backends keep the default flags.
+
 Measured on 2026-11-02: every game shader, translated by naga 27.0.3 with wgpu's
 options and compiled by the real `d3dcompiler_47.dll` 10.0.17134.12 under Wine on a
-busy Linux machine, on a 1 MiB main-thread stack. These are CPU-bound figures from
-one machine. They are not from Windows, and no pipeline was created or drawn.
+busy Linux machine, on a 1 MiB main-thread stack. These are compile times only.
 
 | | Unique entry points | Failed | One launch | Slowest |
 | --- | --- | --- | --- | --- |
 | FXC default | 85 | 0 | about 530 s | `terrain_fragment` 342 s, `sky_fragment` 147 s |
 | Skip optimization | 86 | 0 | about 42 s | `terrain_fragment` 23 s, `sky_fragment` 9 s |
 
-Nearly nine minutes of a frozen window on each launch would look like the hang it
-is meant to cure, and a player who ends it would count as DirectX 12 failing. So the
-game passes `InstanceFlags::DEBUG` on DirectX 12 only, which is wgpu's one way to
-ask FXC to skip optimization. Turning off naga's runtime checks made no real
-difference. The GPU driver still optimizes what it receives. Whether that picture
-and frame rate hold up on real hardware has not been measured. Other backends and
-Auto keep the default flags.
+On a Windows VM with no GPU (Basic Render Driver), `--graphics-api dx12 --smoke-test`
+passed in 55 s, with the Shoreline terrain pipeline taking 24 to 38 s. With full FXC
+that pipeline had not finished after 230 s, when the run was stopped. Turning off
+naga's runtime checks made no real difference. How the picture and frame rate hold
+up on real GPUs has not been measured.
 
 DXC would be faster but is not used. It needs `dxcompiler.dll` shipped beside the
 game (tens of MiB) or wgpu's `static-dxc` feature, which pulls a prebuilt static
-library into the build. Neither is justified before the fallback has proved useful.
+library into the build.
 
 ## Anti-aliasing
 
