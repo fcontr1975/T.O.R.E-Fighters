@@ -237,8 +237,9 @@ handlers run first and never reach it, and Rust panics keep their own hook. The
 filter chains to any earlier filter and then returns `EXCEPTION_CONTINUE_SEARCH`,
 so Windows still writes its own "Application Error" entry and any dump its settings
 ask for. After device creation the game checks that a driver DLL has not replaced
-the filter; if one has, a WARN says so and the filter goes back in front, still
-chaining to the other.
+the filter; if one has, a WARN says so and the filter goes back in front. It does not
+chain to that other filter, because its DLL can unload. It chains only to the one
+present when it was installed, which belongs to the program.
 
 A crashed thread may hold the heap lock and may have almost no stack, so the
 filter only copies the facts into preallocated atomics and wakes a helper thread
@@ -251,10 +252,12 @@ stack size changes.
 
 The helper writes in order of safety: the facts that need nothing from the OS's
 loader, then the module and stack scan, which can wait on the loader lock, then
-`last-error.txt`. The filter waits at most 10 s for that. The event and dialog come
-afterwards and may allocate inside the OS. It waits a further 5 s for them, or
-120 s while a dialog is open. Whatever a blocked helper has not finished by then
-is lost, and the report so far and the Windows crash record remain.
+`last-error.txt`. The crashed thread waits at most 10 s for that. The event and dialog
+come afterwards and may allocate inside the OS. It waits a further 5 s for them, and
+the helper says when it is about to open a dialog, which extends that to 120 s. A
+second crash on another thread waits the same way, so it cannot close an open dialog.
+Whatever a blocked helper has not finished by then is lost, and the report so far and
+the Windows crash record remain.
 
 Not caught, because Windows ends the process without running any filter:
 fast-fail terminations (`__fastfail`, stack cookie failures, and some heap

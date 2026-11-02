@@ -126,7 +126,9 @@ fn open_session(directory: &Path) -> io::Result<(PathBuf, File, File)> {
             let _ = fs::remove_file(&lease_path);
             return Err(io::Error::other(error));
         }
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        // Append, because the crash reporter adds its section through its own handle,
+        // and a later line from a surviving thread must not overwrite it.
+        match OpenOptions::new().append(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file, lease)),
             Err(error) => {
                 drop(lease);
@@ -882,6 +884,26 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(guard);
         drop(logger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn log_lines_never_overwrite_what_another_handle_appended() {
+        let dir = directory();
+        let (path, mut file, lease) = open_session(&dir).unwrap();
+        file.write_all(b"before\n").unwrap();
+        // The native crash reporter writes through its own handle.
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"crash section\n")
+            .unwrap();
+        file.write_all(b"after\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "before\ncrash section\nafter\n"
+        );
+        drop((file, lease));
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

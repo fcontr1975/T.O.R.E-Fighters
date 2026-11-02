@@ -51,6 +51,12 @@ unsafe extern "system" {
     ) -> Handle;
     fn SetEvent(event: Handle) -> i32;
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        all: i32,
+        milliseconds: u32,
+    ) -> u32;
     fn CreateThread(
         attributes: *const c_void,
         stack: usize,
@@ -123,10 +129,14 @@ const INVALID_HANDLE: Handle = usize::MAX as Handle;
 /// The agent-chosen limits on how long a crash can delay Windows' own handling.
 /// Files normally take milliseconds; ten seconds covers a stalled antivirus scan.
 const REPORT_WAIT_MS: u32 = 10_000;
-/// Event logging afterwards, when no dialog is waiting for the player.
+/// Event logging afterwards, up to the dialog if there is one.
 const FINISH_WAIT_MS: u32 = 5_000;
 /// A dialog nobody answers: the game has already stopped, so give up eventually.
+/// This wait starts only once the helper is about to open the dialog, so a helper
+/// stuck before that costs [`FINISH_WAIT_MS`] and not this.
 const DIALOG_WAIT_MS: u32 = 120_000;
+/// What `WaitForMultipleObjects` returns for the second handle.
+const WAIT_OBJECT_1: u32 = 1;
 /// Reserved for the helper: its text buffers and the OS calls it makes.
 const HELPER_STACK: usize = 512 * 1024;
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
@@ -156,6 +166,7 @@ static CONFIG: AtomicPtr<Config> = AtomicPtr::new(ptr::null_mut());
 static REQUEST: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static REPORTED: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static FINISHED: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static DIALOG_OPEN: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static HELPER_THREAD: AtomicU32 = AtomicU32::new(0);
 static MAIN_THREAD: AtomicU32 = AtomicU32::new(0);
 static PREVIOUS: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
@@ -185,6 +196,7 @@ pub fn install(config: &'static Config) -> Result<(), &'static str> {
             CreateEventW(ptr::null(), 1, 0, ptr::null()),
             CreateEventW(ptr::null(), 1, 0, ptr::null()),
             CreateEventW(ptr::null(), 1, 0, ptr::null()),
+            CreateEventW(ptr::null(), 1, 0, ptr::null()),
         ]
     };
     if events.iter().any(|event| event.is_null()) {
@@ -193,6 +205,7 @@ pub fn install(config: &'static Config) -> Result<(), &'static str> {
     REQUEST.store(events[0], Ordering::Release);
     REPORTED.store(events[1], Ordering::Release);
     FINISHED.store(events[2], Ordering::Release);
+    DIALOG_OPEN.store(events[3], Ordering::Release);
     CONFIG.store(ptr::from_ref(config).cast_mut(), Ordering::Release);
     // SAFETY: no out parameters on this call.
     MAIN_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
@@ -228,22 +241,17 @@ fn remember_previous(previous: Option<Filter>) {
     );
 }
 
-/// Puts the filter back if something (a driver DLL, say) replaced it, keeping
-/// that filter next in the chain. True when it had been replaced. Before install
-/// this does nothing.
+/// Puts the filter back if something (a driver DLL, say) replaced it. True when it
+/// had been replaced. The other filter is not chained to, because its DLL can unload
+/// and leave `chain` calling unmapped code: only the one present at install is, and
+/// that belongs to the program. Before install this does nothing.
 pub fn reassert() -> bool {
     if CONFIG.load(Ordering::Acquire).is_null() {
         return false;
     }
     // SAFETY: as in `install`.
     let current = unsafe { SetUnhandledExceptionFilter(Some(filter)) };
-    match current {
-        Some(function) if function as usize == filter as *const () as usize => false,
-        other => {
-            remember_previous(other);
-            true
-        }
-    }
+    !matches!(current, Some(function) if function as usize == filter as *const () as usize)
 }
 
 /// The filter. It must stay small: after a stack overflow only the stack that
@@ -258,9 +266,9 @@ unsafe extern "system" fn filter(pointers: *mut ExceptionPointers) -> i32 {
     if CRASHING.swap(true, Ordering::AcqRel) {
         if CRASH_THREAD.load(Ordering::Acquire) != thread {
             // A second crash on another thread: the first owns the report. Hold
-            // this thread until it is done so the process does not die under it.
-            // SAFETY: the event handle stays open for the process lifetime.
-            unsafe { WaitForSingleObject(FINISHED.load(Ordering::Acquire), REPORT_WAIT_MS) };
+            // this thread until it is done so the process does not die under it, which
+            // would close an open dialog or cut the event short.
+            wait_for_helper();
         }
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -283,20 +291,28 @@ unsafe extern "system" fn filter(pointers: *mut ExceptionPointers) -> i32 {
             }
         }
     }
-    let config = CONFIG.load(Ordering::Acquire);
-    // SAFETY: event handles stay open for the process lifetime; `config` is
-    // leaked at install and never null once the filter is installed.
-    unsafe {
-        SetEvent(REQUEST.load(Ordering::Acquire));
-        WaitForSingleObject(REPORTED.load(Ordering::Acquire), REPORT_WAIT_MS);
-        let finish = if (*config).dialog {
-            DIALOG_WAIT_MS
-        } else {
-            FINISH_WAIT_MS
-        };
-        WaitForSingleObject(FINISHED.load(Ordering::Acquire), finish);
-    }
+    // SAFETY: the event handle stays open for the process lifetime.
+    unsafe { SetEvent(REQUEST.load(Ordering::Acquire)) };
+    wait_for_helper();
     chain(pointers)
+}
+
+/// Waits for the helper, with bounds: the report, then the slower work after it, and
+/// the long wait only once the helper has said a dialog is opening. A helper stuck on
+/// a lock the crashed thread holds costs the short bounds. No heap, no locks, and
+/// little stack: this runs on the crashed thread.
+fn wait_for_helper() {
+    let finished = FINISHED.load(Ordering::Acquire);
+    let handles = [finished, DIALOG_OPEN.load(Ordering::Acquire)];
+    // SAFETY: the event handles stay open for the process lifetime, and the array
+    // outlives the synchronous wait. `all` is false: either event ends the wait.
+    unsafe {
+        WaitForSingleObject(REPORTED.load(Ordering::Acquire), REPORT_WAIT_MS);
+        let woken = WaitForMultipleObjects(2, handles.as_ptr(), 0, FINISH_WAIT_MS);
+        if woken == WAIT_OBJECT_1 {
+            WaitForSingleObject(finished, DIALOG_WAIT_MS);
+        }
+    }
 }
 
 /// Lets a filter installed before ours run, as it would have without us. The
@@ -645,6 +661,8 @@ fn report() {
         report_location.as_str(),
     );
     if config.dialog {
+        // SAFETY: the event handle stays open for the process lifetime.
+        unsafe { SetEvent(DIALOG_OPEN.load(Ordering::Acquire)) };
         show_dialog(
             stage,
             step,
