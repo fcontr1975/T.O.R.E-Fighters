@@ -84,6 +84,7 @@ impl CanvasPresenter {
                 .await?
         };
         crate::diagnostics::stage_done();
+        crate::diagnostics::reassert_crash_reporter();
         device.set_device_lost_callback(|reason, message| {
             if reason != wgpu::DeviceLostReason::Destroyed {
                 log::error!("first-run graphics device lost: {reason:?}: {message}");

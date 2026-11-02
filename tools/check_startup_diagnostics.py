@@ -2,7 +2,10 @@
 """Exercise media-free diagnostics on a real staged or unpacked executable.
 
 Uses subprocess waiting on all platforms, including the Windows GUI subsystem.
-This does not prove desktop shortcut, Finder, dialogs, GPU or OS crash handling.
+On Windows it also crashes the executable on purpose (an access violation and a
+stack overflow) and checks the native crash report. Elsewhere those modes must
+fail with a message saying they are Windows only. This does not prove desktop
+shortcut, Finder, dialogs, GPU or the Windows Event Viewer entry.
 """
 import argparse
 import os
@@ -11,12 +14,21 @@ import subprocess
 import tempfile
 
 
+# The deliberate native crashes: the Windows exit status and the name in the report.
+NATIVE_CRASHES = {
+    "native-crash": (0xC0000005, "EXCEPTION_ACCESS_VIOLATION"),
+    "stack-overflow": (0xC00000FD, "EXCEPTION_STACK_OVERFLOW"),
+}
+
+
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
 
 
-def check(binary, directory):
+def check(binary, directory, windows=None):
+    if windows is None:
+        windows = os.name == "nt"
     directory.mkdir(parents=True, exist_ok=True)
     profile = directory / "isolated profile with spaces"
     logs = directory / "logs with spaces"
@@ -27,12 +39,15 @@ def check(binary, directory):
     env.pop("RUST_BACKTRACE", None)
     last_error = profile / "last-error.txt"
 
-    def launch(mode):
+    def launch(mode, expected_status=None):
         arg = "--diagnostics-self-test" + (f"={mode}" if mode else "")
         result = subprocess.run([str(binary), arg], cwd=directory, env=env,
                                 capture_output=True, text=True, errors="replace", timeout=90)
         require((result.returncode == 0) == (not mode),
                 f"{arg}: unexpected exit {result.returncode}\n{result.stdout}\n{result.stderr}")
+        if expected_status is not None:
+            require(result.returncode & 0xFFFFFFFF == expected_status,
+                    f"{arg}: exit {result.returncode:#x}, wanted {expected_status:#x}\n{result.stderr}")
 
     launch("")
     require(not last_error.exists(), "successful fresh launch wrote last-error.txt")
@@ -56,6 +71,25 @@ def check(binary, directory):
         launch("")
         require(last_error.read_text(encoding="utf-8") == report,
                 "successful launch replaced or cleared previous failure")
+    for mode, (status, name) in NATIVE_CRASHES.items():
+        before = {p for p in logs.iterdir() if p.is_file()}
+        last_error.unlink(missing_ok=True)
+        launch(mode, status if windows else None)
+        require(last_error.is_file(), f"{mode}: missing last-error.txt")
+        report = last_error.read_text(encoding="utf-8")
+        if not windows:
+            require("only on windows" in report.lower(), f"{mode}: no Windows-only message: {report}")
+            continue
+        for wanted in (name, "Native crash", "deliberate", "Faulting address", "Faulting module",
+                       binary.name, "Thread: main", "Last GPU step", str(logs)):
+            require(wanted.lower() in report.lower(), f"{mode}: report missing {wanted}: {report}")
+        new_files = [p for p in logs.iterdir() if p.is_file() and p not in before]
+        fatal = [p for p in new_files if p.name.endswith(".fatal.txt")]
+        require(fatal, f"{mode}: no fatal report file")
+        require(name in fatal[0].read_text(encoding="utf-8"), f"{mode}: fatal report missing {name}")
+        launch("")
+        require(last_error.read_text(encoding="utf-8") == report,
+                "successful launch replaced or cleared previous crash report")
     print(f"Startup diagnostics passed: {binary}")
 
 

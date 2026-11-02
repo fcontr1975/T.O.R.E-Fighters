@@ -1,5 +1,9 @@
 //! Direct Win32 ABI. Handles and UTF-16 buffers never escape this module.
+use crate::CrashConfig;
+use crate::windows_crash::{self, Config, ReportPath};
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr;
 
 #[link(name = "user32")]
@@ -41,6 +45,34 @@ fn wide(text: &str) -> Vec<u16> {
     }
     out.push(0);
     out
+}
+
+/// Copies a path into memory the crash reporter can read for the process
+/// lifetime, because a crashed process must not allocate.
+fn leaked_path(path: &Path) -> ReportPath {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    ReportPath {
+        wide: Box::leak(wide.into_boxed_slice()),
+        text: Box::leak(path.display().to_string().into_boxed_str()),
+    }
+}
+
+pub fn install_crash_reporter(config: CrashConfig) -> Result<(), String> {
+    let last_error_temporary = config.last_error.as_ref().map(|path| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".native-{}.tmp", std::process::id()));
+        leaked_path(Path::new(&name))
+    });
+    let leaked = Box::leak(Box::new(Config {
+        identity: Box::leak(config.identity.into_boxed_str()),
+        fatal: config.fatal_path.as_deref().map(leaked_path),
+        session_log: config.session_log.as_deref().map(leaked_path),
+        last_error: config.last_error.as_deref().map(leaked_path),
+        last_error_temporary,
+        dialog: config.dialog,
+    }));
+    windows_crash::install(leaked).map_err(str::to_owned)
 }
 
 pub fn show_error(title: &str, message: &str) -> Result<(), String> {

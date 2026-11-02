@@ -448,6 +448,42 @@ pub(crate) fn gpu_step_finished() {
     GPU_STEP_STARTED.store(0, Ordering::Relaxed);
 }
 
+/// Windows: reports native crashes from now on. Other platforms do nothing.
+/// Separate from [`init`] because the dialog choice needs the arguments.
+pub fn install_native_crash_reporter(dialog: bool) {
+    let Some(logger) = LOGGER.get() else { return };
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    let config = tore_diagnostics_native::CrashConfig {
+        identity: format!(
+            "T.O.R.E-Fighters {} commit={} target={}",
+            crate::version::version(),
+            crate::version::commit(),
+            crate::version::target()
+        ),
+        fatal_path: logger.fatal_path.clone(),
+        session_log: logger.path.clone(),
+        last_error: DATA_DIR.get().map(|path| path.join("last-error.txt")),
+        dialog,
+    };
+    match tore_diagnostics_native::install_crash_reporter(config) {
+        Ok(()) => logger.write(log::Level::Info, "Native crash reporting installed"),
+        Err(error) => logger.write(
+            log::Level::Warn,
+            &format!("Native crash reporting unavailable: {error}"),
+        ),
+    }
+}
+
+/// A graphics driver DLL may install its own crash filter when it loads. Put ours
+/// back in front (it still chains to that one) and record that it happened.
+pub(crate) fn reassert_crash_reporter() {
+    if tore_diagnostics_native::reassert_crash_reporter() {
+        log::warn!("Another component replaced the native crash filter; it was put back in front");
+    }
+}
+
 pub fn init() {
     if LOGGER.get().is_some() {
         return;
