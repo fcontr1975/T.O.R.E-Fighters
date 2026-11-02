@@ -205,7 +205,7 @@ impl Row {
                 "V-sync draws one frame per display refresh. 60, 100 and 200 cap the rate without waiting for the display: less delay, more power."
             }
             Row::GraphicsApi => {
-                "Which graphics system the game uses. Try the other one if the game crashes or will not start. Restart the game to apply a change."
+                "Try the other one if the game crashes or will not start. Restart the game to apply a change."
             }
             Row::FrameRate => {
                 "Shows frame rate, CPU/GPU milliseconds and the recent low. Keeps rendering while menus or flight are paused."
