@@ -703,6 +703,7 @@ fn gpu_setup_hint(logger: &Logger) -> Option<&'static str> {
     tore_diagnostics_native::crash_report::gpu_setup_hint(
         logger.stage_name(),
         crash_context::GPU_STEP.read(&mut text),
+        crash_context::MARKER_ARMED.load(Ordering::Acquire),
     )
 }
 fn display(summary: &str, location: &str, interactive: bool) {

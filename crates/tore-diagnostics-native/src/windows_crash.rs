@@ -546,6 +546,7 @@ fn report() {
     let stage = context::STAGE.read(&mut stage);
     let step = context::GPU_STEP.read(&mut step);
     let adapter = context::ADAPTER.read(&mut adapter);
+    let marker_armed = context::MARKER_ARMED.load(Ordering::Acquire);
 
     let mut text = Text::<16384>::new();
     let _ = crash_report::write_summary(
@@ -557,6 +558,7 @@ fn report() {
             stage,
             step,
             adapter,
+            marker_armed,
             exception,
             thread,
             main_thread: thread == MAIN_THREAD.load(Ordering::Acquire),
@@ -646,6 +648,7 @@ fn report() {
         show_dialog(
             stage,
             step,
+            marker_armed,
             exception,
             module_line,
             report_location.as_str(),
@@ -767,6 +770,7 @@ fn write_event(
 fn show_dialog(
     stage: &str,
     step: &str,
+    marker_armed: bool,
     exception: Exception,
     module_line: &str,
     report_location: &str,
@@ -780,7 +784,7 @@ fn show_dialog(
     let _ = crash_report::write_cause(&mut text, exception);
     let _ = write!(text, "{module_line}");
     let _ = writeln!(text, "Last GPU step: {step}");
-    if let Some(hint) = crash_report::gpu_setup_hint(stage, step) {
+    if let Some(hint) = crash_report::gpu_setup_hint(stage, step, marker_armed) {
         let _ = writeln!(text, "\n{hint}");
     }
     let _ = write!(text, "\n{report_location}");

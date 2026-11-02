@@ -5,7 +5,7 @@
 //! mix of two strings, which a crash report tolerates; it can never see invalid
 //! memory or block. Text is reduced to printable ASCII when stored, so a torn
 //! read is still valid UTF-8.
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 /// Long enough for a GPU step line or an adapter, driver and backend line.
 pub const CELL_BYTES: usize = 240;
@@ -58,6 +58,9 @@ pub static STAGE: TextCell = TextCell::new();
 pub static GPU_STEP: TextCell = TextCell::new();
 /// The selected adapter, driver and backend once known.
 pub static ADAPTER: TextCell = TextCell::new();
+/// True while this process holds a GPU setup marker, so a report can promise what
+/// the next launch will do only when it will do it.
+pub static MARKER_ARMED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {

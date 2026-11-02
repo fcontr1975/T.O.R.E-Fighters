@@ -113,6 +113,7 @@ pub struct Facts<'a> {
     pub stage: &'a str,
     pub step: &'a str,
     pub adapter: &'a str,
+    pub marker_armed: bool,
     pub exception: Exception,
     pub thread: u32,
     pub main_thread: bool,
@@ -121,12 +122,20 @@ pub struct Facts<'a> {
 /// The line a report adds when the failure happened during GPU setup: the player
 /// can do something about those. The startup stages that touch the GPU name
 /// graphics or the first frame, and a step still running covers the pipelines
-/// built after startup. `step` is the last GPU step as `gpu_setup` records it.
-pub fn gpu_setup_hint(stage: &str, step: &str) -> Option<&'static str> {
+/// built after startup. `step` is the last GPU step as `gpu_setup` records it. Only
+/// a marker held at the moment of failure makes the next launch ask, so only then
+/// does the line say it will.
+pub fn gpu_setup_hint(stage: &str, step: &str, marker_armed: bool) -> Option<&'static str> {
+    let hint = if marker_armed {
+        HINT_NEXT_LAUNCH
+    } else {
+        HINT_MANUAL
+    };
     (stage.contains("graphics") || stage.contains("first frame") || step.starts_with("in "))
-        .then_some(GPU_SETUP_HINT)
+        .then_some(hint)
 }
-const GPU_SETUP_HINT: &str = "The graphics API can be changed: the next launch offers it, or start with --graphics-api vulkan or dx12.";
+const HINT_NEXT_LAUNCH: &str = "The graphics API can be changed: the next launch offers it, or start with --graphics-api vulkan or dx12.";
+const HINT_MANUAL: &str = "The graphics API can be changed. Change it in Pref > Graphics, or start with --graphics-api vulkan or dx12.";
 
 fn or_none(text: &str) -> &str {
     if text.is_empty() { "none" } else { text }
@@ -156,7 +165,7 @@ pub fn write_summary(out: &mut impl Write, facts: &Facts<'_>) -> fmt::Result {
     )?;
     writeln!(out, "Last GPU step: {}", or_none(facts.step))?;
     writeln!(out, "Graphics adapter: {}", or_none(facts.adapter))?;
-    if let Some(hint) = gpu_setup_hint(facts.stage, facts.step) {
+    if let Some(hint) = gpu_setup_hint(facts.stage, facts.step, facts.marker_armed) {
         writeln!(out, "{hint}")?;
     }
     Ok(())
@@ -205,6 +214,7 @@ mod tests {
                 stage: "game graphics resources and pipelines",
                 step: "in render pipeline 'Menu'",
                 adapter: "AMD Radeon RX 7600 backend=Vulkan",
+                marker_armed: true,
                 exception: Exception {
                     code: 0xC000_0005,
                     address: 0x7ff8_1000,
@@ -241,12 +251,12 @@ mod tests {
             "game first frame presentation",
             "aircraft graphics preparation",
         ] {
-            assert!(gpu_setup_hint(stage, "").is_some(), "{stage}");
+            assert!(gpu_setup_hint(stage, "", false).is_some(), "{stage}");
         }
         // A pipeline built after startup has no stage, but its step is running.
-        assert!(gpu_setup_hint("", "in render pipeline 'Menu'").is_some());
+        assert!(gpu_setup_hint("", "in render pipeline 'Menu'", false).is_some());
         // A step that returned, or the self-test's note, is not a GPU failure.
-        assert!(gpu_setup_hint("", "after render pipeline 'Menu' returned").is_none());
+        assert!(gpu_setup_hint("", "after render pipeline 'Menu' returned", true).is_none());
         for stage in [
             "diagnostics self-test: deliberate native crash",
             "asset loading or import",
@@ -254,10 +264,24 @@ mod tests {
             "",
         ] {
             assert!(
-                gpu_setup_hint(stage, "deliberate self-test, no GPU step").is_none(),
+                gpu_setup_hint(stage, "deliberate self-test, no GPU step", true).is_none(),
                 "{stage}"
             );
         }
+    }
+
+    #[test]
+    fn only_a_held_marker_promises_the_next_launch() {
+        let stage = "game graphics resources and pipelines";
+        let armed = gpu_setup_hint(stage, "", true).unwrap();
+        assert!(armed.contains("the next launch offers it"), "{armed}");
+        assert!(armed.contains("--graphics-api vulkan or dx12"), "{armed}");
+        // A pipeline built during a theater load has no marker, and the player has
+        // already reached the menu.
+        let manual = gpu_setup_hint("", "in render pipeline 'Vegetation'", false).unwrap();
+        assert!(!manual.contains("next launch"), "{manual}");
+        assert!(manual.contains("Pref > Graphics"), "{manual}");
+        assert!(manual.contains("--graphics-api vulkan or dx12"), "{manual}");
     }
 
     #[test]
@@ -272,6 +296,7 @@ mod tests {
                 stage: "game graphics resources and pipelines",
                 step: "in render pipeline 'Menu'",
                 adapter: "",
+                marker_armed: true,
                 exception: Exception::default(),
                 thread: 1,
                 main_thread: true,
@@ -293,6 +318,7 @@ mod tests {
                 stage: "",
                 step: "",
                 adapter: "",
+                marker_armed: false,
                 exception: Exception {
                     code: 0xC000_00FD,
                     ..Exception::default()

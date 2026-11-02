@@ -223,8 +223,10 @@ top of the fatal file's usual limit. The report states:
 - the faulting module's path and the offset inside it;
 - the active stage, the last GPU step and whether it had returned, and the adapter;
 - when the failure happened during GPU setup, one line saying the graphics API can be
-  changed. This line is also in the dialog, and in fatal reports of returned errors
-  and panics on Windows;
+  changed. It says the next launch offers the choice only when this process held a
+  [setup marker](graphics-options.md#when-a-launch-did-not-finish-graphics-setup) at
+  that moment, and otherwise points to Pref > Graphics and `--graphics-api`. This line
+  is also in the dialog, and in fatal reports of returned errors and panics on Windows;
 - the thread: `main` or another, its OS ID, and its name in the fatal report;
 - code addresses found on the crashed stack as module and offset. These are
   candidates and not a verified call chain: a stack also holds stale values.
