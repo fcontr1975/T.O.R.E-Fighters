@@ -117,8 +117,9 @@ from the Linux desktop wakes it over the network).
 
 To leave the Mac alone while someone is working on it, start a run with
 `-f skip_macos=true`, for example `gh workflow run ci.yml --ref BRANCH -f skip_macos=true`.
-`ci.yml`, `network.yml` and `release.yml` all take it. Tag runs always include
-the Macs, and a run that skips them never publishes a release.
+`ci.yml`, `network.yml` and `release.yml` all take it. A tag push always includes
+the Macs. A dispatch on a tag can skip them, but a run that skips them never publishes
+a release.
 
 ## Upkeep
 

@@ -232,7 +232,9 @@ What does not:
 
 The first-run screen, the game, and the offline preview tools all use the same
 choice, through `graphics_api::instance`. A Clippy rule rejects any other
-`wgpu::Instance::new` outside tests.
+`wgpu::Instance::new` outside tests. The offline tools that return before the launch
+reads its options (`--reel-render`, for example) use the default rule and ignore the
+saved value.
 
 ### DirectX 12 shader compilation
 

@@ -13579,8 +13579,10 @@ Weather: --weather-condition 0..5 selects one of the six source choices (clear, 
     // window share the choice for the rest of the session.
     let preference = saved_fullscreen();
     // Before anything can open a window, because the first-run screen and the
-    // game must use the same API. Runs that ignore saved choices elsewhere
-    // (`preferences_enabled`, below) ignore this one too.
+    // game must use the same API. Runs that ignore saved choices elsewhere ignore
+    // this one too. This is `preferences_enabled`, below, which is computed too late
+    // to use: its `!animation_capture` adds nothing here, since an animation capture
+    // needs `capture_terrain`.
     let saved_choices = !smoke_test
         && capture_terrain.is_none()
         && std::env::var_os("TORE_PERF_FRAMES").is_none()
