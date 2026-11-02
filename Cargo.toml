@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/tore-app", "crates/tore-formats", "crates/tore-import", "crates/tore-extract", "crates/tore-sim", "crates/tore-input", "crates/tore-input-native", "crates/tore-diagnostics-native", "crates/tore-realtime-native", "crates/tore-replay", "crates/tore-world", "crates/tore-codec", "crates/tore-net", "crates/tore-session", "crates/tore-server", "crates/tore-master", "crates/tore-workers"]
 resolver = "3"
+exclude = ["crates/vendor/naga"]
+
+# naga 27.0.3 with one fix: see crates/vendor/naga/PATCHED.md.
+[patch.crates-io]
+naga = { path = "crates/vendor/naga" }
 
 [workspace.package]
 edition = "2024"
