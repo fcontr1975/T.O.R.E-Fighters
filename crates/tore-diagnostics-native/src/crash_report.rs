@@ -126,7 +126,7 @@ pub fn gpu_setup_hint(stage: &str, step: &str) -> Option<&'static str> {
     (stage.contains("graphics") || stage.contains("first frame") || step.starts_with("in "))
         .then_some(GPU_SETUP_HINT)
 }
-const GPU_SETUP_HINT: &str = "The graphics API can be changed: the next launch offers it, or start with --graphics-api dx12.";
+const GPU_SETUP_HINT: &str = "The graphics API can be changed: the next launch offers it, or start with --graphics-api vulkan or dx12.";
 
 fn or_none(text: &str) -> &str {
     if text.is_empty() { "none" } else { text }
@@ -278,7 +278,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(text.as_str().contains("--graphics-api dx12"));
+        assert!(text.as_str().contains("--graphics-api vulkan or dx12"));
     }
 
     #[test]

@@ -1024,7 +1024,7 @@ impl Editor {
             MUTED,
             &fit(
                 font,
-                "These are optional presentation choices. Changes are used and saved as you make them.",
+                "These are optional presentation choices. Most changes are used and saved as you make them.",
                 width,
             ),
             (panel.0 + 8, panel.1 + 76),
