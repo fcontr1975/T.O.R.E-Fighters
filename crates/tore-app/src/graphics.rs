@@ -301,7 +301,7 @@ impl Grass {
 /// Which graphics API the game asks for. Opinionated, requested by John on
 /// 2026-11-02 after issue #8. A Windows player sees Vulkan and DirectX 12. Auto is
 /// not offered: it means nothing is saved yet, and `crate::graphics_api` then uses
-/// Vulkan when a Vulkan adapter exists, otherwise DirectX 12. Elsewhere only Auto
+/// Vulkan when a hardware Vulkan adapter exists, otherwise DirectX 12. Elsewhere only Auto
 /// exists, which leaves the choice to wgpu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GraphicsApi {

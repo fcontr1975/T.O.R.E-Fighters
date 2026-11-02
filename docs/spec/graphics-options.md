@@ -160,7 +160,8 @@ choice to wgpu, as they always have.
 
 The value is saved as `graphics-api` in `graphics-v1.conf`, only once the player has
 chosen, so a default file is unchanged. Until then the game uses Vulkan when a
-Vulkan adapter exists, otherwise DirectX 12. A value this build does not know counts
+hardware Vulkan adapter exists, otherwise DirectX 12. A software Vulkan driver does not
+count, because it would win over a hardware DirectX 12 adapter and draw on the CPU. A value this build does not know counts
 as not chosen, without costing the rest of the file.
 
 `--graphics-api vulkan|dx12` chooses for one run and is never saved, not even by an

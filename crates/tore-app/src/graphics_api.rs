@@ -52,8 +52,8 @@ pub(crate) fn choice_without_probe(
 }
 
 /// The API for this process. A flag beats the saved value, and with neither (or
-/// `--graphics-api auto`) it is Vulkan when a Vulkan adapter exists, otherwise
-/// DirectX 12. `vulkan_available` runs only when that default is needed.
+/// `--graphics-api auto`) it is Vulkan when a hardware Vulkan adapter exists,
+/// otherwise DirectX 12. `vulkan_available` runs only when that default is needed.
 pub(crate) fn resolve(
     platform: Platform,
     flag: Option<GraphicsApi>,
@@ -392,15 +392,26 @@ pub(crate) fn select(
     });
 }
 
-/// Whether a Vulkan adapter exists. Creating the instance and listing adapters is
-/// what wgpu does for any launch, and it does not create a device.
+/// Whether these adapter types make Vulkan the default. A software Vulkan driver
+/// does not: it would win over a hardware DirectX 12 adapter and draw on the CPU.
+pub(crate) fn hardware_adapter(types: impl IntoIterator<Item = wgpu::DeviceType>) -> bool {
+    types
+        .into_iter()
+        .any(|device_type| device_type != wgpu::DeviceType::Cpu)
+}
+
+/// Whether a hardware Vulkan adapter exists. Creating the instance and listing
+/// adapters is what wgpu does for any launch, and it does not create a device.
 fn vulkan_available() -> bool {
     let _step = crate::gpu_setup::begin("adapter enumeration", "Vulkan");
     #[allow(clippy::disallowed_methods)]
     let instance = wgpu::Instance::new(&descriptor(Choice::Vulkan));
-    !instance
-        .enumerate_adapters(wgpu::Backends::VULKAN)
-        .is_empty()
+    hardware_adapter(
+        instance
+            .enumerate_adapters(wgpu::Backends::VULKAN)
+            .iter()
+            .map(|adapter| adapter.get_info().device_type),
+    )
 }
 
 fn current() -> Choice {
@@ -653,6 +664,18 @@ mod tests {
     fn nothing_saved_means_vulkan_when_it_exists_and_dx12_otherwise() {
         assert_eq!(on_windows(None, Auto, true), Choice::Vulkan);
         assert_eq!(on_windows(None, Auto, false), Choice::Dx12);
+    }
+
+    #[test]
+    fn software_vulkan_alone_does_not_count_as_having_vulkan() {
+        use wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu, Other, VirtualGpu};
+        assert!(!hardware_adapter([]));
+        assert!(!hardware_adapter([Cpu]));
+        assert!(!hardware_adapter([Cpu, Cpu]));
+        for hardware in [DiscreteGpu, IntegratedGpu, VirtualGpu, Other] {
+            assert!(hardware_adapter([hardware]), "{hardware:?}");
+            assert!(hardware_adapter([Cpu, hardware]), "{hardware:?}");
+        }
     }
 
     #[test]
