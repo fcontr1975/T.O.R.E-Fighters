@@ -130,6 +130,7 @@ pub(crate) fn note_adapter(info: &wgpu::AdapterInfo) {
     );
     tore_diagnostics_native::crash_context::ADAPTER.set(&line);
     crate::diagnostics::breadcrumb(&format!("GPU setup: selected {line}"));
+    crate::graphics_api::adapter_selected(info.backend);
 }
 
 #[cfg(test)]

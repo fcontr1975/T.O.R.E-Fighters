@@ -9,7 +9,8 @@
 //! quality on 2026-10-20 (John asked for the setting; its levels and default
 //! are agent choices). John requested separate shadow distance following
 //! trees on 2026-10-21; its fixed steps are agent choices. The other values
-//! and defaults are agent choices. They are saved in their own small file, `graphics-v1.conf`,
+//! and defaults are agent choices. John requested the graphics API choice on
+//! 2026-11-02. They are saved in their own small file, `graphics-v1.conf`,
 //! beside the preferences.
 use std::path::Path;
 
@@ -297,6 +298,64 @@ impl Grass {
     }
 }
 
+/// Which graphics API the game asks for. Opinionated, requested by John on
+/// 2026-11-02 after issue #8: Auto is what the game always did, the first adapter
+/// wgpu chooses, plus the automatic fallback in `crate::graphics_api`. Vulkan and
+/// DirectX 12 are explicit choices for Windows; elsewhere only Auto is offered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphicsApi {
+    #[default]
+    Auto,
+    Vulkan,
+    Dx12,
+}
+impl GraphicsApi {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Vulkan, Self::Dx12];
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vulkan => "vulkan",
+            Self::Dx12 => "dx12",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Vulkan => "Vulkan",
+            Self::Dx12 => "DX12",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.key() == text)
+    }
+    /// A `--graphics-api` value, on this platform.
+    pub fn from_flag(value: &str) -> Result<Self, String> {
+        Self::from_flag_on(value, cfg!(target_os = "windows"))
+    }
+    fn from_flag_on(value: &str, windows: bool) -> Result<Self, String> {
+        match Self::parse(value) {
+            None => Err("--graphics-api needs auto, vulkan or dx12".into()),
+            Some(Self::Auto) => Ok(Self::Auto),
+            Some(api) if windows => Ok(api),
+            Some(api) => Err(format!(
+                "--graphics-api {} is available only on Windows; on this platform the game uses auto",
+                api.key()
+            )),
+        }
+    }
+    /// The last `--graphics-api` in `flags`, if any. It lasts one run: it stays
+    /// out of [`Options`] so a Graphics screen edit cannot save it by accident.
+    pub fn flag(flags: &[(String, String)]) -> Result<Option<Self>, String> {
+        let mut chosen = None;
+        for (flag, value) in flags {
+            if flag == "--graphics-api" {
+                chosen = Some(Self::from_flag(value)?);
+            }
+        }
+        Ok(chosen)
+    }
+}
+
 /// How often the window is drawn. V-sync draws one frame per display refresh,
 /// waiting for the display; the numbers cap the rate with a timer and present
 /// without waiting. John chose these steps and the V-sync default on
@@ -510,6 +569,9 @@ pub struct Options {
     pub shadow_quality: ShadowQuality,
     /// Shadow reach, following trees by default.
     pub shadow_distance: ShadowDistance,
+    /// The graphics API for the next launch. Only Windows offers anything but
+    /// Auto; a file carried from Windows keeps its value elsewhere and is ignored.
+    pub graphics_api: GraphicsApi,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -533,6 +595,7 @@ impl Default for Options {
             frame_limit: FrameLimit::default(),
             shadow_quality: ShadowQuality::default(),
             shadow_distance: ShadowDistance::default(),
+            graphics_api: GraphicsApi::default(),
         }
     }
 }
@@ -561,6 +624,7 @@ impl Options {
             frame_limit: FrameLimit::default(),
             shadow_quality: ShadowQuality::default(),
             shadow_distance: ShadowDistance::default(),
+            graphics_api: GraphicsApi::default(),
         }
     }
     pub fn scale(&self) -> f32 {
@@ -633,6 +697,9 @@ impl Options {
         if self.shadow_quality != ShadowQuality::default() {
             text += &format!("shadows {}\n", self.shadow_quality.key());
         }
+        if self.graphics_api != GraphicsApi::default() {
+            text += &format!("graphics-api {}\n", self.graphics_api.key());
+        }
         text
     }
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -666,6 +733,7 @@ impl Options {
             "frame-limit",
             "shadows",
             "shadow-distance",
+            "graphics-api",
         ]
         .iter()
         .filter(|k| values.contains_key(*k))
@@ -757,6 +825,13 @@ impl Options {
                 None => ShadowQuality::default(),
                 Some(v) => ShadowQuality::parse(v).ok_or("invalid shadows")?,
             },
+            // Unlike the visual settings, a value this build does not know falls
+            // back alone. Rejecting it would throw away every other setting in a
+            // file written by a newer build, and this one matters only at launch.
+            graphics_api: values
+                .get("graphics-api")
+                .and_then(|v| GraphicsApi::parse(v))
+                .unwrap_or_default(),
         })
     }
     /// Command-line overrides for one run; they are not saved by themselves.
@@ -768,7 +843,17 @@ impl Options {
         };
         for (flag, value) in flags {
             match flag.as_str() {
-                "--original-graphics" => *self = Self::original(),
+                "--original-graphics" => {
+                    *self = Self {
+                        graphics_api: self.graphics_api,
+                        ..Self::original()
+                    }
+                }
+                // Applied by `crate::graphics_api` for this run only; see
+                // `GraphicsApi::flag`.
+                "--graphics-api" => {
+                    GraphicsApi::from_flag(value)?;
+                }
                 "--anti-aliasing" => {
                     self.anti_aliasing = AntiAliasing::parse(value)
                         .ok_or("--anti-aliasing needs off, 2x, 4x or 8x")?
@@ -973,6 +1058,7 @@ mod tests {
             frame_limit: FrameLimit::Fps100,
             shadow_quality: ShadowQuality::Low,
             shadow_distance: ShadowDistance::Nm6,
+            graphics_api: GraphicsApi::Dx12,
         };
         assert_eq!(Options::parse(&options.text()).unwrap(), options);
         // The default building and vegetation distances are not written, and
@@ -1124,6 +1210,72 @@ mod tests {
         options.apply_flags(&flag("ultra")).unwrap();
         assert_eq!(options.shadow_quality, ShadowQuality::Ultra);
         assert!(options.apply_flags(&flag("on")).is_err());
+    }
+    #[test]
+    fn graphics_api_defaults_to_auto_and_files_stay_compatible() {
+        assert_eq!(Options::default().graphics_api, GraphicsApi::Auto);
+        // A default file does not name it, so an older build still reads it, and
+        // a file from an older build reads as Auto.
+        let old = "tore-graphics 1\nanti-aliasing 4x\nrender-scale 100\nspotting-aid subtle\nterrain-filtering true\n";
+        assert!(!Options::default().text().contains("graphics-api"));
+        assert_eq!(Options::parse(old).unwrap().graphics_api, GraphicsApi::Auto);
+        for api in GraphicsApi::ALL {
+            let options = Options {
+                graphics_api: api,
+                ..Options::default()
+            };
+            assert_eq!(Options::parse(&options.text()).unwrap(), options);
+            assert_eq!(GraphicsApi::parse(api.key()), Some(api));
+        }
+        // A value from a newer build costs only this one setting.
+        let future = Options::parse(&format!("{old}render-scale-note\n"));
+        assert!(future.is_err(), "the file format itself stays strict");
+        let future = Options::parse(&format!("{old}graphics-api metal\n")).unwrap();
+        assert_eq!(future.graphics_api, GraphicsApi::Auto);
+        assert_eq!(future.anti_aliasing, AntiAliasing::X4);
+        assert!(Options::parse(&format!("{old}graphics-api dx12\ngraphics-api auto\n")).is_err());
+    }
+    #[test]
+    fn graphics_api_flag_lasts_one_run_and_explains_itself_off_windows() {
+        let flag = |v: &str| vec![("--graphics-api".to_owned(), v.to_owned())];
+        assert_eq!(GraphicsApi::flag(&[]), Ok(None));
+        assert_eq!(
+            GraphicsApi::flag(&flag("auto")),
+            Ok(Some(GraphicsApi::Auto))
+        );
+        for windows in [false, true] {
+            assert!(GraphicsApi::from_flag_on("opengl", windows).is_err());
+            assert_eq!(
+                GraphicsApi::from_flag_on("auto", windows),
+                Ok(GraphicsApi::Auto)
+            );
+        }
+        assert_eq!(
+            GraphicsApi::from_flag_on("dx12", true),
+            Ok(GraphicsApi::Dx12)
+        );
+        assert_eq!(
+            GraphicsApi::from_flag_on("vulkan", true),
+            Ok(GraphicsApi::Vulkan)
+        );
+        for api in ["dx12", "vulkan"] {
+            let error = GraphicsApi::from_flag_on(api, false).unwrap_err();
+            assert!(
+                error.contains(api) && error.contains("only on Windows"),
+                "{error}"
+            );
+        }
+        // Accepted by the shared flag path, but it changes nothing that is saved.
+        let mut options = Options::default();
+        options.apply_flags(&flag("auto")).unwrap();
+        assert_eq!(options, Options::default());
+        assert!(options.apply_flags(&flag("opengl")).is_err());
+        // --original-graphics resets the picture, not the saved API choice.
+        options.graphics_api = GraphicsApi::Vulkan;
+        options
+            .apply_flags(&[("--original-graphics".to_owned(), String::new())])
+            .unwrap();
+        assert_eq!(options.graphics_api, GraphicsApi::Vulkan);
     }
     #[test]
     fn a_missing_or_damaged_file_gives_the_defaults() {

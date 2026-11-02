@@ -18,9 +18,9 @@ use crate::controls_editor::{
 };
 use crate::graphics::{
     AntiAliasing, BUILDING_DETAILS, BUILDING_DISTANCES, FrameLimit, GRASS_DISTANCES,
-    GROUND_TEXTURE_DISTANCES, Grass, GroundTexture, Options, RENDER_SCALES, ShadowDistance,
-    ShadowQuality, SpottingAid, VEGETATION_DETAILS, VEGETATION_DISTANCES, VegCards, VegDensity,
-    scaled_size,
+    GROUND_TEXTURE_DISTANCES, GraphicsApi, Grass, GroundTexture, Options, RENDER_SCALES,
+    ShadowDistance, ShadowQuality, SpottingAid, VEGETATION_DETAILS, VEGETATION_DISTANCES, VegCards,
+    VegDensity, scaled_size,
 };
 use crate::menu::Canvas;
 use crate::widgets::{ArrowBar, ArrowRows, RowPress};
@@ -41,6 +41,7 @@ enum Row {
     RenderScale,
     SpottingAid,
     FrameLimit,
+    GraphicsApi,
     TerrainFiltering,
     FrameRate,
     BuildingDistance,
@@ -59,11 +60,12 @@ enum Row {
 }
 
 /// Every row in display order, grouped.
-const ALL_ROWS: [Row; 19] = [
+const ALL_ROWS: [Row; 20] = [
     Row::AntiAliasing,
     Row::RenderScale,
     Row::SpottingAid,
     Row::FrameLimit,
+    Row::GraphicsApi,
     Row::TerrainFiltering,
     Row::GroundTexture,
     Row::GroundTextureDistance,
@@ -83,8 +85,12 @@ const ALL_ROWS: [Row; 19] = [
 
 /// The rows shown. The city building rows hide when `TORE_CITY_FILL=0`, and
 /// the ground detail, vegetation and grass rows when `TORE_VEGETATION=0`. Both
-/// are developer escape hatches; both are on when the variable is unset.
+/// are developer escape hatches; both are on when the variable is unset. The
+/// graphics API row is Windows only, the one platform with a choice to make.
 fn rows() -> Vec<Row> {
+    rows_on(cfg!(target_os = "windows"))
+}
+fn rows_on(windows: bool) -> Vec<Row> {
     let city = crate::scenery::city_fill().unwrap_or(true);
     let veg = crate::vegetation::enabled().unwrap_or(true);
     ALL_ROWS
@@ -100,6 +106,7 @@ fn rows() -> Vec<Row> {
             | Row::Grass
             | Row::GrassDensity
             | Row::GrassDistance => veg,
+            Row::GraphicsApi => windows,
             _ => true,
         })
         .collect()
@@ -136,7 +143,11 @@ impl Row {
     /// The heading the row sits under.
     fn group(self) -> &'static str {
         match self {
-            Row::AntiAliasing | Row::RenderScale | Row::SpottingAid | Row::FrameLimit => "DISPLAY",
+            Row::AntiAliasing
+            | Row::RenderScale
+            | Row::SpottingAid
+            | Row::FrameLimit
+            | Row::GraphicsApi => "DISPLAY",
             Row::TerrainFiltering
             | Row::GroundTexture
             | Row::GroundTextureDistance
@@ -161,6 +172,7 @@ impl Row {
             Row::SpottingAid => "Spotting aid",
             Row::TerrainFiltering => "Terrain filtering",
             Row::FrameLimit => "Frame rate",
+            Row::GraphicsApi => "Graphics API",
             Row::FrameRate => "Frame rate counter",
             Row::BuildingDistance => "Building distance",
             Row::BuildingDetail => "Building detail",
@@ -191,6 +203,9 @@ impl Row {
             Row::TerrainFiltering => "Reduces shimmer and crawling patterns on distant ground.",
             Row::FrameLimit => {
                 "V-sync draws one frame per display refresh. 60, 100 and 200 cap the rate without waiting for the display: less delay, more power."
+            }
+            Row::GraphicsApi => {
+                "Which graphics system the game uses. Auto chooses for you and switches to DX12 if a start fails. Takes effect at next launch."
             }
             Row::FrameRate => {
                 "Shows frame rate, CPU/GPU milliseconds and the recent low. Keeps rendering while menus or flight are paused."
@@ -239,6 +254,7 @@ impl Row {
             Row::SpottingAid => SpottingAid::ALL.map(|a| a.label().to_owned()).to_vec(),
             Row::TerrainFiltering => vec!["Off".into(), "On".into()],
             Row::FrameLimit => FrameLimit::ALL.map(|a| a.label().to_owned()).to_vec(),
+            Row::GraphicsApi => GraphicsApi::ALL.map(|a| a.label().to_owned()).to_vec(),
             Row::FrameRate => vec!["Off".into(), "On".into()],
             Row::BuildingDistance => BUILDING_DISTANCES.map(|n| format!("{n} nm")).to_vec(),
             Row::BuildingDetail => BUILDING_DETAILS.map(|n| format!("{n} nm")).to_vec(),
@@ -384,6 +400,10 @@ impl Editor {
                 .iter()
                 .position(|a| *a == d.frame_limit)
                 .unwrap_or(FrameLimit::ALL.len() - 1),
+            Row::GraphicsApi => GraphicsApi::ALL
+                .iter()
+                .position(|a| *a == d.graphics_api)
+                .unwrap_or(0),
             Row::FrameRate => usize::from(d.show_frame_rate),
             Row::BuildingDistance => BUILDING_DISTANCES
                 .iter()
@@ -438,6 +458,7 @@ impl Editor {
             Row::SpottingAid => d.spotting_aid = SpottingAid::ALL[i],
             Row::TerrainFiltering => d.terrain_filtering = i == 1,
             Row::FrameLimit => d.frame_limit = FrameLimit::ALL[i],
+            Row::GraphicsApi => d.graphics_api = GraphicsApi::ALL[i],
             Row::FrameRate => d.show_frame_rate = i == 1,
             Row::BuildingDistance => d.building_distance_nm = BUILDING_DISTANCES[i],
             Row::BuildingDetail => d.building_detail_nm = BUILDING_DETAILS[i],
@@ -512,6 +533,7 @@ impl Editor {
                 return crate::frame_pacing::Limit::overridden()
                     .then(|| "TORE_FRAME_LIMIT replaces this choice for this run.".into());
             }
+            Row::GraphicsApi => return crate::graphics_api::status_note(),
             Row::AntiAliasing => {}
             _ => return None,
         }
@@ -550,7 +572,11 @@ impl Editor {
         }
         self.set_choice(row, i);
         self.edited();
-        self.message = format!("{} set to {label}.", rows()[row].label());
+        self.message = if rows()[row] == Row::GraphicsApi {
+            format!("Graphics API set to {label}. Takes effect at next launch.")
+        } else {
+            format!("{} set to {label}.", rows()[row].label())
+        };
         ResultAction::Changed
     }
     /// Left/right: the next available choice in that direction, stopping at
@@ -576,7 +602,11 @@ impl Editor {
             .map_or(ResultAction::None, |i| self.pick(row, i))
     }
     fn defaults(&mut self) -> ResultAction {
-        self.draft = Options::default();
+        // The picture settings, not a choice that may be keeping the game running.
+        self.draft = Options {
+            graphics_api: self.draft.graphics_api,
+            ..Options::default()
+        };
         self.edited();
         self.message = "Recommended settings restored.".into();
         ResultAction::Changed
@@ -1095,6 +1125,29 @@ mod tests {
         assert!(ABOUT.1 + ABOUT.3 <= 438);
     }
     #[test]
+    fn the_graphics_api_row_is_windows_only_and_applies_next_launch() {
+        assert!(rows_on(true).contains(&Row::GraphicsApi));
+        assert!(!rows_on(false).contains(&Row::GraphicsApi));
+        assert_eq!(Row::GraphicsApi.group(), "DISPLAY");
+        assert_eq!(Row::GraphicsApi.choices(), ["Auto", "Vulkan", "DX12"]);
+        assert!(Row::GraphicsApi.description().contains("next launch"));
+        // Windows shows it; here the same model is driven through the row list
+        // the Windows build uses.
+        let mut draft = Options::default();
+        assert_eq!(draft.graphics_api, GraphicsApi::Auto);
+        draft.graphics_api = GraphicsApi::ALL[2];
+        assert_eq!(draft.graphics_api, GraphicsApi::Dx12);
+    }
+    #[test]
+    fn defaults_keep_the_graphics_api_choice() {
+        let mut e = editor();
+        e.draft.graphics_api = GraphicsApi::Dx12;
+        e.draft.render_scale = 150;
+        e.defaults();
+        assert_eq!(e.draft.graphics_api, GraphicsApi::Dx12);
+        assert_eq!(e.draft.render_scale, 100);
+    }
+    #[test]
     fn grass_rows_edit_without_changing_tree_density() {
         let mut editor = editor();
         let tree = editor.draft.vegetation_density;
@@ -1161,7 +1214,8 @@ mod tests {
         press(&mut e, "ArrowDown");
         press(&mut e, "ArrowLeft");
         assert_eq!(e.draft.frame_limit, FrameLimit::Fps200);
-        press(&mut e, "ArrowDown");
+        // The next row differs by platform (Windows has the graphics API row).
+        e.set_focus(Focus::Row(row_of(Row::TerrainFiltering)));
         press(&mut e, "Space");
         assert!(!e.draft.terrain_filtering);
         // A click on a choice picks it and focuses its row.

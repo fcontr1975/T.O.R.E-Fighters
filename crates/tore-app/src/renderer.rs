@@ -166,6 +166,8 @@ pub struct Renderer {
     previews: std::collections::BTreeMap<u8, Readback>,
     readbacks: ReadbackPool,
     first_frame: crate::startup::FirstFrame,
+    /// The backend in use, for the automatic graphics fallback.
+    backend: wgpu::Backend,
     /// Frames in a row whose surface gave no image; the caller waits
     /// [`crate::frame_pacing::surface_retry`] before trying again.
     surface_failures: u32,
@@ -481,6 +483,9 @@ impl Renderer {
         self.sim.vapor(&self.device, &self.queue, vertices);
     }
     pub fn set_scenery(&mut self, scenery: &crate::scenery::Scenery) {
+        // A theater load builds more pipelines (city fill, vegetation) than the
+        // menu did, on the same driver, so it is GPU setup too.
+        crate::graphics_api::setup_starting();
         self.sim = crate::sim_renderer::SimRenderer::new(
             &self.device,
             &self.queue,
@@ -489,6 +494,7 @@ impl Renderer {
             self.graphics,
             self.samples(self.graphics.anti_aliasing),
         );
+        crate::graphics_api::setup_ended();
         self.mirror_cadence = Default::default();
     }
     pub fn begin_cpu_frame(&mut self) {
@@ -561,8 +567,9 @@ impl Renderer {
         scenery: &crate::scenery::Scenery,
         graphics: crate::graphics::Options,
     ) -> AppResult<Self> {
+        crate::graphics_api::setup_starting();
         crate::diagnostics::stage("game graphics instance and surface");
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = crate::graphics_api::instance();
         let surface = {
             let _step = crate::gpu_setup::begin("surface", "game window");
             instance.create_surface(window.clone())?
@@ -620,6 +627,12 @@ impl Renderer {
             }
         });
         crate::diagnostics::stage("game graphics resources and pipelines");
+        // The window stops responding while the shaders compile, for a minute or
+        // more on DirectX 12 (docs/spec/graphics-options.md), so say why.
+        let window_title = crate::graphics_api::dx12_chosen().then(|| window.title());
+        if window_title.is_some() {
+            window.set_title("T.O.R.E-Fighters - preparing DirectX 12 shaders, please wait");
+        }
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -775,6 +788,9 @@ impl Renderer {
         let ui_text = crate::ui_text_renderer::UiTextRenderer::new(&device, &queue, config.format);
         let crt = crate::crt::Crt::new(&device, &queue, config.format);
         crate::diagnostics::stage_done();
+        if let Some(title) = &window_title {
+            window.set_title(title);
+        }
         Ok(Self {
             crt,
             console_scene: None,
@@ -783,6 +799,7 @@ impl Renderer {
             console_last: None,
             console_repeat: false,
             first_frame: Default::default(),
+            backend: info.backend,
             surface_failures: 0,
             mirror_camera: crate::camera::Camera::new(),
             mirror_vertices: Vec::new(),
@@ -1636,7 +1653,9 @@ impl Renderer {
         let present_log = crate::frame_log::span(crate::frame_log::Phase::Present);
         frame.present();
         drop(present_log);
-        self.first_frame.complete();
+        if self.first_frame.complete() {
+            crate::graphics_api::game_frame_presented(self.backend);
+        }
         drop(draw_log);
         crate::frame_log::finish(gpu_ms);
         Ok(true)
