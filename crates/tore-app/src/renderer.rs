@@ -481,9 +481,6 @@ impl Renderer {
         self.sim.vapor(&self.device, &self.queue, vertices);
     }
     pub fn set_scenery(&mut self, scenery: &crate::scenery::Scenery) {
-        // A theater load builds more pipelines (city fill, vegetation) than the
-        // menu did, on the same driver, so it is GPU setup too.
-        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Game);
         self.sim = crate::sim_renderer::SimRenderer::new(
             &self.device,
             &self.queue,
@@ -492,7 +489,6 @@ impl Renderer {
             self.graphics,
             self.samples(self.graphics.anti_aliasing),
         );
-        crate::graphics_api::setup_ended();
         self.mirror_cadence = Default::default();
     }
     pub fn begin_cpu_frame(&mut self) {

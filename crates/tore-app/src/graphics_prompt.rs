@@ -1,8 +1,8 @@
 //! The way out for a player whose game dies during GPU setup: later launches skip
 //! the import screen and never reach Pref > Graphics, so a launch that finds a dead
-//! marker (`crate::graphics_api`) asks here first. It uses the same canvas path as
-//! the import screen, which in issue #8 drew fine on the machine that was failing.
-//! Nothing switches without the player. Requested on 2026-11-02; the layout and
+//! marker (`crate::graphics_api`) asks here first, on the same canvas path as the
+//! import screen, drawn with the API that did not die. Nothing switches without the
+//! player. Requested on 2026-11-02; the layout and
 //! wording are agent decisions. docs/spec/graphics-options.md holds the contract.
 use crate::canvas_present::CanvasPresenter;
 use crate::graphics::GraphicsApi;

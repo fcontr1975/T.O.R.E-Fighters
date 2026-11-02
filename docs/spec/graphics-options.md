@@ -191,17 +191,21 @@ imported, every launch goes straight to the game window. So the game notices, an
 asks. Nothing switches without the player.
 
 A **marker** is one file per process in `<data>/gpu-setup/`, holding an OS file lock
-for the life of the process. It exists while the first-run canvas draws its first
-frame, while the game renderer is built up to its first presented frame, and during
-each theater load, which builds more pipelines. A long import is never covered.
+for the life of the process, naming the API in use. It exists around launch-time
+setup only: while looking for a Vulkan adapter for the default rule, while the
+first-run canvas draws its first frame, and while the game renderer is built up to its
+first presented frame. A long import is never covered, and nor are mission, replay and
+theater loads, because a player who dies there has already reached Pref > Graphics.
 
 A launch that can take a marker's lock knows its owner is gone, and removes it. Then,
 before anything else, it shows a small screen on the same canvas path as the import
 screen, with the choice, Continue and Quit, and one sentence saying the last launch
 did not finish graphics setup. Continue saves the choice and the game goes on, with
-no restart. That canvas is known to work on the machine in issue #8, which drew it on
-Vulkan. If a canvas is what died, the screen draws with the other API, so the way out
-cannot be the thing that keeps crashing.
+no restart. The screen always draws on the API that did not die, never looks for a
+Vulkan adapter first, and has a marker of its own: if it dies too, the next launch's
+screen draws on the other API, so it can never get stuck retrying one. The saved value
+only sets which option is highlighted. With nothing saved, the API that did not die is
+highlighted, so that Continue tries something different.
 
 What leaves a marker behind:
 
@@ -218,8 +222,12 @@ What does not:
   `TORE_DATA_DIR` sees only its own.
 - **A run with no player**: headless, capture, smoke test, validation, perf,
   scripted-input and diagnostic modes, or `TORE_NO_ERROR_DIALOG=1`, write no marker,
-  read none and never ask. A launch with `--graphics-api` writes one, since it can die
-  too, but it does not ask, because the flag has already answered.
+  read none and never ask. A launch with `--graphics-api vulkan` or `dx12` writes one, since
+  it can die too, but it does not ask, because the flag has already answered.
+- **A file system with no file locks**: without them a live sibling would look dead, so
+  that launch writes no marker and logs why. A marker that cannot be opened or locked
+  proves nothing about its owner either, so it is skipped and logged. One that cannot
+  be removed is logged, and the next launch may ask again.
 
 The first-run screen, the game, and the offline preview tools all use the same
 choice, through `graphics_api::instance`. A Clippy rule rejects any other
