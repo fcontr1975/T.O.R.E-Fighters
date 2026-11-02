@@ -30,6 +30,7 @@
 //! cull shader); a knock-down rewrites only the changed records.
 //! Buildings within the separate shadow distance cast their box into the
 //! shadow maps at Med, High and Ultra.
+use crate::gpu_setup::NamedSteps as _;
 
 #[path = "fill_blocks.rs"]
 pub mod blocks;
@@ -472,7 +473,7 @@ fn shadow_pipelines(
     ];
     std::array::from_fn(|cascade| {
         let entry = format!("fill_shadow_vertex{cascade}");
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("City fill shadow casters"),
             layout: Some(&lighting.caster_layout),
             vertex: wgpu::VertexState {
@@ -565,7 +566,7 @@ fn pipelines(
                 buffers: &[wgpu::VertexBufferLayout<'_>],
                 fragment: &str,
                 bias: i32| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -748,7 +749,7 @@ impl FillRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("City fill cull"),
             source: wgpu::ShaderSource::Wgsl(include_str!("fill_cull.wgsl").into()),
         });
@@ -784,7 +785,7 @@ impl FillRenderer {
             push_constant_ranges: &[],
         });
         let compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&layout),
                 module: &module,
@@ -1158,6 +1159,7 @@ impl FillRenderer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 pub(crate) mod tests {
     use super::*;
     use tore_world::city::{self, CityFill};

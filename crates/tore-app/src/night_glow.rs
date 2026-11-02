@@ -27,6 +27,7 @@
 //! fitted in the spec. `TORE_NIGHT_GLOW=0` turns both parts off, to compare
 //! and to measure their cost.
 use crate::countermeasure_renderer::{FLARE_STRENGTH, FlareLight};
+use crate::gpu_setup::NamedSteps as _;
 use tore_sim::{attitude::Vector, combat::blast_scale};
 
 /// Glow points drawn at most, the nearest.
@@ -328,7 +329,7 @@ impl Pipeline {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Night glow of explosions and fires"),
             layout: Some(surface),
             vertex: wgpu::VertexState {

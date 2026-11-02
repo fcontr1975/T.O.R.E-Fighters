@@ -21,6 +21,7 @@
 //! not in the way; John asked for "nice static occasionally and a bit of
 //! chromatic aberration and pixelation to make it look like a CRT display"
 //! (opinionated, John, 2026-10-13).
+use crate::gpu_setup::NamedSteps as _;
 
 /// How strong each part of the look is. Pixel sizes are for a 1080-row
 /// output and scale with the output's height.
@@ -538,11 +539,11 @@ pub struct Crt {
 
 impl Crt {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("CRT look"),
             source: wgpu::ShaderSource::Wgsl(include_str!("crt.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("CRT look"),
             layout: None,
             vertex: wgpu::VertexState {

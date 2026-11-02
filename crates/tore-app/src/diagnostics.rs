@@ -3,9 +3,10 @@ use std::backtrace::Backtrace;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tore_diagnostics_native::crash_context;
 
 const ROUTINE_LIMIT: usize = 5 * 1024 * 1024;
 const RECORD_LIMIT: usize = 16 * 1024;
@@ -15,6 +16,20 @@ static LOGGER: OnceLock<Logger> = OnceLock::new();
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 static PANIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANIC_SUMMARY: Mutex<Option<String>> = Mutex::new(None);
+/// How long a line that must not be lost waits for another thread's log write.
+/// Agent choice: writes take microseconds, and a reentrant caller gives up here.
+const PATIENCE: Duration = Duration::from_millis(100);
+/// When the running GPU step began, in milliseconds after logger start plus one;
+/// zero when no step is running.
+static GPU_STEP_STARTED: AtomicU64 = AtomicU64::new(0);
+/// Set once the process is reporting a failure: the watchdog has nothing to add.
+static WATCHDOG_STOPPED: AtomicBool = AtomicBool::new(false);
+/// The watchdog's first line for one stage or step. Fitted: real startup stages
+/// and driver compiles normally finish well inside this.
+const WATCHDOG_FIRST: Duration = Duration::from_secs(30);
+/// Lines per stage or step, each after twice the wait of the one before: 30 s,
+/// 1, 2, 4, 8, 16, 32 and 64 minutes. A player sitting on a screen costs 8 lines.
+const WATCHDOG_LINES: u32 = 8;
 
 struct Output {
     file: Option<File>,
@@ -198,16 +213,40 @@ impl Logger {
     fn write(&self, level: log::Level, message: &str) {
         self.write_record(level, message, level <= log::Level::Warn, false);
     }
+    /// For a line that must reach the file: a concurrent writer is waited for
+    /// instead of costing the line. The write itself goes straight to the OS, so
+    /// the line survives the process crashing on the next instruction.
+    fn write_patient(&self, level: log::Level, message: &str) {
+        self.write_line(level, message, level <= log::Level::Warn, false, PATIENCE);
+    }
     fn write_record(&self, level: log::Level, message: &str, mirror: bool, file_only: bool) {
+        self.write_line(level, message, mirror, file_only, Duration::ZERO);
+    }
+    fn write_line(
+        &self,
+        level: log::Level,
+        message: &str,
+        mirror: bool,
+        file_only: bool,
+        patience: Duration,
+    ) {
         let line = format!(
             "{} +{:.3}s {level} {}\n",
             timestamp(),
             self.start.elapsed().as_secs_f64(),
             bounded(message, RECORD_LIMIT)
         );
-        // A backend formatter or panic hook may reenter logging. Never wait on it.
-        let Ok(mut output) = self.output.try_lock() else {
-            return;
+        // A backend formatter or panic hook may reenter logging. Never wait on
+        // it without a limit.
+        let started = Instant::now();
+        let mut output = loop {
+            match self.output.try_lock() {
+                Ok(output) => break output,
+                Err(TryLockError::WouldBlock) if started.elapsed() < patience => {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                Err(_) => return,
+            }
         };
         if output.suppressed {
             return;
@@ -301,6 +340,114 @@ fn install_panic_hook() {
     }));
 }
 
+/// Decides when the watchdog speaks about one long-running stage or step.
+#[derive(Default)]
+struct WatchdogPace {
+    watching: Option<u64>,
+    lines: u32,
+}
+impl WatchdogPace {
+    /// `key` identifies the stage or step; `elapsed` is how long it has run.
+    fn due(&mut self, key: u64, elapsed: Duration) -> bool {
+        if self.watching != Some(key) {
+            self.watching = Some(key);
+            self.lines = 0;
+        }
+        if self.lines >= WATCHDOG_LINES || elapsed < WATCHDOG_FIRST * (1 << self.lines) {
+            return false;
+        }
+        self.lines += 1;
+        true
+    }
+}
+
+/// Tells a hang from a crash: a process that is stuck keeps saying so, one that
+/// crashed stops. It only reads shared state and logs. It never kills, opens a
+/// dialog or touches the simulation, and process exit ends it.
+fn start_watchdog(logger: &'static Logger) {
+    let spawned = std::thread::Builder::new()
+        .name("tore-diagnostics-watchdog".into())
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            let mut stage_pace = WatchdogPace::default();
+            let mut step_pace = WatchdogPace::default();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if WATCHDOG_STOPPED.load(Ordering::Relaxed) {
+                    return;
+                }
+                watchdog_tick(logger, &mut stage_pace, &mut step_pace);
+            }
+        });
+    if let Err(error) = spawned {
+        logger.write(
+            log::Level::Warn,
+            &format!("Diagnostics watchdog unavailable: {error}"),
+        );
+    }
+}
+
+fn watchdog_tick(logger: &Logger, stage_pace: &mut WatchdogPace, step_pace: &mut WatchdogPace) {
+    let now_ms = logger.start.elapsed().as_millis() as u64 + 1;
+    let step_started = GPU_STEP_STARTED.load(Ordering::Relaxed);
+    let step_running =
+        (step_started != 0).then(|| Duration::from_millis(now_ms.saturating_sub(step_started)));
+    let mut text = [0; crash_context::CELL_BYTES];
+    let step_text = crash_context::GPU_STEP.read(&mut text);
+    let step_text = if step_text.is_empty() {
+        "none"
+    } else {
+        step_text
+    };
+    let step_note = step_running.map_or(String::new(), |running| {
+        format!(" (running {} s)", running.as_secs())
+    });
+    let stage = logger
+        .stage
+        .try_lock()
+        .ok()
+        .and_then(|stage| stage.as_ref().copied());
+    if let Some((name, started)) = stage {
+        let elapsed = started.elapsed();
+        let key = started.duration_since(logger.start).as_millis() as u64;
+        if stage_pace.due(key, elapsed) {
+            logger.write_patient(
+                log::Level::Info,
+                &format!(
+                    "Watchdog: still in stage '{name}' after {} s; last GPU step: {step_text}{step_note}",
+                    elapsed.as_secs()
+                ),
+            );
+        }
+    } else if let Some(running) = step_running
+        && step_pace.due(step_started, running)
+    {
+        // A rebuild after startup has no stage, and can hang just the same.
+        logger.write_patient(
+            log::Level::Info,
+            &format!("Watchdog: still in GPU step: {step_text}{step_note}"),
+        );
+    }
+}
+
+/// A GPU step line, on disk before the caller goes on to the driver.
+pub(crate) fn breadcrumb(message: &str) {
+    if let Some(logger) = LOGGER.get() {
+        logger.write_patient(log::Level::Info, &format!("tore_app::gpu_setup: {message}"));
+    }
+}
+pub(crate) fn gpu_step_started() {
+    if let Some(logger) = LOGGER.get() {
+        GPU_STEP_STARTED.store(
+            logger.start.elapsed().as_millis() as u64 + 1,
+            Ordering::Relaxed,
+        );
+    }
+}
+pub(crate) fn gpu_step_finished() {
+    GPU_STEP_STARTED.store(0, Ordering::Relaxed);
+}
+
 pub fn init() {
     if LOGGER.get().is_some() {
         return;
@@ -372,6 +519,7 @@ pub fn init() {
         retain(directory, ".log");
         retain(directory, ".fatal.txt");
     }
+    start_watchdog(logger);
 }
 pub fn log_path() -> Option<PathBuf> {
     LOGGER.get().and_then(|logger| logger.path.clone())
@@ -381,14 +529,16 @@ pub fn stage(name: &'static str) {
         if let Ok(mut stage) = logger.stage.try_lock() {
             *stage = Some((name, Instant::now()));
         }
-        logger.write(log::Level::Info, &format!("Stage started: {name}"));
+        crash_context::STAGE.set(name);
+        logger.write_patient(log::Level::Info, &format!("Stage started: {name}"));
     }
 }
 pub fn stage_done() {
     if let Some(logger) = LOGGER.get() {
         let stage = logger.stage.try_lock().ok().and_then(|mut s| s.take());
+        crash_context::STAGE.set("");
         if let Some((name, started)) = stage {
-            logger.write(
+            logger.write_patient(
                 log::Level::Info,
                 &format!(
                     "Stage completed: {name} ({:.3}s)",
@@ -522,6 +672,7 @@ fn display(summary: &str, location: &str, interactive: bool) {
     }
 }
 pub fn report_error(error: &dyn std::error::Error, interactive: bool) {
+    WATCHDOG_STOPPED.store(true, Ordering::Relaxed);
     let mut summary = format!("{error}");
     let mut source = error.source();
     for _ in 0..16 {
@@ -536,6 +687,7 @@ pub fn report_error(error: &dyn std::error::Error, interactive: bool) {
     display(&summary, &location, interactive);
 }
 pub fn report_panic(interactive: bool) {
+    WATCHDOG_STOPPED.store(true, Ordering::Relaxed);
     let summary = PANIC_SUMMARY
         .try_lock()
         .ok()
@@ -637,6 +789,57 @@ mod tests {
         );
         drop(logger);
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_step_line_is_on_disk_when_the_call_returns_and_survives_contention() {
+        let dir = directory();
+        let (path, file, lease) = open_session(&dir).unwrap();
+        let logger = Logger {
+            start: Instant::now(),
+            path: Some(path.clone()),
+            fatal_path: None,
+            output: Mutex::new(Output {
+                file: Some(file),
+                lease: Some(lease),
+                bytes: 0,
+                suppressed: false,
+            }),
+            stage: Mutex::new(None),
+            fatal_bytes: AtomicUsize::new(0),
+        };
+        logger.write_patient(log::Level::Info, "first step");
+        // Read through a second handle with no flush or drop: nothing buffers
+        // in the process, so a crash on the next instruction cannot lose it.
+        assert!(fs::read_to_string(&path).unwrap().contains("first step"));
+        // The plain path drops a line when another thread holds the log; a step
+        // line waits its turn.
+        std::thread::scope(|scope| {
+            let guard = logger.output.lock().unwrap();
+            let writer = scope.spawn(|| logger.write_patient(log::Level::Info, "second step"));
+            std::thread::sleep(Duration::from_millis(10));
+            drop(guard);
+            writer.join().unwrap();
+        });
+        assert!(fs::read_to_string(&path).unwrap().contains("second step"));
+        // A reentrant caller holding the lock gives up rather than deadlocking.
+        let guard = logger.output.lock().unwrap();
+        let started = Instant::now();
+        logger.write_patient(log::Level::Info, "reentrant");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(guard);
+        drop(logger);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_watchdog_speaks_at_growing_intervals_and_then_stops() {
+        let mut pace = WatchdogPace::default();
+        let spoke_at: Vec<u64> = (0..20_000)
+            .filter(|seconds| pace.due(1, Duration::from_secs(*seconds)))
+            .collect();
+        assert_eq!(spoke_at, [30, 60, 120, 240, 480, 960, 1920, 3840]);
+        // A new stage starts its own count.
+        assert!(!pace.due(2, Duration::from_secs(29)));
+        assert!(pace.due(2, Duration::from_secs(30)));
     }
     #[test]
     fn closed_session_paths_remain_stable_and_live_sessions_survive() {

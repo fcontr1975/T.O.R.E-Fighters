@@ -76,6 +76,7 @@ mod frame_gpu;
 mod frame_log;
 mod frame_pacing;
 mod frame_rate;
+mod gpu_setup;
 mod graphics;
 mod graphics_screen;
 mod gun_flash;

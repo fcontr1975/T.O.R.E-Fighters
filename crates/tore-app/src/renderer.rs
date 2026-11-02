@@ -1,3 +1,4 @@
+use crate::gpu_setup::NamedSteps as _;
 mod leave_dialog;
 use crate::{
     AppResult,
@@ -562,17 +563,24 @@ impl Renderer {
     ) -> AppResult<Self> {
         crate::diagnostics::stage("game graphics instance and surface");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window.clone())?;
+        let surface = {
+            let _step = crate::gpu_setup::begin("surface", "game window");
+            instance.create_surface(window.clone())?
+        };
         crate::diagnostics::stage_done();
         crate::diagnostics::stage("game graphics adapter selection");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
+        let adapter = {
+            let _step = crate::gpu_setup::begin("adapter request", "game window");
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await?
+        };
         crate::diagnostics::stage_done();
+        crate::gpu_setup::note_adapter(&adapter.get_info());
         let discrete_available = adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu
             && instance
                 .enumerate_adapters(wgpu::Backends::all())
@@ -595,12 +603,15 @@ impl Renderer {
         // offered so 2x and 8x anti-aliasing can be used.
         let specific =
             adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features: specific | crate::frame_gpu::features(adapter.features()),
-                ..Default::default()
-            })
-            .await?;
+        let (device, queue) = {
+            let _step = crate::gpu_setup::begin("device request", "game window");
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: specific | crate::frame_gpu::features(adapter.features()),
+                    ..Default::default()
+                })
+                .await?
+        };
         crate::diagnostics::stage_done();
         device.set_device_lost_callback(|reason, message| {
             if reason != wgpu::DeviceLostReason::Destroyed {
@@ -667,7 +678,10 @@ impl Renderer {
             tore_workers::shared()
         );
         // Keep the selected system details even when a driver cannot create a swapchain.
-        surface.configure(&device, &config);
+        {
+            let _step = crate::gpu_setup::begin("surface configuration", "game window");
+            surface.configure(&device, &config);
+        }
         let samples = sample_counts
             .iter()
             .copied()
@@ -694,11 +708,11 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Menu compositor"),
             source: wgpu::ShaderSource::Wgsl(include_str!("menu.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Menu"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -758,8 +772,8 @@ impl Renderer {
         );
         let cockpit = crate::cockpit_renderer::CockpitRenderer::new(&device, config.format);
         let ui_text = crate::ui_text_renderer::UiTextRenderer::new(&device, &queue, config.format);
-        crate::diagnostics::stage_done();
         let crt = crate::crt::Crt::new(&device, &queue, config.format);
+        crate::diagnostics::stage_done();
         Ok(Self {
             crt,
             console_scene: None,

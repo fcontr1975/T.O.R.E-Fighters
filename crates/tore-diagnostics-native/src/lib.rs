@@ -1,5 +1,6 @@
 //! OS fatal-report boundary, independent of the game's window and GPU.
 //! Policy (headless suppression and which failures are fatal) belongs to the caller.
+pub mod crash_context;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

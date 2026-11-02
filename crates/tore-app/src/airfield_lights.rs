@@ -8,6 +8,7 @@
 //! and a larger point, so it reads on a daylight final from 2 to 3 nm; John,
 //! 2026-10-10).
 //! `TORE_AIRFIELD_LIGHTS=0` turns them off, to measure their cost.
+use crate::gpu_setup::NamedSteps as _;
 use crate::terrain::{
     Terrain,
     redrawn::lights::{Light, LightKind},
@@ -85,7 +86,7 @@ impl Pipeline {
         samples: u32,
         surface: &wgpu::PipelineLayout,
     ) -> Self {
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Airfield lights"),
             layout: Some(surface),
             vertex: wgpu::VertexState {

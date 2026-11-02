@@ -1,6 +1,7 @@
 //! Synthetic offscreen regression using the production effect vertex shader.
 //! No retail art or simulation. Solid vehicle roofs stand six feet above a
 //! ground plane. A fresh crater must change ground pixels but no roof pixel.
+#![allow(clippy::disallowed_methods)]
 use super::*;
 use wgpu::util::DeviceExt;
 
