@@ -8,7 +8,8 @@ repository dotfiles were left out.
 Vulkan requires an array of 32-bit integers
 (`VUID-SampleMask-SampleMask-04359`), and `spirv-val` rejects naga's output. NVIDIA
 accepts it. On AMD's Windows driver, the pipeline `City fill surfaces fading in`,
-the first to write the mask, crashes `amdvlk64.dll` with a null read (issue #8).
+the first to write the mask, crashes `amdvlk64.dll` with a null read (issue #8). The
+player who reported it confirmed the fix on an RX 7600 on 2026-11-03.
 
 The patch is in `src/back/spv`: the `sample_mask_varyings` field in `mod.rs`, and
 `write_varying`, `load_io_with_f16_polyfill`, `store_io_with_f16_polyfill` and

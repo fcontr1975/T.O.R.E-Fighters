@@ -156,8 +156,9 @@ other, and return to the lobby for the next round. 0.2.0 also brought ground
 attacks, defended surface targets, more aircraft and a fuller world to single
 player; 0.2.1 keeps scores across revivals, matches games by compatibility code
 and fixes the macOS first launch; 0.2.2 flies guided stores on an energy model
-with physical decoys, reworks AI missile defense and limits Quick Mission
-distances per theater. The release notes for [0.2.2](docs/release/v0.2.2.md),
+with physical decoys, reworks AI missile defense, limits Quick Mission
+distances per theater and fixes a white-window crash on AMD graphics cards on
+Windows. The release notes for [0.2.2](docs/release/v0.2.2.md),
 [0.2.1](docs/release/v0.2.1.md) and [0.2.0](docs/release/v0.2.0.md) describe
 the changes.
 
