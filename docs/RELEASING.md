@@ -87,7 +87,7 @@ The release carries, for each platform: the game's installer
 ([downloading it](DEDICATED-SERVER.md#downloading-it)); and the master server,
 `tore-master-<version>-linux-x86_64.tar.gz` with its `.sha256`
 ([operations](MASTER-SERVER.md#downloading-a-release)). Check the release page
-lists all eleven packages and the five checksums.
+lists all ten packages and the five checksums.
 
 The workflow only writes the notes when it creates the release. To change them
 after the tag is pushed, edit the file, commit it, and run:
