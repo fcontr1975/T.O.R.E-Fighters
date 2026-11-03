@@ -13,6 +13,11 @@ on:
       - 'release-test/**'
   workflow_dispatch:
     inputs:
+      skip_macos:
+        description: 'Skip the macOS jobs, when the Mac runner is in use'
+        type: boolean
+        required: false
+        default: false
       version:
         description: 'Build version for a test package (e.g. 0.2.2-rc.1); empty uses git describe'
         required: false
@@ -33,11 +38,7 @@ jobs:
         # on older distributions. There is no 32-bit Windows package since
         # 2026-10-25 (John). An entry may still name a `target` to cross-build;
         # such a job skips the dedicated server.
-        include:
-          - os: macos-14
-          - os: macos-15-intel
-          - os: ubuntu-22.04
-          - os: windows-2022
+        include: ${{ fromJSON(inputs.skip_macos && '[{"os":"ubuntu-22.04"},{"os":"windows-2022"}]' || '[{"os":"macos-14"},{"os":"macos-15-intel"},{"os":"ubuntu-22.04"},{"os":"windows-2022"}]') }}
     # TORE_SELF_HOSTED, a repository variable, lists the platforms that run on
     # the project's own machines instead of GitHub's (docs/CI-RUNNERS.md).
     runs-on: ${{ contains(vars.TORE_SELF_HOSTED, matrix.os) && fromJSON(format('["self-hosted","tore-{0}"]', matrix.os)) || matrix.os }}
@@ -271,7 +272,7 @@ jobs:
 
   release:
     needs: package
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !inputs.skip_macos
     runs-on: ubuntu-24.04
     permissions:
       contents: write

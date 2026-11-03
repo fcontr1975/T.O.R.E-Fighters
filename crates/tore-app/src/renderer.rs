@@ -1,3 +1,4 @@
+use crate::gpu_setup::NamedSteps as _;
 mod leave_dialog;
 use crate::{
     AppResult,
@@ -560,19 +561,27 @@ impl Renderer {
         scenery: &crate::scenery::Scenery,
         graphics: crate::graphics::Options,
     ) -> AppResult<Self> {
+        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Game);
         crate::diagnostics::stage("game graphics instance and surface");
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window.clone())?;
+        let instance = crate::graphics_api::instance();
+        let surface = {
+            let _step = crate::gpu_setup::begin("surface", "game window");
+            instance.create_surface(window.clone())?
+        };
         crate::diagnostics::stage_done();
         crate::diagnostics::stage("game graphics adapter selection");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
+        let adapter = {
+            let _step = crate::gpu_setup::begin("adapter request", "game window");
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await?
+        };
         crate::diagnostics::stage_done();
+        crate::gpu_setup::note_adapter(&adapter.get_info());
         let discrete_available = adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu
             && instance
                 .enumerate_adapters(wgpu::Backends::all())
@@ -595,19 +604,29 @@ impl Renderer {
         // offered so 2x and 8x anti-aliasing can be used.
         let specific =
             adapter.features() & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features: specific | crate::frame_gpu::features(adapter.features()),
-                ..Default::default()
-            })
-            .await?;
+        let (device, queue) = {
+            let _step = crate::gpu_setup::begin("device request", "game window");
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: specific | crate::frame_gpu::features(adapter.features()),
+                    ..Default::default()
+                })
+                .await?
+        };
         crate::diagnostics::stage_done();
+        crate::diagnostics::reassert_crash_reporter();
         device.set_device_lost_callback(|reason, message| {
             if reason != wgpu::DeviceLostReason::Destroyed {
                 log::error!("game graphics device lost: {reason:?}: {message}");
             }
         });
         crate::diagnostics::stage("game graphics resources and pipelines");
+        // The window stops responding while the shaders compile, for a minute or
+        // more on DirectX 12 (docs/spec/graphics-options.md), so say why.
+        let window_title = crate::graphics_api::dx12_chosen().then(|| window.title());
+        if window_title.is_some() {
+            window.set_title("T.O.R.E-Fighters - preparing DirectX 12 shaders, please wait");
+        }
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -667,7 +686,10 @@ impl Renderer {
             tore_workers::shared()
         );
         // Keep the selected system details even when a driver cannot create a swapchain.
-        surface.configure(&device, &config);
+        {
+            let _step = crate::gpu_setup::begin("surface configuration", "game window");
+            surface.configure(&device, &config);
+        }
         let samples = sample_counts
             .iter()
             .copied()
@@ -694,11 +716,11 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Menu compositor"),
             source: wgpu::ShaderSource::Wgsl(include_str!("menu.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Menu"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -758,8 +780,11 @@ impl Renderer {
         );
         let cockpit = crate::cockpit_renderer::CockpitRenderer::new(&device, config.format);
         let ui_text = crate::ui_text_renderer::UiTextRenderer::new(&device, &queue, config.format);
-        crate::diagnostics::stage_done();
         let crt = crate::crt::Crt::new(&device, &queue, config.format);
+        crate::diagnostics::stage_done();
+        if let Some(title) = &window_title {
+            window.set_title(title);
+        }
         Ok(Self {
             crt,
             console_scene: None,
@@ -1621,7 +1646,9 @@ impl Renderer {
         let present_log = crate::frame_log::span(crate::frame_log::Phase::Present);
         frame.present();
         drop(present_log);
-        self.first_frame.complete();
+        if self.first_frame.complete() {
+            crate::graphics_api::setup_ended();
+        }
         drop(draw_log);
         crate::frame_log::finish(gpu_ms);
         Ok(true)

@@ -9,6 +9,7 @@
 //! a pack does exist the caller passes the Choose Activity frame as
 //! `background`. The screen owns its own atlas so that every string on it is
 //! drawn at the same readable size.
+use crate::graphics::GraphicsApi;
 use crate::menu::{Canvas, HEIGHT, LARGE_CELL, Sprite, WIDTH, flat_font_large, text_width};
 use std::path::PathBuf;
 
@@ -60,6 +61,8 @@ pub(crate) enum Focus {
     ImportButton,
     QuitButton,
     ContinueButton,
+    /// The graphics API choice, on Windows.
+    ApiChoice,
 }
 /// What the caller should do after an input. Anything else is [`Event::None`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +71,8 @@ pub(crate) enum Event {
     Import(PathBuf),
     Quit,
     Continue,
+    /// The player picked another graphics API.
+    ChooseApi(GraphicsApi),
 }
 
 // Layout. Every hit rectangle below is derived from these, so `click` and
@@ -101,6 +106,17 @@ const IMPORT_RECT: (i32, i32, i32, i32) = (INNER_X, BUTTON_Y, BUTTON_W, BUTTON_H
 const QUIT_RECT: (i32, i32, i32, i32) =
     (INNER_X + INNER_W - BUTTON_W, BUTTON_Y, BUTTON_W, BUTTON_H);
 const CONTINUE_RECT: (i32, i32, i32, i32) = IMPORT_RECT;
+/// The graphics API choice sits on the title line, on Windows, so it is visible
+/// whatever the import is doing and needs no room from the blocks below.
+const API_W: i32 = 92;
+const API_H: i32 = 24;
+const API_Y: i32 = PANEL.1 + 5;
+const API_X: i32 = INNER_X + INNER_W - 2 * API_W - 4;
+const API_RECTS: [(i32, i32, i32, i32); 2] = [
+    (API_X, API_Y, API_W, API_H),
+    (API_X + API_W + 4, API_Y, API_W, API_H),
+];
+const API_LABEL: &str = "Graphics";
 const MAX_PATH_BYTES: usize = 512;
 /// Frames for the starting bar to cross once. The shell ticks about thirty
 /// times a second, so one crossing takes about a second and a half.
@@ -128,6 +144,7 @@ const _: () = {
     assert!(PANEL.1 + PANEL.3 + 4 <= HEIGHT as i32);
     assert!(IMPORT_RECT.0 + IMPORT_RECT.2 < QUIT_RECT.0);
     assert!(QUIT_RECT.0 + QUIT_RECT.2 <= PANEL.0 + PANEL.2);
+    assert!(API_Y + API_H <= TITLE_Y + CELL + 4, "above the title rule");
 };
 
 const TITLE: &str = "Locate Fighters Anthology";
@@ -213,6 +230,9 @@ pub(crate) struct Locate {
     scroll: usize,
     /// Advanced by [`Locate::tick`] while starting, so the sweeping bar moves.
     frame: u32,
+    /// The graphics API shown as chosen; None hides the choice (off Windows).
+    api: Option<GraphicsApi>,
+    hover_api: Option<usize>,
 }
 impl Locate {
     pub(crate) fn new(prefill: Option<String>, candidates: Vec<Candidate>) -> Self {
@@ -229,6 +249,8 @@ impl Locate {
             hover_row: None,
             scroll: 0,
             frame: 0,
+            api: None,
+            hover_api: None,
         };
         if let Some(prefill) = prefill.filter(|p| !p.trim().is_empty()) {
             locate.set_path(prefill);
@@ -253,6 +275,31 @@ impl Locate {
             let path = first.path.display().to_string();
             self.set_path(path);
         }
+    }
+    /// Offers the graphics API choice with `api` selected; None hides it.
+    pub(crate) fn set_graphics_api(&mut self, api: Option<GraphicsApi>) {
+        self.api = api;
+    }
+    fn api_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.api?;
+        API_RECTS.iter().position(|rect| in_rect(x, y, *rect))
+    }
+    /// The event for picking `index`, if that changes anything.
+    fn pick_api(&self, index: usize) -> Event {
+        let api = GraphicsApi::CHOICES[index];
+        if self.api == Some(api) {
+            Event::None
+        } else {
+            Event::ChooseApi(api)
+        }
+    }
+    /// The other API, from the keyboard.
+    fn toggle_api(&self) -> Event {
+        let selected = GraphicsApi::CHOICES
+            .iter()
+            .position(|api| self.api == Some(*api))
+            .unwrap_or(0);
+        self.pick_api(1 - selected)
     }
     pub(crate) fn set_phase(&mut self, phase: Phase) {
         if matches!(phase, Phase::Done { .. }) {
@@ -304,6 +351,10 @@ impl Locate {
         if self.importing() || self.done() || ch.is_control() {
             return;
         }
+        // Space on the choice has already toggled it.
+        if self.focus == Focus::ApiChoice && ch == ' ' {
+            return;
+        }
         if self.path.len() + ch.len_utf8() > MAX_PATH_BYTES {
             return;
         }
@@ -322,6 +373,9 @@ impl Locate {
         }
         order.push(Focus::ImportButton);
         order.push(Focus::QuitButton);
+        if self.api.is_some() {
+            order.push(Focus::ApiChoice);
+        }
         order
     }
     fn step_focus(&mut self, delta: i32) {
@@ -374,6 +428,11 @@ impl Locate {
         }
         if self.importing() {
             return Event::None;
+        }
+        if self.focus == Focus::ApiChoice
+            && matches!(name, "Enter" | " " | "ArrowLeft" | "ArrowRight")
+        {
+            return self.toggle_api();
         }
         match name {
             "Escape" => return Event::Quit,
@@ -456,6 +515,7 @@ impl Locate {
     pub(crate) fn hover(&mut self, x: f64, y: f64) {
         self.hover = None;
         self.hover_row = None;
+        self.hover_api = self.api_at(x, y);
         if self.done() {
             if in_rect(x, y, CONTINUE_RECT) {
                 self.hover = Some(Focus::ContinueButton);
@@ -487,6 +547,14 @@ impl Locate {
         None
     }
     pub(crate) fn click(&mut self, x: f64, y: f64) -> Event {
+        // Usable before, during and after an import: it touches only the
+        // graphics options, and it is read when the game starts.
+        if let Some(index) = self.api_at(x, y) {
+            if !self.done() && !self.importing() {
+                self.focus = Focus::ApiChoice;
+            }
+            return self.pick_api(index);
+        }
         if self.done() {
             return if in_rect(x, y, CONTINUE_RECT) {
                 Event::Continue
@@ -593,6 +661,9 @@ impl Locate {
         canvas.outline(PANEL, PANEL_EDGE);
         canvas.text(font, TITLE, INNER_X, TITLE_Y, None);
         canvas.rect((INNER_X, TITLE_Y + CELL + 4, INNER_W, 1), PANEL_EDGE);
+        if self.api.is_some() {
+            self.draw_api_choice(&mut canvas, font);
+        }
         for (row, line) in wrap(small, EXPLANATION, INNER_W)
             .iter()
             .take(PARA_LINES)
@@ -748,6 +819,35 @@ impl Locate {
             );
         }
     }
+    fn draw_api_choice(&self, canvas: &mut Canvas<'_>, font: &Sprite) {
+        let label_x = API_X - 8 - text_width(font, API_LABEL);
+        canvas.text(font, API_LABEL, label_x, TITLE_Y, Some(DIM));
+        for (index, rect) in API_RECTS.into_iter().enumerate() {
+            let api = GraphicsApi::CHOICES[index];
+            let chosen = self.api == Some(api);
+            canvas.rect(
+                rect,
+                if chosen {
+                    ROW_SELECTED
+                } else if self.hover_api == Some(index) {
+                    ROW_HOVER
+                } else {
+                    BUTTON_DISABLED
+                },
+            );
+            canvas.outline(
+                rect,
+                if chosen && self.focus == Focus::ApiChoice {
+                    EDGE_FOCUS
+                } else if chosen {
+                    PANEL_EDGE
+                } else {
+                    EDGE_IDLE
+                },
+            );
+            canvas.centered_text(font, api.label(), rect);
+        }
+    }
     fn button(
         &self,
         canvas: &mut Canvas<'_>,
@@ -813,6 +913,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_graphics_api_choice_is_hidden_unless_offered() {
+        let mut l = Locate::new(Some("/tmp/fa".into()), Vec::new());
+        let center = |r: (i32, i32, i32, i32)| ((r.0 + r.2 / 2) as f64, (r.1 + r.3 / 2) as f64);
+        let (x, y) = center(API_RECTS[1]);
+        assert_eq!(l.click(x, y), Event::None);
+        assert!(!l.order().contains(&Focus::ApiChoice));
+        l.set_graphics_api(Some(GraphicsApi::Vulkan));
+        assert!(l.order().contains(&Focus::ApiChoice));
+        assert_eq!(l.click(x, y), Event::ChooseApi(GraphicsApi::Dx12));
+        l.set_graphics_api(Some(GraphicsApi::Dx12));
+        assert_eq!(l.click(x, y), Event::None, "already chosen");
+    }
+    #[test]
+    fn the_graphics_api_choice_works_from_the_keyboard_without_touching_the_path() {
+        let mut l = Locate::new(Some("/tmp/fa".into()), Vec::new());
+        l.set_graphics_api(Some(GraphicsApi::Vulkan));
+        l.focus = Focus::QuitButton;
+        l.key("Tab");
+        assert_eq!(l.focus, Focus::ApiChoice);
+        assert_eq!(l.key("Enter"), Event::ChooseApi(GraphicsApi::Dx12));
+        assert_eq!(l.key(" "), Event::ChooseApi(GraphicsApi::Dx12));
+        l.text_input(' ');
+        assert_eq!(l.path, "/tmp/fa");
+        l.set_graphics_api(Some(GraphicsApi::Dx12));
+        assert_eq!(l.key("ArrowLeft"), Event::ChooseApi(GraphicsApi::Vulkan));
+        l.key("Tab");
+        assert_eq!(l.focus, Focus::PathField);
+    }
+    #[test]
+    fn the_graphics_api_choice_stays_usable_during_and_after_an_import() {
+        let mut l = Locate::new(Some("/tmp/fa".into()), Vec::new());
+        l.set_graphics_api(Some(GraphicsApi::Vulkan));
+        let (x, y) = ((API_RECTS[1].0 + 4) as f64, (API_RECTS[1].1 + 4) as f64);
+        l.set_phase(Phase::Starting {
+            step: "Opening".into(),
+        });
+        assert_eq!(l.click(x, y), Event::ChooseApi(GraphicsApi::Dx12));
+        l.set_phase(Phase::Done {
+            summary: Vec::new(),
+        });
+        assert_eq!(l.click(x, y), Event::ChooseApi(GraphicsApi::Dx12));
+        assert_eq!(l.focus, Focus::ContinueButton);
+    }
+    #[test]
+    fn the_title_and_the_graphics_api_label_do_not_collide() {
+        let font = font();
+        let title_end = INNER_X + text_width(&font, TITLE);
+        let label_x = API_X - 8 - text_width(&font, API_LABEL);
+        assert!(title_end + 8 <= label_x, "{title_end} and {label_x}");
+        for api in GraphicsApi::CHOICES {
+            assert!(text_width(&font, api.label()) + 4 <= API_W, "{api:?}");
+        }
+    }
     #[test]
     fn typing_preserves_case_and_edits_at_the_caret() {
         let mut l = Locate::new(None, Vec::new());

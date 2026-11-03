@@ -50,6 +50,12 @@ The loading photographs are decoded with
 `zune-core` dependency. Both are MIT OR Apache-2.0 OR Zlib. This build turns
 default features off, so the decode is the scalar path.
 
+## naga
+
+`crates/vendor/naga` is [naga](https://github.com/gfx-rs/wgpu/tree/trunk/naga)
+27.0.3, MIT OR Apache-2.0, altered as `crates/vendor/naga/PATCHED.md` describes.
+Both license texts are in that folder.
+
 ## OpenFA export tooling references
 
 `tools/openfa/upstream/sh.rs` and `lib_ext.rs` are unmodified OpenFA 0.2.14

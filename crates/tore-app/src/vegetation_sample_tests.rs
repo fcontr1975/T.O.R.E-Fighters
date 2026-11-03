@@ -1,4 +1,5 @@
 //! Runs the production sampling functions against synthetic material cutouts.
+#![allow(clippy::disallowed_methods)]
 
 #[test]
 #[ignore = "requires a GPU adapter"]

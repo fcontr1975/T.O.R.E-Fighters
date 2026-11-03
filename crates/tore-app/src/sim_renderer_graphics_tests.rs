@@ -1,4 +1,5 @@
 //! Runtime graphics validation using only synthetic scenery and weather.
+#![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::graphics::*;
 use std::collections::BTreeMap;

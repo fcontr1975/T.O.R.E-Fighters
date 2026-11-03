@@ -463,6 +463,8 @@ Linux, it also rejects a binary that needs a newer glibc than Ubuntu 22.04
 ships. It checks the build host, not every supported OS installation.
 `tools/check_startup_diagnostics.py EXECUTABLE` exercises success, returned
 errors and main/worker panics without media, using isolated paths with spaces.
+On Windows it also crashes the executable on purpose and checks the native crash
+report; elsewhere it checks that those modes say they are Windows only.
 Packaging runs it on staged binaries and on the actual payload recovered from
 the MSI, DMG, tar.gz and AppImage. MSI administrative extraction validates the
 payload without changing an installed product. Source and package asset scans
@@ -541,17 +543,34 @@ tore-app --diagnostics-self-test=worker-panic
 The three deliberate failures exit nonzero. `=graphics` presents a synthetic
 canvas through the first-run renderer and exits, requiring a display/GPU.
 `=dialog` deliberately displays the platform error message for manual checks.
+On Windows, `=native-crash` and `=stack-overflow` really crash the process and
+write the native crash report, and `=native-crash-window` does it from inside a
+window's redraw. Their exit status is the exception code. Elsewhere they exit
+nonzero with a message saying they are Windows only.
 Set `TORE_NO_ERROR_DIALOG=1` for unattended normal launches. On Windows, use
 `Start-Process -Wait -PassThru` when a script must wait for the release GUI exe
 and inspect its exit code; its stdout is not a visible console.
 
 If no session file appears in either the normal or fallback location, the
 process may have been blocked before its own code ran. Check installation,
-OS security messages and available system crash reports. Rust panic hooks do
-not catch native access violations or process kills. Windows Error Reporting,
-macOS Console crash reports and Linux journal/core reports provide separate
-OS evidence where enabled. Do not confuse these with a proven application
-cause. Share the timestamped fatal report and session log when reporting a
+OS security messages and available system crash reports. On Windows a native
+crash writes the same reports as a panic, naming the exception, the faulting
+module and offset, the stage and the last GPU step
+([contract](spec/startup-diagnostics.md#native-crashes-on-windows)); Linux and
+macOS do not report native crashes, and nothing catches a process kill. Windows
+Error Reporting, macOS Console crash reports and Linux journal/core reports provide
+separate OS evidence where enabled. Do not confuse these with a proven application
+cause.
+
+The log's last `GPU setup:` line names the shader or pipeline being created when
+the driver stopped. Repeating `Watchdog: still in stage` lines mean the process hung
+rather than crashed, since a crashed process stops writing. On Windows the player
+[chooses Vulkan or DirectX 12](spec/graphics-options.md#graphics-api) on the import
+screen or in Pref > Graphics, and a launch that finds the last one
+[did not finish graphics setup](spec/graphics-options.md#when-a-launch-did-not-finish-graphics-setup)
+asks first. `--graphics-api vulkan` or `dx12` chooses for one run,
+and `--graphics-api dx12 --diagnostics-self-test=graphics` checks DirectX 12 without
+game media. Share the timestamped fatal report and session log when reporting a
 startup problem; logs can contain local paths and device names.
 
 An editor with rust-analyzer is useful but optional. No global editor configuration is required.

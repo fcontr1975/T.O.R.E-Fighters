@@ -1,4 +1,5 @@
 //! Extensible 3D pass. World data/camera are independent of wgpu; UI composites afterward.
+use crate::gpu_setup::NamedSteps as _;
 use crate::terrain_chunks::CasterShape;
 pub use crate::vegetation_renderer::ViewKind;
 use crate::{
@@ -418,7 +419,7 @@ impl Pipelines {
         // the render origin; static airports and terrain stay in world space.
         surface_descriptor.label = Some("Moving objects");
         surface_descriptor.vertex.entry_point = Some("object_vertex");
-        let pipeline = device.create_render_pipeline(&surface_descriptor);
+        let pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.vertex.entry_point = Some("vertex");
         surface_descriptor.label = Some("Static airport surfaces");
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("airport_solid_fragment");
@@ -432,7 +433,7 @@ impl Pipelines {
             .as_mut()
             .unwrap()
             .depth_compare = wgpu::CompareFunction::GreaterEqual;
-        let airport_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let airport_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.label = Some("Static airport coplanar texture details");
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("airport_fragment");
         // One reversed-depth ULP resolves texture-on-pavement ties. This is
@@ -444,17 +445,17 @@ impl Pipelines {
             .unwrap()
             .bias
             .constant = 1;
-        let airport_decal_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let airport_decal_pipeline = device.named_render_pipeline(&surface_descriptor);
         // The surface units drawn every frame (columns, men, deck crew,
         // parked aircraft pieces) use the static art and its two passes, but
         // are built relative to the render origin like the aircraft.
         surface_descriptor.vertex.entry_point = Some("object_vertex");
         surface_descriptor.label = Some("Moving scenery coplanar texture details");
-        let moving_decal_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let moving_decal_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.label = Some("Moving scenery surfaces");
         surface_descriptor.depth_stencil.as_mut().unwrap().bias = Default::default();
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("airport_solid_fragment");
-        let moving_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let moving_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.vertex.entry_point = Some("vertex");
         surface_descriptor
             .depth_stencil
@@ -464,7 +465,7 @@ impl Pipelines {
         surface_descriptor.depth_stencil.as_mut().unwrap().bias = Default::default();
         surface_descriptor.primitive.topology = wgpu::PrimitiveTopology::LineList;
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("scenery_line_fragment");
-        let scenery_line_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let scenery_line_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("fragment");
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -486,7 +487,7 @@ impl Pipelines {
         ];
         surface_descriptor.vertex.entry_point = Some("terrain_vertex");
         surface_descriptor.vertex.buffers = &terrain_buffers;
-        let terrain_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let terrain_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.vertex.entry_point = Some("object_vertex");
         surface_descriptor.vertex.buffers = surface_buffers;
         // Share the aircraft material bindings. First select the nearest glass
@@ -499,7 +500,7 @@ impl Pipelines {
             write_mask: wgpu::ColorWrites::empty(),
         })];
         surface_descriptor.fragment.as_mut().unwrap().targets = &depth_target;
-        let canopy_depth_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let canopy_depth_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.label = Some("Canopy transparency");
         let glass_target = [Some(wgpu::ColorTargetState {
             format,
@@ -510,7 +511,7 @@ impl Pipelines {
         let depth = surface_descriptor.depth_stencil.as_mut().unwrap();
         depth.depth_write_enabled = false;
         depth.depth_compare = wgpu::CompareFunction::Equal;
-        let canopy_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let canopy_pipeline = device.named_render_pipeline(&surface_descriptor);
         surface_descriptor.label = Some("Additive luminous gun tracers");
         surface_descriptor.fragment.as_mut().unwrap().entry_point = Some("tracer_fragment");
         let tracer_target = [Some(wgpu::ColorTargetState {
@@ -535,7 +536,7 @@ impl Pipelines {
             .as_mut()
             .unwrap()
             .depth_compare = wgpu::CompareFunction::Greater;
-        let tracer_pipeline = device.create_render_pipeline(&surface_descriptor);
+        let tracer_pipeline = device.named_render_pipeline(&surface_descriptor);
         // Spotting aid: aircraft vertices plus per-aircraft instance data,
         // drawn at output resolution without multisampling so every rim pixel
         // is whole. Occlusion comes from reading the world depth.
@@ -571,7 +572,7 @@ impl Pipelines {
         // idempotent, and the rim never lightens (or darkens) the background.
         let rim = |label, fragment: &str, operation| {
             let fragment = format!("{fragment}{}", if samples > 1 { "_ms" } else { "" });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&rim_layout),
                 vertex: wgpu::VertexState {
@@ -633,7 +634,7 @@ impl Pipelines {
             crate::airfield_lights::Pipeline::new(device, shader, format, samples, &surface_layout);
         let night_glow =
             crate::night_glow::Pipeline::new(device, shader, format, samples, &surface_layout);
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let sky_pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Retail sky preview"),
             layout: Some(&sky_layout),
             vertex: wgpu::VertexState {
@@ -666,14 +667,14 @@ impl Pipelines {
             multiview: None,
             cache: None,
         });
-        let celestial_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let celestial_pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Original celestial primitives"), layout: Some(&sky_layout),
             vertex: wgpu::VertexState { module:shader,entry_point:Some("celestial_vertex"),compilation_options:Default::default(),
                 buffers:&[wgpu::VertexBufferLayout {array_stride:40,step_mode:wgpu::VertexStepMode::Vertex,attributes:&wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32,3=>Float32x3,4=>Float32]}]},
             fragment:Some(wgpu::FragmentState {module:shader,entry_point:Some("celestial_fragment"),compilation_options:Default::default(),targets:&[Some(wgpu::ColorTargetState {format,blend:Some(wgpu::BlendState::ALPHA_BLENDING),write_mask:wgpu::ColorWrites::ALL})]}),
             primitive:Default::default(),depth_stencil:Some(wgpu::DepthStencilState {format:wgpu::TextureFormat::Depth32Float,depth_write_enabled:false,depth_compare:SKY_DEPTH_COMPARE,stencil:Default::default(),bias:Default::default()}),multisample,multiview:None,cache:None,
         });
-        let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let cloud_pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:Some("Original cloud sheets"),layout:Some(&sky_layout),
             vertex:wgpu::VertexState {module:shader,entry_point:Some("vertex"),compilation_options:Default::default(),buffers:&[wgpu::VertexBufferLayout {array_stride:40,step_mode:wgpu::VertexStepMode::Vertex,attributes:&wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32,3=>Float32x3,4=>Float32]}]},
             fragment:Some(wgpu::FragmentState {module:shader,entry_point:Some("cloud_fragment"),compilation_options:Default::default(),targets:&[Some(wgpu::ColorTargetState {format,blend:None,write_mask:wgpu::ColorWrites::ALL})]}),
@@ -681,7 +682,7 @@ impl Pipelines {
         });
         // Wing vapor is five one-pixel line segments per side, exactly as
         // `_DrawStreamer@12` draws them, so it needs its own blended pipeline.
-        let vapor_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let vapor_pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Wing vapor"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -755,7 +756,7 @@ impl SimRenderer {
     ) -> Self {
         crate::vegetation_limits::validate(scenery, &device.limits())
             .expect("scene resources must fit device limits before upload");
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Simulation terrain"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
@@ -1758,11 +1759,11 @@ impl SimRenderer {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
     ) -> wgpu::RenderPipeline {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Render scale resample"),
             source: wgpu::ShaderSource::Wgsl(include_str!("resample.wgsl").into()),
         });
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render scale resample"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -2806,6 +2807,7 @@ fn world_store_ops(resolves: bool, depth_read: bool) -> (wgpu::StoreOp, wgpu::St
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod lighting_tests {
     use super::*;
 

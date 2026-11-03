@@ -127,7 +127,9 @@ play through the slowdown, then send that session's log. Logs are in
 command-line options and software-renderer warnings.
 
 If the game does not start, it writes logs and a crash report that help us find
-out why. [Startup troubleshooting](docs/DEVELOPMENT.md#startup-logs-and-fatal-errors)
+out why. On Windows you can choose Vulkan or DirectX 12 on the import screen or
+under Pref > Graphics, and `--graphics-api vulkan` or `dx12` chooses for one run.
+[Startup troubleshooting](docs/DEVELOPMENT.md#startup-logs-and-fatal-errors)
 says where to find them. Bugs and questions are welcome in
 [Issues](https://github.com/john-overton/T.O.R.E-Fighters/issues) and
 [Discussions](https://github.com/john-overton/T.O.R.E-Fighters/discussions).

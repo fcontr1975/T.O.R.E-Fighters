@@ -1,6 +1,7 @@
 //! Opinionated chaff and flare presentation: burning flares with their glare
 //! and light, and shimmering chaff clouds. Simulation owns motion and life;
 //! rules and constants are in docs/spec/countermeasures.md.
+use crate::gpu_setup::NamedSteps as _;
 use tore_sim::combat::countermeasures::{Devices, MAX_CHAFF, MAX_FLARES};
 
 /// Flares that light the scene at once, nearest and brightest first.
@@ -208,7 +209,7 @@ impl Pipelines {
                         blend,
                         depth: Option<wgpu::DepthStencilState>,
                         count| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 vertex: wgpu::VertexState {

@@ -332,6 +332,7 @@ MENU_FAMILIES = ("menus-screens", "menus-creator", "menus-validate")
 # The first matching rule wins. Patterns are fnmatch on the repository-relative path, where "*" also
 # crosses "/".
 RULES: tuple[Rule, ...] = (
+    _r("crates/vendor/naga/*", RENDER_FAMILIES, "patched shader translator", windowed=True),
     _r("crates/tore-app/src/terrain_seams*", ("vegetation", "flight-views"), "terrain seam masks, colours and vegetation belts", windowed=True),
     _r("crates/tore-app/src/terrain_audit.rs", ("terrain-colors",), "CPU retail tile import audit"),
     _r("crates/tore-app/src/vegetation*", ("vegetation", "flight-views"), "vegetation placement and atlas rendering", windowed=True),

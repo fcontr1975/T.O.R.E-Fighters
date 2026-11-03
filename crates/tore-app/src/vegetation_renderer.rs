@@ -1,6 +1,7 @@
 //! Cached vegetation impostors, legacy tufts and GPU-generated grass blades. Source shapes
 //! are rasterized once into indexed atlas pages. GPU culling compacts all
 //! visible species into one instance stream and one indirect draw. Not collidable.
+use crate::gpu_setup::NamedSteps as _;
 
 use crate::vegetation::{self, Inst, Patch, Placement, Species};
 use crate::vegetation_shapes::{FLOATS, Library, Look};
@@ -291,7 +292,7 @@ impl Renderer {
             meshes: &meshes,
         };
         let main = main_stream(device, &shared, capacity);
-        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let cull_shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Vegetation cull"),
             source: wgpu::ShaderSource::Wgsl(include_str!("vegetation_cull.wgsl").into()),
         });
@@ -301,7 +302,7 @@ impl Renderer {
             push_constant_ranges: &[],
         });
         let compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Vegetation cull"),
                 layout: Some(&compute_layout),
                 module: &cull_shader,
@@ -1222,7 +1223,7 @@ fn render_pipelines(
                 buffers: &[wgpu::VertexBufferLayout],
                 depth: bool,
                 writes: bool| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -1323,7 +1324,7 @@ fn shadow_pipelines(
     ];
     std::array::from_fn(|cascade| {
         let entry = format!("veg_shadow_vertex{cascade}");
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Vegetation shadow casters"),
             layout: Some(&lighting.caster_layout),
             vertex: wgpu::VertexState {

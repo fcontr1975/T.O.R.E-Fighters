@@ -1,5 +1,6 @@
 //! Shared, opinionated surface lighting and geometric shadows.
 //! Player-visible rules: docs/spec/surface-lighting.md.
+use crate::gpu_setup::NamedSteps as _;
 use crate::{camera::Camera, scenery::Scenery, terrain::Terrain};
 use wgpu::util::DeviceExt;
 
@@ -425,7 +426,7 @@ impl SurfaceLighting {
         // Terrain raster bias is constant 2 / slope 3, objects' constant 1 /
         // slope 1 (docs/spec/surface-lighting.md).
         let make = |label: &str, vertex: &str, fragment: Option<&str>, terrain: bool| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {

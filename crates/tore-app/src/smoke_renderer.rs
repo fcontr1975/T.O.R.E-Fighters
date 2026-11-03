@@ -1,6 +1,7 @@
 //! Camera-facing original smoke artwork. Simulation owns emission and lifetime.
 use crate::camera::Camera;
 use crate::countermeasure_renderer::{FlareLight, glow};
+use crate::gpu_setup::NamedSteps as _;
 use tore_formats::Pic;
 use tore_sim::combat::countermeasures::{Devices, MAX_FLARE_PUFFS};
 use tore_sim::combat::smoke::{Kind, MAX_CONTRAIL_PUFFS, MAX_PUFFS, Smoke};
@@ -118,7 +119,7 @@ impl SmokeRenderer {
         shader: &wgpu::ShaderModule,
         samples: u32,
     ) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Original smoke billboards"), layout: None,
             vertex: wgpu::VertexState { module: shader, entry_point: Some("smoke_vertex"), compilation_options: Default::default(), buffers: &[wgpu::VertexBufferLayout {
                 array_stride: INSTANCE_BYTES as u64, step_mode: wgpu::VertexStepMode::Instance,
@@ -308,6 +309,7 @@ impl SmokeRenderer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use wgpu::util::DeviceExt;

@@ -16,6 +16,7 @@
 //! (docs/spec/explosions.md, "Shockwave"). It is drawn from the effect and
 //! the mission's climate alone, so replays and every networked client show
 //! it too. The vapor and the lingering dust are `blast_climate`'s.
+use crate::gpu_setup::NamedSteps as _;
 pub mod cluster;
 
 use crate::camera::Camera;
@@ -1020,7 +1021,7 @@ impl EffectRenderer {
         bias: wgpu::DepthBiasState,
         layout: Option<&wgpu::PipelineLayout>,
     ) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Original explosion, fire and crater sprites"),
             layout,
             vertex: wgpu::VertexState {

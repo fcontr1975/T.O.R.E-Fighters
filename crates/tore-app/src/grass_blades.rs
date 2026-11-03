@@ -3,6 +3,7 @@
 //! grown ones; without compute, every candidate is drawn and each vertex
 //! evaluates its blade (the original path, `TORE_GRASS_PATH=vertex`).
 use super::{Map, PAGE, VERTICES, candidates, grown_bound, root_lift, side, spacing};
+use crate::gpu_setup::NamedSteps as _;
 use crate::{graphics::VegDensity, terrain::Terrain};
 
 pub struct Blades {
@@ -287,7 +288,7 @@ impl Blades {
                 bind_group_layouts: &[material, &empty_layout, &layout, &out_layout],
                 push_constant_ranges: &[],
             });
-            let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let compute = device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Blade grass candidates"),
                 layout: Some(&compute_layout),
                 module: shader,
@@ -557,7 +558,7 @@ fn pipeline(
         bind_group_layouts: &[material, lighting, resources],
         push_constant_ranges: &[],
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Opaque grass blades"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {

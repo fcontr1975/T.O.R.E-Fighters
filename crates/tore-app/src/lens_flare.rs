@@ -8,6 +8,7 @@
 //! result per camera slot in a GPU buffer, eases it over a few frames, and the
 //! composition reads it the same frame: no readback and no stall. Points off
 //! the view count by a terrain ray ([`terrain_clear`]).
+use crate::gpu_setup::NamedSteps as _;
 use crate::{camera::Camera, scenery::Scenery, terrain::Terrain};
 use std::time::Instant;
 
@@ -272,7 +273,7 @@ impl LensFlare {
         depth_layout: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Original lens-flare fills"),
             source: wgpu::ShaderSource::Wgsl(include_str!("lens_flare.wgsl").into()),
         });
@@ -335,7 +336,7 @@ impl LensFlare {
                 (buffer, bind)
             })
             .collect();
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Source lens-flare composition"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -398,7 +399,7 @@ impl LensFlare {
         probe_layout: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> wgpu::ComputePipeline {
-        let measure_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let measure_shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sun visibility"),
             source: wgpu::ShaderSource::Wgsl(include_str!("sun_visibility.wgsl").into()),
         });
@@ -407,7 +408,7 @@ impl LensFlare {
             bind_group_layouts: &[depth_layout, probe_layout],
             push_constant_ranges: &[],
         });
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Sun visibility"),
             layout: Some(&measure_layout),
             module: &measure_shader,
@@ -640,6 +641,7 @@ impl LensFlare {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

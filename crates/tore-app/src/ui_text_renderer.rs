@@ -1,5 +1,6 @@
 //! The GPU side of `ui_text`: draws the recorded glyph rectangles over the
 //! menu canvas, in the same render pass, at the window's resolution.
+use crate::gpu_setup::NamedSteps as _;
 use crate::ui_text::{Quad, atlas};
 
 /// Mipmap levels uploaded: glyphs are drawn between about 1:1 and a quarter of
@@ -93,11 +94,11 @@ impl UiTextRenderer {
             mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("UI text"),
             source: wgpu::ShaderSource::Wgsl(include_str!("ui_text.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("UI text"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -147,11 +148,11 @@ impl UiTextRenderer {
             ],
         });
         let capacity = 1024;
-        let fps_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let fps_shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Frame rate"),
             source: wgpu::ShaderSource::Wgsl(include_str!("frame_rate.wgsl").into()),
         });
-        let fps_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let fps_pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Frame rate"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -321,6 +322,7 @@ impl UiTextRenderer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use crate::menu::Canvas;

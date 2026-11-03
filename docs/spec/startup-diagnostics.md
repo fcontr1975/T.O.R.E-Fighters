@@ -29,6 +29,45 @@ failure identifies the unfinished stage and the available error cause chain.
 Recoverable failures, including unavailable audio, remain recoverable warnings.
 No graphics or flight adapter selection changes as a side effect of logging.
 
+## GPU setup steps and the watchdog
+
+**Opinionated**, requested by John on 2026-11-02 after issue #8, where a driver
+died during `Renderer::new` and the log could not say on what. The line budget,
+threshold and intervals are agent decisions, labeled **fitted** below.
+
+The game names each driver-reaching call before making it: every shader module
+and render or compute pipeline it creates, whenever that happens (first-run
+canvas, game renderer, lens flare, vegetation, city fill, smoke, effects, CRT,
+cockpit, UI text, and the rebuilds after an anti-aliasing change or theater
+load), plus the instance, surface, adapter, device and surface configuration
+steps. All of them go through `crates/tore-app/src/gpu_setup.rs`, and a Clippy
+rule rejects direct wgpu calls outside tests. A line reads
+`GPU setup: render pipeline 'Menu'`. The adapter's name, IDs, backend, type,
+driver and driver info get a line of their own before the device is requested,
+which the later `Session system` record repeats.
+
+Each line reaches the OS before the call. The session log has no buffer in the
+process: each record is a direct file write, so it survives the process crashing
+on the next instruction (not a power cut). A step line waits up to 100 ms for
+another thread's log write instead of dropping out, as an ordinary record would.
+
+A call that takes 1 s or more (**fitted**) gets a timing line, because a slow
+driver compile is evidence of its own. A session writes at most 2000 step lines
+(**fitted**; about 65 per launch, measured on Linux), then one line saying so.
+That bounds them to about 200 KiB of the 5 MiB routine log. Crash reports and the
+watchdog keep naming the current step past the budget.
+
+A watchdog thread tells a hang from a crash. While a stage or a GPU step outside
+a stage has been running long enough, it writes
+`Watchdog: still in stage 'X' after 30 s; last GPU step: in render pipeline 'Menu' (running 29 s)`.
+The first line comes at 30 s and each later one after twice the wait, for at most
+8 lines per stage: 30 s, 1, 2, 4, 8, 16, 32 and 64 minutes (**fitted**). A process
+that hung keeps saying so; one that crashed stops. A stage that legitimately waits
+on the player, such as the first-run import screen, spends those 8 lines and stops.
+The watchdog only logs. It never kills the process or opens a dialog, it does not
+touch the simulation, and it does not keep the process alive at exit. It stops
+once the process is reporting a failure.
+
 ## Graphics session and slow frames
 
 **Opinionated**, requested by John on 2026-10-25. Rate limits, threshold,
@@ -164,6 +203,68 @@ registers the source and the executable's embedded message resource. The game
 never asks for elevation to log. Event logging failure leaves file reporting
 and the dialog available.
 
+## Native crashes on Windows
+
+**Opinionated**, requested by John on 2026-11-02 after issue #8. The wait limits,
+the stack scan and the helper thread design are agent decisions. Native crashes are
+**not** reported on Linux or macOS, which keep their OS crash reports.
+
+An access violation, stack overflow, illegal instruction or other exception that
+nothing handled writes the same reports as a Rust panic: the fatal report file,
+`last-error.txt`, the session log, stderr where there is one, the Application
+event (source `T.O.R.E-Fighters`, ID 1000), and the native dialog under the same
+rules as other failures, including `TORE_NO_ERROR_DIALOG=1` and automated modes.
+Retention is the same. A process writes one native report, of at most 16 KiB, on
+top of the fatal file's usual limit. The report states:
+
+- the exception code and its Windows name, the faulting instruction address, and
+  for access violations whether it was a read, write or execution and at what
+  address;
+- the faulting module's path and the offset inside it;
+- the active stage, the last GPU step and whether it had returned, and the adapter;
+- when the failure happened during GPU setup, one line saying the graphics API can be
+  changed. It says the next launch offers the choice only when this process held a
+  [setup marker](graphics-options.md#when-a-launch-did-not-finish-graphics-setup) at
+  that moment, and otherwise points to Pref > Graphics and `--graphics-api`. This line
+  is also in the dialog, and in fatal reports of returned errors and panics on Windows;
+- the thread: `main` or another, its OS ID, and its name in the fatal report;
+- code addresses found on the crashed stack as module and offset. These are
+  candidates and not a verified call chain: a stack also holds stale values.
+
+It uses an unhandled-exception filter, so it sees only what nothing else handled.
+Deliberate exceptions that drivers and libraries catch with vectored or `__try`
+handlers run first and never reach it, and Rust panics keep their own hook. The
+filter chains to any earlier filter and then returns `EXCEPTION_CONTINUE_SEARCH`,
+so Windows still writes its own "Application Error" entry and any dump its settings
+ask for. After device creation the game checks that a driver DLL has not replaced
+the filter; if one has, a WARN says so and the filter goes back in front. It does not
+chain to that other filter, because its DLL can unload. It chains only to the one
+present when it was installed, which belongs to the program.
+
+A crashed thread may hold the heap lock and may have almost no stack, so the
+filter only copies the facts into preallocated atomics and wakes a helper thread
+started at launch, with its own 512 KiB stack. That also answers the stack overflow
+case: the filter runs in the little stack that remains, which is at least the
+20 KiB Rust's runtime reserves on the main thread and its own threads. Rust's own
+stack-overflow handler is a vectored handler that prints a line and continues the
+search, so the filter runs after it. No extra stack is reserved, and no thread's
+stack size changes.
+
+The helper writes in order of safety: the facts that need nothing from the OS's
+loader, then the module and stack scan, which can wait on the loader lock, then
+`last-error.txt`. The crashed thread waits at most 10 s for that. The event and dialog
+come afterwards and may allocate inside the OS. It waits a further 5 s for them, and
+the helper says when it is about to open a dialog, which extends that to 120 s. A
+second crash on another thread waits the same way, so it cannot close an open dialog.
+Whatever a blocked helper has not finished by then is lost, and the report so far and
+the Windows crash record remain.
+
+Not caught, because Windows ends the process without running any filter:
+fast-fail terminations (`__fastfail`, stack cookie failures, and some heap
+corruption), `TerminateProcess`, and failures before the game's own code runs. A
+debugger takes the exception first. Those cases still leave the last stage and GPU
+step in the session log.
+
 ## Diagnostic and release checks
 
 `--diagnostics-self-test` runs a media-free success check and exits zero.
@@ -171,7 +272,13 @@ and the dialog available.
 exercise reporting and exit nonzero without dialogs. `=graphics` presents a
 synthetic first-run canvas and exits; it needs a display/GPU but no retail data.
 `=dialog` deliberately shows the native error UI for manual acceptance.
-Diagnostic failures are plainly labelled as deliberate tests.
+`=native-crash` and `=stack-overflow` deliberately crash on Windows and turn off
+the Windows crash window for that run so a script does not wait on it; the exit
+status is the exception code, 0xC0000005 and 0xC00000FD. `=native-crash-window`
+makes the same crash from inside a window's redraw, with Windows' message dispatch
+on the stack, and needs a display. On other platforms all three fail with a message
+saying they are Windows only. Any self-test may be combined with
+`--graphics-api VALUE`. Diagnostic failures are plainly labelled as deliberate tests.
 
 Release builds carry version, commit and target metadata and retain matching
 debug symbols as separate build artifacts. Package checks launch staged
@@ -180,8 +287,8 @@ check runtime library dependencies. Installed Windows shortcut/direct launches,
 macOS Finder launches and Linux desktop launches remain explicit acceptance
 checks; build success does not substitute for them.
 
-Missing libraries, OS security blocking, access violations, process kills and
-other failures before or outside Rust reporting may leave only the last stage,
-or no application log at all. OS crash/event reports and installation evidence
-are needed in those cases. No automatic upload or crash-dump collection is
+Missing libraries, OS security blocking, process kills, native crashes on Linux
+and macOS, and other failures before or outside this reporting may leave only the
+last stage, or no application log at all. OS crash/event reports and installation
+evidence are needed in those cases. No automatic upload or crash-dump collection is
 enabled by this feature.

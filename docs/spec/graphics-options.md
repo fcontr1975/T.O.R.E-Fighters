@@ -148,6 +148,125 @@ else `Mailbox`, else `Fifo`, no timer and no unfocused cap) for benchmarks.
 Uncapped is not offered on the screen. Any other value is ignored with a
 warning. While it is set, the About panel says so under the Frame rate row.
 
+## Graphics API
+
+**Opinionated.** John asked on 2026-11-02, after issue #8, for the player to pick
+Vulkan or DirectX 12 on the import screen and in the Graphics settings. The default
+rule, the DirectX 12 compiler flag and the wording are agent decisions.
+
+Windows only. The player sees two values, **Vulkan** and **DirectX 12**, and the
+game never changes the choice by itself. Linux and macOS show nothing and leave the
+choice to wgpu, as they always have.
+
+The value is saved as `graphics-api` in `graphics-v1.conf`, only once the player has
+chosen, so a default file is unchanged. Until then the game uses Vulkan when a
+hardware Vulkan adapter exists, otherwise DirectX 12. A software Vulkan driver does not
+count, because it would win over a hardware DirectX 12 adapter and draw on the CPU. A value this build does not know counts
+as not chosen, without costing the rest of the file.
+
+`--graphics-api vulkan|dx12` chooses for one run and is never saved, not even by an
+edit on the Graphics screen, unlike the other graphics flags. `--graphics-api auto`
+asks for the default rule for one run, ignoring the saved value. Outside Windows
+only `auto` is accepted, and the flag explains that for the other two.
+
+The player can choose in two places:
+
+- **The import screen** (the first-run [Locate Fighters Anthology](first-run-import.md)
+  screen, also reached by Pref > Re-import media) shows the choice on its title line,
+  usable before, during and after an import. It is saved at once and applies **with
+  no restart**: every route from that screen into the game builds a new renderer and
+  a new wgpu instance after it, in the same process, and each instance reads the
+  choice in effect. The screen says so when the choice changes. The screen itself
+  keeps drawing with the API it opened on.
+- **Pref > Graphics**, the Graphics API row under Display. It is saved like the other
+  rows but **does not apply live**: the running renderer keeps its API, and the
+  message says to restart the game. While the row differs from the API in use, the
+  note under it names both. A later Pref > Re-import media in the same process counts
+  as a restart, since it builds a new renderer. Defaults leaves the row alone, because
+  it may be what keeps the game running.
+
+### When a launch did not finish graphics setup
+
+A player whose game dies during GPU setup never reaches either screen: once media is
+imported, every launch goes straight to the game window. So the game notices, and
+asks. Nothing switches without the player.
+
+A **marker** is one file per process in `<data>/gpu-setup/`, holding an OS file lock
+for the life of the process, naming the API in use. It exists around launch-time
+setup only: while looking for a Vulkan adapter for the default rule, while the
+first-run canvas draws its first frame, and while the game renderer is built up to its
+first presented frame. A long import is never covered, and nor are mission, replay and
+theater loads, because a player who dies there has already reached Pref > Graphics.
+
+A launch that can take a marker's lock knows its owner is gone, and removes it. Then,
+before anything else, it shows a small screen on the same canvas path as the import
+screen, with the choice, Continue and Quit, and one sentence saying the last launch
+did not finish graphics setup. Continue saves the choice and the game goes on, with
+no restart. The screen always draws on the API that did not die, never looks for a
+Vulkan adapter first, and has a marker of its own: if it dies too, the next launch's
+screen draws on the other API, so it can never get stuck retrying one. The saved value
+only sets which option is highlighted. With nothing saved, the API that did not die is
+highlighted, so that Continue tries something different.
+
+What leaves a marker behind:
+
+- **A native crash, a kill, or a Rust panic.** A kill during a slow compile counts,
+  and costs one question.
+- **A returned error during setup.** It has its own report and dialog too, but a
+  player whose driver cannot start needs the same way out.
+
+What does not:
+
+- **A clean close**, including a quit during setup. The marker is removed.
+- **A sibling game**, running several being allowed: its marker is locked and skipped.
+- **Another profile**: markers live in the data directory, so an isolated
+  `TORE_DATA_DIR` sees only its own.
+- **A run with no player**: headless, capture, smoke test, validation, perf,
+  scripted-input and diagnostic modes, or `TORE_NO_ERROR_DIALOG=1`, write no marker,
+  read none and never ask. A launch with `--graphics-api vulkan` or `dx12` writes one, since
+  it can die too, but it does not ask, because the flag has already answered.
+- **A file system with no file locks**: without them a live sibling would look dead, so
+  that launch writes no marker and logs why. A marker that cannot be opened or locked
+  proves nothing about its owner either, so it is skipped and logged. One that cannot
+  be removed is logged, and the next launch may ask again.
+
+The first-run screen, the game, and the offline preview tools all use the same
+choice, through `graphics_api::instance`. A Clippy rule rejects any other
+`wgpu::Instance::new` outside tests. The offline tools that return before the launch
+reads its options (`--reel-render`, for example) use the default rule and ignore the
+saved value.
+
+### DirectX 12 shader compilation
+
+wgpu 27 compiles shaders on DirectX 12 with **FXC** by default: `d3dcompiler_47.dll`,
+part of Windows, nothing to ship. It translates WGSL through naga to HLSL shader
+model 5.1 when each pipeline is created. There is no disk cache, so this repeats
+every launch, and it runs on the main thread, so the window stops responding. The
+game retitles the window while it happens.
+
+Every DirectX 12 instance passes `InstanceFlags::DEBUG`, which is wgpu's one way to
+ask FXC to skip optimization. The GPU driver still optimizes what it receives. Other
+backends keep the default flags.
+
+Measured on 2026-11-02: every game shader, translated by naga 27.0.3 with wgpu's
+options and compiled by the real `d3dcompiler_47.dll` 10.0.17134.12 under Wine on a
+busy Linux machine, on a 1 MiB main-thread stack. These are compile times only.
+
+| | Unique entry points | Failed | One launch | Slowest |
+| --- | --- | --- | --- | --- |
+| FXC default | 85 | 0 | about 530 s | `terrain_fragment` 342 s, `sky_fragment` 147 s |
+| Skip optimization | 86 | 0 | about 42 s | `terrain_fragment` 23 s, `sky_fragment` 9 s |
+
+On a Windows VM with no GPU (Basic Render Driver), `--graphics-api dx12 --smoke-test`
+passed in 55 s, with the Shoreline terrain pipeline taking 24 to 38 s. With full FXC
+that pipeline had not finished after 230 s, when the run was stopped. Turning off
+naga's runtime checks made no real difference. How the picture and frame rate hold
+up on real GPUs has not been measured.
+
+DXC would be faster but is not used. It needs `dxcompiler.dll` shipped beside the
+game (tens of MiB) or wgpu's `static-dxc` feature, which pulls a prebuilt static
+library into the build.
+
 ## Anti-aliasing
 
 Multisample anti-aliasing of the 3D view: aircraft, terrain, clouds, horizon,
@@ -501,11 +620,11 @@ For one run, without saving: `--anti-aliasing off|2x|4x|8x`,
 `--vegetation-texture-distance 1|2|4`, `--vegetation-distance 2|4|6|8`,
 `--vegetation-detail 1|2|3|4`, `--vegetation-density low|medium|high|ultra`,
 `--shadows off|low|medium|high|ultra`, and `--original-graphics` for everything off
-at 100%. `TORE_SHOW_FPS=1` shows the frame-rate counter for that run without
+at 100%. `--graphics-api` also lasts one run but follows [its own rules](#graphics-api). `TORE_SHOW_FPS=1` shows the frame-rate counter for that run without
 writing it into the file, and `TORE_FRAME_LIMIT=off|vsync|60|100|200` sets the
 [frame rate](#frame-rate) for that run. Flags apply in order, so `--original-graphics --spotting-aid strong`
 turns on only the outline. Any change on the Graphics screen saves everything
-the screen shows, including a flag's value.
+the screen shows, including a flag's value, except `--graphics-api`.
 
 ## Cost
 
