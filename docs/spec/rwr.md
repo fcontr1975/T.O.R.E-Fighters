@@ -173,6 +173,7 @@ step and the mixer loops it, centred, restarting on a change of tone.
 | Component | Behaviour in TORE | Provenance |
 | --- | --- | --- |
 | Ranks 1 and 2 | Live projectiles marked incoming whose target is the player, by the weapon's seeker class, with the AIM-120 rule, checked every step rather than every 2 seconds | spec-derived; step rate fitted |
+| Energy inert stores | Incoming indications and rank 1/2 tones follow the shared [Energy defeat rule](missile-energy.md#motion); independent lock warnings remain. | opinionated, John's Phase 2.6 decision |
 | Ranks 3 and 4 | AI aircraft on the enemy side whose target is the player, weapon phase tracking or firing, and whose chosen station carries a class 2 or 3 weapon; held four quarter-second clock steps past the last refresh | spec-derived |
 | Level | 0.4 times the original's ratio of this tone to a full-level effect at the default settings, then RWR and OVERALL relative to their defaults, OVERALL twice | spec-derived ratio; absolute level fitted |
 | Own seeker | Silent while a warning sounds; it restarts from the beginning afterwards | spec-derived |

@@ -76,6 +76,7 @@ crate::checkpoint_struct!(StationSpec {
     tracking_delay,
     pacing,
     maximum_range_ft,
+    energy_target,
     minimum_range_ft,
     requires_radar,
     requires_sensor,
@@ -193,9 +194,9 @@ impl Checkpoint for AiActor {
     fn save(&self, s: &mut Saver, _: Option<&Self>) -> Result<(), CheckpointError> {
         // `adapter`: per-tick scratch and a report. Its `last_requested` is
         // written by `ControlAdapter::controls` for tests and reporting and
-        // read by nothing in the simulation. Its `gun_aim` and
-        // `strike_handling` are cleared by `step_actor` before anything else
-        // and set again before the only call to `controls`, in the same step.
+        // read by nothing in the simulation. Its `gun_aim`, `strike_handling`
+        // and defensive handling are cleared by `step_actor` before anything
+        // else and set again before `controls`, in the same step.
         //
         // `trace` and `journal_memory`: why-records.
         let AiActor {

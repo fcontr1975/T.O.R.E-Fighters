@@ -269,6 +269,7 @@ fn build_mission(spec: &MissionSpec, resources: &BTreeMap<String, Vec<u8>>) -> W
         resources,
         Seating::Open,
         &mut Hooks {
+            inspect_invalid_placement: false,
             player: None,
             load: Some(&mut load),
             weapon_label: None,

@@ -53,10 +53,18 @@ use crate::sensors::FEET_PER_NAUTICAL_MILE;
 
 #[path = "strike_lase.rs"]
 mod lase;
+#[path = "strike_reach.rs"]
+pub mod reach;
+pub use reach::{ShotLaunch, ShotTable, Shots};
+#[path = "strike_standoff.rs"]
+mod standoff;
 pub use lase::{
     LASE_BANK_MARGIN_DEG, LASE_CONE_EXIT_FT, LASE_MAX_TICKS, LASE_MIN_TICKS, LASE_RADIUS_MIN_FT,
     LASE_RADIUS_TURNS, LASE_REACH_SHARE, LASE_WAIT_TICKS, Lase, LaseEnd, LaseInputs, LaseSensor,
     LaseUntil, WingFacts, bank_cap_deg, lase_radius_ft, orbit_speed_fps, turn_rate_deg,
+};
+pub use standoff::{
+    ADVANCE_TURNS, PLAN_SLACK_FT, ROUND_FALLBACK_FPS, ROUND_MARGIN_S, ReleasePlan, STANDOFF_EXIT_FT,
 };
 
 /// Feet in a metre, for John's release circle (given in metres).
@@ -220,6 +228,28 @@ pub const SPOT_WAIT_RANGES: f64 = 1.5;
 /// While every briefed target is fully attacked the striker re-chooses this
 /// often (fitted).
 pub const WAIT_TICKS: u64 = 2 * 120;
+/// The committed-to-release window (T.O.R.E, John, 2026-10-28): an attack
+/// run this many seconds or less from its computed release point is not
+/// broken off by a new defence trigger; the striker releases, then reacts.
+pub const COMMIT_WINDOW_S: f64 = 5.;
+/// The longest the window holds a run, whatever the estimate says (fitted,
+/// agent): a run that has not released by then defends.
+pub const COMMIT_HOLD_TICKS: u64 = 8 * 120;
+/// A cue this many seconds past its release point no longer holds the run
+/// (fitted, agent).
+pub const COMMIT_PAST_S: f64 = 0.5;
+/// The time constant over which the cue's measured closing speed is
+/// filtered, ticks (0.5 s; fitted, agent).
+pub const CUE_RATE_TICKS: f64 = 60.;
+/// A striker whose target dies before its pass releases sets up its next
+/// pass at least this share of the exit distance from the new target
+/// (T.O.R.E, John, 2026-10-28; the share fitted, agent).
+pub const RETARGET_SETUP_SHARE: f64 = 0.5;
+/// After an early retarget the striker climbs back to its cruise height
+/// before it chooses the new pass, within this many feet (fitted, agent):
+/// a straight run begun from the old run's low height flew the line to the
+/// target down to where FRAG held its bomb (Vladivostok HQ, A-10).
+pub const RETARGET_HEIGHT_SLACK_FT: f64 = 300.;
 /// Class word bits of a SAM and an AAA unit (retail type `+0x0d`).
 pub const CLASS_SAM: u16 = 0x1000;
 pub const CLASS_AAA: u16 = 0x800;
@@ -451,6 +481,10 @@ pub struct Store {
     /// no spot (a laser glide bomb, not a laser missile): it can be dropped
     /// by hand as an unguided bomb (slice ST-G).
     pub falls_free: bool,
+    /// A guided store's time of flight to a ground target, from the host's
+    /// estimate (a helicopter's stand-off advance, John 2026-10-29); `None`
+    /// when the host gave none.
+    pub flight: Option<FlightTimes>,
 }
 
 impl Store {
@@ -458,6 +492,41 @@ impl Store {
     pub fn retarded(&self) -> bool {
         self.kind == StoreKind::Bomb && self.release_speed_share < 0.95
     }
+}
+
+/// A guided store's time of flight to a ground target at a few ranges, from
+/// the host's energy-model estimate (or its record's speed under the other
+/// rules): `points` are (range feet, seconds), ranges rising.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlightTimes {
+    pub points: [(f64, f64); 4],
+}
+
+impl FlightTimes {
+    /// The time of flight to `range_ft`, seconds: along the straight lines
+    /// between the points (from no time at no range), and past the last at
+    /// the last stretch's pace.
+    pub fn seconds_to(&self, range_ft: f64) -> f64 {
+        let range = range_ft.max(0.);
+        let mut previous = (0., 0.);
+        for point in self.points {
+            if range <= point.0 {
+                return lerp(previous, point, range);
+            }
+            previous = point;
+        }
+        let [.., before, last] = self.points;
+        lerp(before, last, range)
+    }
+}
+
+/// The straight line through `a` and `b` (range, seconds) at `range`.
+fn lerp(a: (f64, f64), b: (f64, f64), range: f64) -> f64 {
+    let span = b.0 - a.0;
+    if span <= 0. {
+        return b.1;
+    }
+    a.1 + (b.1 - a.1) * (range - a.0) / span
 }
 
 /// What the host worked out for the striker's selection this tick, from its
@@ -487,6 +556,20 @@ pub struct Solution {
     /// (the sight has a reach); true for every other store. A glide bomb
     /// released from too high or too slow runs out of life before it lands.
     pub reach_ok: bool,
+    /// Seconds to the release where the host's sight times one (a guided
+    /// bomb: its distance to the level T's bar over the ground speed),
+    /// negative once past it; `None` for every other store, whose time the
+    /// strike works out itself (the committed-to-release window).
+    pub release_seconds: Option<f64>,
+    /// The store would reach the target from here, whatever the AI's own
+    /// release range: a seeker's lock without the fire range, a guided
+    /// weapon's IN RNG with no advisory (under the energy rules, its
+    /// exact-point answer). A stand-off release planned outside known rings
+    /// leaves on it (John, 2026-10-29).
+    pub reaches: bool,
+    /// The ground range of the guided sight's release bar, feet: where a
+    /// guided bomb is due (none for other stores, or with no reach).
+    pub bar_ft: Option<f64>,
 }
 
 /// The host's per-step description (see the module notes).
@@ -503,6 +586,10 @@ pub struct Inputs {
     pub solution: Option<Solution>,
     /// The laser and the spots around it (slice ST-L).
     pub lase: LaseInputs,
+    /// The host's answers on a guided store's shots from farther out (a
+    /// stand-off release outside known rings, John 2026-10-29); none when
+    /// it gave none.
+    pub shots: Shots,
 }
 
 /// Where the striker flies this tick: a heading and a flight-path pitch,
@@ -754,6 +841,28 @@ pub struct Strike {
     tasked_agl_ft: Option<f64>,
     /// A helicopter's threat awareness (slice H4).
     heli: super::helicopter_threat::HeliThreat,
+    /// The unguided cue against the release point at the last attack step:
+    /// the tick, how far it lay short of the aim along the track (feet) and
+    /// its filtered closing speed (ft/s).
+    release_cue: Option<(u64, f64, f64)>,
+    /// Seconds to the release point at the last attack step, negative once
+    /// past it; `None` with no estimate.
+    release_in_s: Option<f64>,
+    /// The tick the committed-to-release window opened on this pass.
+    committed: Option<u64>,
+    /// The exit or turn back follows an early retarget: the exit turns back
+    /// at the set-up distance ([`RETARGET_SETUP_SHARE`]), not the full exit
+    /// distance, and the turn back chooses only once at its height
+    /// ([`RETARGET_HEIGHT_SLACK_FT`]) or inside the set-up distance.
+    retargeted: bool,
+    /// The pass's stand-off release outside known rings (John, 2026-10-29;
+    /// [`standoff`]), kept after the release for the exit.
+    release_plan: Option<ReleasePlan>,
+    /// The pass closed past its plan without releasing: it is flown as
+    /// before.
+    plan_dropped: bool,
+    /// The tick its last stand-off round is taken to land by.
+    standoff_until: Option<u64>,
     /// The host's inputs for this step, consumed by it.
     inputs: Option<Inputs>,
 }
@@ -799,6 +908,13 @@ impl Strike {
             cue_last: None,
             tasked_agl_ft: None,
             heli: Default::default(),
+            release_cue: None,
+            release_in_s: None,
+            committed: None,
+            retargeted: false,
+            release_plan: None,
+            plan_dropped: false,
+            standoff_until: None,
             inputs: None,
         }
     }
@@ -876,9 +992,27 @@ impl Strike {
     pub fn hold_off(&self) -> Option<(Vector, u64)> {
         self.heli.hold
     }
+    /// A helicopter's move-ahead ambush in hand (John, 2026-10-29).
+    pub fn move_ahead(&self) -> Option<&super::helicopter_ahead::Ahead> {
+        self.heli.ahead.as_ref()
+    }
     /// Done: the mission sends it home.
     pub fn home(&self) -> bool {
         self.phase == Phase::Home
+    }
+    /// The run is inside its committed-to-release window at `tick` (T.O.R.E,
+    /// John, 2026-10-28): a new defence trigger waits for the release, so
+    /// the mission holds the controller's defence motion back.
+    pub fn holds_run(&self, tick: u64) -> bool {
+        self.phase == Phase::Attack
+            && self
+                .committed
+                .is_some_and(|since| tick.saturating_sub(since) <= COMMIT_HOLD_TICKS)
+    }
+    /// Seconds to the release point at the last attack step, negative once
+    /// past it (the driver's trace).
+    pub fn release_in_s(&self) -> Option<f64> {
+        self.release_in_s
     }
     /// Forces the pass and the store (the headless driver's coverage
     /// runs); the real choice is [`choose_pass`].
@@ -942,6 +1076,14 @@ impl Strike {
         self.phase = phase;
         self.segment = Segment::Approach;
         self.since = tick;
+        // The release estimate and its window belong to one pass, the
+        // retarget's set-up to the exit and turn back that follow it.
+        if !matches!(phase, Phase::Exit | Phase::TurnBack) {
+            self.retargeted = false;
+        }
+        self.release_cue = None;
+        self.release_in_s = None;
+        self.committed = None;
     }
 
     fn segment_to(&mut self, segment: Segment, tick: u64) {
@@ -987,7 +1129,10 @@ impl Strike {
         }
         // Defend: the existing reactions fly; resume at ingress once the
         // threat has gone (no warning in 10 s, no fighter threatening).
-        if cx.defending || self.threatened(cx) {
+        // Inside the committed-to-release window a new trigger waits for the
+        // release (T.O.R.E, John, 2026-10-28).
+        let committed = self.holds_run(cx.tick);
+        if (cx.defending || self.threatened(cx)) && !committed {
             if self.phase != Phase::Defend {
                 self.enter(Phase::Defend, cx.tick);
                 self.released = 0;
@@ -1010,24 +1155,30 @@ impl Strike {
                 self.exit(cx);
             }
         }
-        // A takeover goes on only while safe (slice ST-K).
-        self.recheck_safe(cx);
+        // A takeover goes on only while safe (slice ST-K); a committed run
+        // releases first.
+        if !committed {
+            self.recheck_safe(cx);
+        }
         if let Some(order) = self.step_lase(cx) {
             return order;
         }
         let solution = self.solution(cx);
-        let target_at = solution
-            .map(|s| s.target_position)
-            .or_else(|| self.focus_position(cx));
         let target_alive = match (self.target, solution) {
             (Some(_), Some(s)) => s.target_alive,
             (Some(id), None) => standing(cx.picture, id),
             (None, _) => false,
         };
-        // A pass in flight ends when its target falls.
-        if self.phase == Phase::Attack && !target_alive {
+        // A pass in flight ends when its target falls: before its release
+        // the striker takes the next target at once (T.O.R.E, John,
+        // 2026-10-28), after it, or with none left, it exits.
+        if self.phase == Phase::Attack && !target_alive && !self.retarget(cx) {
             self.exit(cx);
         }
+        let solution = self.solution(cx);
+        let target_at = solution
+            .map(|s| s.target_position)
+            .or_else(|| self.focus_position(cx));
         match self.phase {
             Phase::Ingress | Phase::Wait => {
                 let point = target_at.or_else(|| objective_point(cx.picture));
@@ -1047,7 +1198,7 @@ impl Strike {
                 if let Some(point) = target_at {
                     let off =
                         angle_difference(own.heading_deg, bearing_deg(own.position, point)).abs();
-                    if off <= TURN_BACK_DEG {
+                    if off <= TURN_BACK_DEG && (!self.retargeted || self.set_up(cx, point)) {
                         self.choose(cx);
                     }
                 } else {
@@ -1057,7 +1208,12 @@ impl Strike {
             Phase::Exit => {
                 if let Some(point) = target_at {
                     let away = horizontal(own.position, point);
-                    if away >= self.exit_distance(cx) {
+                    let turn_back = if self.retargeted {
+                        RETARGET_SETUP_SHARE * self.exit_distance(cx)
+                    } else {
+                        self.exit_distance(cx)
+                    };
+                    if away >= turn_back {
                         if !self.withdrawn {
                             self.enter(Phase::TurnBack, cx.tick);
                         } else if self.safe(cx) {
@@ -1184,6 +1340,12 @@ impl Strike {
 
     /// The choice: target, store, pass and aim; or wait, or home.
     fn choose(&mut self, cx: &Context<'_>) {
+        self.choose_without(cx, None);
+    }
+
+    /// [`Self::choose`], never taking `dead` (a target that has just fallen
+    /// and that the picture may not yet know has).
+    fn choose_without(&mut self, cx: &Context<'_>, dead: Option<u32>) {
         // A takeover attacks only when safe (slice ST-K).
         if self.holds_off(cx) {
             return;
@@ -1201,7 +1363,13 @@ impl Strike {
         {
             self.no_laze = None;
         }
-        let Some(target) = self.pick_target(cx) else {
+        let picked = match dead {
+            Some(dead) => self
+                .pick_target_where(cx, &|id| id != dead)
+                .filter(|id| *id != dead),
+            None => self.pick_target(cx),
+        };
+        let Some(target) = picked else {
             // A designator with nothing to strike with waits for its wing's
             // laser carriers: they choose, it lases (slice ST-L).
             if inputs.designator
@@ -1388,6 +1556,8 @@ impl Strike {
         self.burst_open = None;
         self.recovery_until = 0;
         self.burst = 0;
+        self.release_plan = None;
+        self.plan_dropped = false;
         if store.kind == StoreKind::Gun {
             // Each burst has its own draw (John, 2026-10-11, later).
             self.next_burst(cx);
@@ -1644,7 +1814,8 @@ impl Strike {
         } else {
             EXIT_TURN_MIN_FT
         };
-        base.max(2. * radius)
+        let standoff = self.standoff_exit_ft(cx.tick).unwrap_or(0.);
+        base.max(2. * radius).max(standoff)
     }
 
     /// Draws the next gun burst's aim (slice ST-T2): John's circle applies
@@ -1671,16 +1842,102 @@ impl Strike {
         self.inside = draw.inside;
     }
 
-    /// Leave the pass: the exit run.
+    /// Leave the pass: the exit run, straight on; after a stand-off
+    /// release (John, 2026-10-29), away from the target.
     fn exit(&mut self, cx: &Context<'_>) {
-        self.exit_heading_deg = cx.own.heading_deg;
+        self.exit_heading_deg = match self.target.and_then(|id| known_position(cx.picture, id)) {
+            Some(target) if self.standing_off(cx.tick) => bearing_deg(target, cx.own.position),
+            _ => cx.own.heading_deg,
+        };
         self.holding = None;
+        self.retargeted = false;
         self.enter(Phase::Exit, cx.tick);
+    }
+
+    /// The striker's target fell before its pass released (T.O.R.E, John,
+    /// 2026-10-28): it takes the next target at once, by the same choice and
+    /// attacker allowance as at the exit distance, instead of flying the
+    /// exit first. At least the set-up distance ([`RETARGET_SETUP_SHARE`] of
+    /// the exit distance) away it turns back toward it at once, climbing to
+    /// its cruise height, and chooses its pass once pointing at it (as at
+    /// the end of an exit) and back at that height or inside the set-up
+    /// distance: at once if it already is. Nearer, it flies the exit on its
+    /// heading and turns back at the set-up distance. Returns false,
+    /// changing nothing, for a striker that
+    /// released on its pass or is past its release point, or that has no
+    /// other target: it exits as before.
+    fn retarget(&mut self, cx: &Context<'_>) -> bool {
+        let Some(dead) = self.target else {
+            return false;
+        };
+        if self.released > 0 || self.segment == Segment::Climb || self.past_release(cx, dead) {
+            return false;
+        }
+        let Some(next) = self
+            .pick_target_where(cx, &|id| id != dead)
+            .filter(|id| *id != dead)
+        else {
+            return false;
+        };
+        let Some(at) = known_position(cx.picture, next) else {
+            return false;
+        };
+        let own = cx.own;
+        let distance = horizontal(own.position, at);
+        let off = angle_difference(own.heading_deg, bearing_deg(own.position, at)).abs();
+        let setup = RETARGET_SETUP_SHARE * self.exit_distance(cx);
+        if distance >= setup && off <= TURN_BACK_DEG && self.set_up(cx, at) {
+            self.choose_without(cx, Some(dead));
+            return true;
+        }
+        self.target = Some(next);
+        self.pass_number = 0;
+        if distance >= setup {
+            self.enter(Phase::TurnBack, cx.tick);
+        } else {
+            self.exit(cx);
+        }
+        self.retargeted = true;
+        true
+    }
+
+    /// After an early retarget, the striker can choose its pass on the
+    /// target at `point`: back at the height it cruises at (within
+    /// [`RETARGET_HEIGHT_SLACK_FT`]), or already inside the set-up distance.
+    fn set_up(&self, cx: &Context<'_>, point: Vector) -> bool {
+        cx.own.position[1] >= self.cruise_altitude(cx) - RETARGET_HEIGHT_SLACK_FT
+            || horizontal(cx.own.position, point) <= RETARGET_SETUP_SHARE * self.exit_distance(cx)
+    }
+
+    /// The pass is past the point where it would have released: the cue
+    /// beyond the aim at the last attack step, or with no estimate the
+    /// target `id` behind the aircraft.
+    fn past_release(&self, cx: &Context<'_>, id: u32) -> bool {
+        match self.release_in_s {
+            Some(seconds) => seconds < 0.,
+            None => known_position(cx.picture, id)
+                .or_else(|| cx.inputs.solution.map(|s| s.target_position))
+                .is_none_or(|p| {
+                    angle_difference(cx.own.heading_deg, bearing_deg(cx.own.position, p)).abs()
+                        >= 90.
+                }),
+        }
     }
 
     /// Toward `point` at the cruise altitude (at least the release floor),
     /// as a heavy, at its floor.
     fn cruise_steer(&self, cx: &Context<'_>, point: Vector, speed: SpeedRequest) -> Steer {
+        let own = cx.own;
+        Steer::plain(
+            bearing_deg(own.position, point),
+            hold_pitch_deg(own.position[1], self.cruise_altitude(cx)),
+            speed,
+            false,
+        )
+    }
+
+    /// The height [`Self::cruise_steer`] flies at, feet above sea level.
+    fn cruise_altitude(&self, cx: &Context<'_>) -> f64 {
         let own = cx.own;
         let floor = self.floor(cx, self.threat);
         let ground = own.position[1] - own.agl_ft;
@@ -1692,12 +1949,7 @@ impl Strike {
             // Fighters keep what they have above the floor.
             altitude = altitude.max(own.position[1].min(ground + floor + 20_000.));
         }
-        Steer::plain(
-            bearing_deg(own.position, point),
-            hold_pitch_deg(own.position[1], altitude),
-            speed,
-            false,
-        )
+        altitude
     }
 
     fn exit_steer(&self, cx: &Context<'_>, target_at: Option<Vector>) -> Steer {
@@ -1831,6 +2083,16 @@ impl Strike {
             }
             order.steer = Some(self.climb_steer(cx));
             return order;
+        }
+        // A stand-off release outside known rings (John, 2026-10-29): planned
+        // again each step before the release; a pass at its plan while its
+        // last stand-off round flies ends there.
+        if self.update_release_plan(cx, target, solution) {
+            self.exit(cx);
+            return Order {
+                steer: Some(self.exit_steer(cx, Some(target))),
+                ..order
+            };
         }
         let pull_out = dive_pull_out_ft(own);
         let ended = match pass {
@@ -2059,6 +2321,9 @@ impl Strike {
             // circle around the (led) target.
             let passing = self.cue_passing(cx, s.impact, aim);
             let due = s.due || passing;
+            // A stand-off release planned outside known rings leaves at its
+            // range once the store reaches (John, 2026-10-29).
+            let planned = self.planned_due(cx, target, &s);
             let fire = in_zone
                 && match kind {
                     StoreKind::Rocket => {
@@ -2069,14 +2334,14 @@ impl Strike {
                                     horizontal(i, aim) <= release_circle_ft(cx.experience)
                                 }))
                     }
-                    k if k.seeker() => first && s.due && !s.guided_in_flight,
+                    k if k.seeker() => first && (s.due || planned) && !s.guided_in_flight,
                     // A takeover drops no second laser weapon while one
                     // guides (slice ST-K).
                     StoreKind::Laser if self.takeover.is_some() => {
                         first && s.due && !s.guided_in_flight
                     }
                     k if k.unguided() => first && due,
-                    _ => first && s.due,
+                    _ => first && (s.due || planned),
                 };
             if fire && floor_ok && !s.warning && self.rounds_left(cx) > 0 {
                 order.release = Some(Release {
@@ -2088,6 +2353,7 @@ impl Strike {
                     + self
                         .store(cx)
                         .map_or(super::QUARTER_SECOND_TICKS, |st| st.cadence_ticks);
+                self.released_on_plan(cx.tick);
                 // A bomb, a guided weapon or a seeker leaves once a pass;
                 // the run then exits (a dive climbs out first).
                 if kind != StoreKind::Rocket && pass != Pass::Dive {
@@ -2101,7 +2367,123 @@ impl Strike {
                 }
             }
         }
+        self.update_commit(cx, target, aim, solution);
         order
+    }
+
+    /// Times the pass's release and opens or closes its committed-to-release
+    /// window (T.O.R.E, John, 2026-10-28; see [`COMMIT_WINDOW_S`]). The
+    /// window opens in the final (or a pop-up's pull), before anything has
+    /// left, once the release is [`COMMIT_WINDOW_S`] or less away; it holds
+    /// through a rocket burst, and closes at the release, when the pass
+    /// ends, when the cue is [`COMMIT_PAST_S`] past the aim, or
+    /// [`COMMIT_HOLD_TICKS`] after it opened.
+    fn update_commit(
+        &mut self,
+        cx: &Context<'_>,
+        target: Vector,
+        aim: Vector,
+        solution: Option<Solution>,
+    ) {
+        let flying =
+            self.phase == Phase::Attack && matches!(self.segment, Segment::Final | Segment::Pull);
+        let estimate = if flying {
+            self.release_estimate(cx, target, aim, solution)
+        } else {
+            self.release_cue = None;
+            None
+        };
+        self.release_in_s = estimate;
+        let bursting = self.kind == Some(StoreKind::Rocket)
+            && self.released > 0
+            && self.burst_left(cx, solution, aim);
+        let live = flying && (self.released == 0 || bursting);
+        self.committed = match (live, self.committed) {
+            (false, _) => None,
+            (true, None) => estimate
+                .filter(|t| (0.0..=COMMIT_WINDOW_S).contains(t))
+                .map(|_| cx.tick),
+            (true, Some(since)) => (cx.tick.saturating_sub(since) <= COMMIT_HOLD_TICKS
+                && (bursting || estimate.is_none_or(|t| t >= -COMMIT_PAST_S)))
+            .then_some(since),
+        };
+    }
+
+    /// Seconds to the pass's release point, negative once past it: for a
+    /// bomb or rocket the cue's distance short of the aim along the track
+    /// over its closing speed, measured and filtered over
+    /// [`CUE_RATE_TICKS`] (the ground speed at first, as the level T has
+    /// it); a guided bomb's from the host's sight; a seeker's (or a guided
+    /// bomb's without one) its range less its fire range over the closing
+    /// speed. `None` for a gun run, which has no single release point.
+    fn release_estimate(
+        &mut self,
+        cx: &Context<'_>,
+        target: Vector,
+        aim: Vector,
+        solution: Option<Solution>,
+    ) -> Option<f64> {
+        let kind = self.kind?;
+        let own = cx.own;
+        let over = |along: f64, closing: f64| {
+            if closing > 1. {
+                along / closing
+            } else if along >= 0. {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            }
+        };
+        let fire_range = |this: &Self| -> Option<f64> {
+            let store = this.store(cx)?;
+            let to = [target[0] - own.position[0], target[2] - own.position[2]];
+            let length = to[0].hypot(to[1]).max(1.);
+            let closing = (cx.velocity[0] * to[0] + cx.velocity[2] * to[1]) / length;
+            Some(over(
+                slant(own.position, target) - store.fire_range_ft,
+                closing,
+            ))
+        };
+        // A planned stand-off release: the distance to its range over the
+        // closing speed (John, 2026-10-29).
+        if let Some(plan) = self.release_plan.filter(|_| self.released == 0)
+            && (kind.seeker() || kind.level_run())
+        {
+            let to = [target[0] - own.position[0], target[2] - own.position[2]];
+            let length = to[0].hypot(to[1]).max(1.);
+            let closing = (cx.velocity[0] * to[0] + cx.velocity[2] * to[1]) / length;
+            return Some(over(
+                horizontal(own.position, target) - plan.range_ft,
+                closing,
+            ));
+        }
+        match kind {
+            StoreKind::Bomb | StoreKind::Rocket => {
+                let Some(impact) = solution.and_then(|s| s.impact) else {
+                    self.release_cue = None;
+                    return None;
+                };
+                let u = track_unit(cx.velocity)?;
+                let along = (aim[0] - impact[0]) * u[0] + (aim[2] - impact[2]) * u[1];
+                let closing = match self.release_cue {
+                    Some((tick, before, rate)) if cx.tick > tick => {
+                        let ticks = (cx.tick - tick) as f64;
+                        let measured = (before - along) * 120. / ticks;
+                        rate + (measured - rate) * (ticks / CUE_RATE_TICKS).min(1.)
+                    }
+                    Some((_, _, rate)) => rate,
+                    None => cx.velocity[0].hypot(cx.velocity[2]),
+                };
+                self.release_cue = Some((cx.tick, along, closing));
+                Some(over(along, closing))
+            }
+            k if k.seeker() => fire_range(self),
+            StoreKind::Laser | StoreKind::Coordinate => solution
+                .and_then(|s| s.release_seconds)
+                .or_else(|| fire_range(self)),
+            // A gun run's bursts, and the helicopters' command round.
+            _ => None,
+        }
     }
 
     /// The heading that lays the track on the aim's bearing (slice ST-T2,

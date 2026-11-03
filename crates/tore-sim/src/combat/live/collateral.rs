@@ -80,6 +80,7 @@ pub(super) struct Shooter {
 pub(super) struct Burst {
     pub projectile: u32,
     pub owner: u32,
+    pub missile: bool,
     pub shooter: Shooter,
     pub station: usize,
     pub position: Vector,
@@ -114,6 +115,7 @@ impl Burst {
         Self {
             projectile: p.id,
             owner: p.owner,
+            missile: super::launcher_immune(w),
             shooter,
             station: p.station,
             position,
@@ -135,13 +137,14 @@ impl Burst {
             },
         }
     }
-    /// Launch grace: whether the burst spares aircraft `id`, its own
-    /// launcher, at `position` with a hit volume of `radius`. Only an
-    /// airburst inside that volume is spared; a ground burst is not.
+    /// Missiles always spare their own firing aircraft. Other stores retain
+    /// launch grace only for an airburst inside the launcher's hit volume;
+    /// their ground bursts are not covered.
     fn graced(&self, id: u32, position: Vector, radius: f64) -> bool {
         id == self.owner
-            && self.detonation == Detonation::Air
-            && inside_sphere(position, radius, self.position)
+            && (self.missile
+                || (self.detonation == Detonation::Air
+                    && inside_sphere(position, radius, self.position)))
     }
     /// Whether the burst reaches anyone at all.
     pub fn collateral(&self) -> bool {

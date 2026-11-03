@@ -39,15 +39,20 @@ mission (heavy, seed 1, an SA-14) at 4,000 ft and expects it to launch.
 `surface-grounding` (B13, 2026-10-12; slice GROUND, 2026-10-13) runs `--surface-dump
 --grounding`, the grounding audit: every OT, NT and PT the import and the retail media hold, stood on flat
 ground through the placement path and drawn through the scenery's own code (faces, the hit box, and a man's
-sprites or cards at 300 ft and boosted at 6,000 ft). Everything but runways, bridges, roads and ships stands on the
+sprites or cards at 300 ft and boosted at 6,000 ft). Everything but runways, roads and ships stands on the
 bottom of its shape within 0.05 ft (the factory hall FACTD lifted 42.7 ft, the hangar 26.7 ft, the airfield
-squad TROOPS 3.3 ft), that bottom agrees with the shape's F2 ground offset within 3 ft, and bridges, roads
-and ships are not lifted.
+squad TROOPS 3.3 ft), that bottom agrees with the shape's F2 ground offset within 3 ft, and roads
+and ships are not lifted. Bridges have their own shared-bottom and corridor audit.
 
 `surface-small-arms-airfield` flies a 400 kt, 300 ft pass over an airfield target's squads (B17, BD2): one
 squad at each experience, the squads around it at average and at ace, and a 1,000 ft, a 600 kt and a 1,500 ft
 side pass. Their rounds carry tracers (every third round) and they only rarely hit a jet passing through
 (about one round in a hundred; the riflemen lead it poorly, John 2026-10-12).
+
+`surface-tank-aa` (John, 2026-10-24) puts one T-72 of Iraq's withdrawing column against aircraft: a helicopter
+hovering 24 degrees above it is never taken and costs no round (the tank gun's 20 degree elevation), one hovering
+low 0.5 km out draws its first round 4 s after the lock (the record's 1 s and the tank's 3 s lay on an aircraft),
+every round at a 450 kt jet 200 ft over it leaves at 20 degrees or less, and a jet 2,500 ft over it draws none.
 
 `surface-squad-killable` kills one airfield squad (BD2) with the A-4E's gun in a strafing pass, with an F/A-18's
 Mk 82 in a dive, and with the trace's own kill at 23 s: every one is a kill of the squad's id, and a squad
@@ -71,6 +76,7 @@ retail records the import does not keep yet from the retail media, as the dump
 does. Numbers they check are the record's and the AAA tuning table's
 (docs/spec/surface-defenses.md).
 """
+import math
 import re
 
 from battery import Scenario, Step
@@ -187,6 +193,60 @@ TRACE = re.compile(r"^surface-trace: t=([0-9.]+) (.*)$", re.M)
 SUMMARY = re.compile(r"^surface-trace: summary (.*)$", re.M)
 SUBJECT = re.compile(r"^surface-trace: subject (0x[0-9a-f]+) (\S+) side (\d+)", re.M)
 RADAR = re.compile(r"^surface-trace: radar (0x[0-9a-f]+)$", re.M)
+
+
+def objective_audit_problems(output: str) -> list[str]:
+    parts = runs(output)
+    if len(parts) != 2:
+        return ["expected cached and direct objective audit runs"]
+
+    def rows(text):
+        return [line for line in text.splitlines() if line.startswith(("objective-case:", "finding\t"))]
+
+    if rows(parts[0]) != rows(parts[1]):
+        return ["cached and direct objective audit cases/findings/digests differ"]
+    findings = [line.split("\t") for line in parts[0].splitlines() if line.startswith("finding\t")]
+    # Independent ceilings accept improvements, while new regressions fail.
+    ceilings = {
+        "land-on-water": 0, "outside-map": 0, "footprint-outside-map": 0,
+        "footprint-terrain-class": 0, "vehicle-footprint-slope": 0,
+        "vehicle-runway-clearance": 0, "vehicle-object-clearance": 0,
+    }
+    counted = 0
+    for rule, ceiling in ceilings.items():
+        count = sum(row[7].startswith(("0x580", "0x5c0")) and row[-1] == rule for row in findings)
+        counted += count
+        if count > ceiling:
+            return [f"generated support {rule}: {count} exceeds ceiling {ceiling}"]
+    pattern = r"^objective-audit: cases (\d+) findings \d+ errors (\d+)$"
+    summaries = re.findall(pattern, parts[0], re.M)
+    if len(summaries) != 1 or summaries[0][0] != "264":
+        return ["missing complete 264-case audit summary"]
+    if re.findall(pattern, parts[1], re.M) != summaries:
+        return ["cached and direct audit summaries differ or are incomplete"]
+    # The remaining contracts (determinism, final scene, runway datums and
+    # relocation) all have zero allowance. Slope headroom cannot mask them.
+    if int(summaries[0][1]) != counted:
+        return ["placement contract failures outside the allowed categories"]
+
+    return []
+
+
+def objective_cache_kuril_problems(output: str) -> list[str]:
+    """Final front availability can change while the raw front stays identical."""
+    parts = runs(output)
+    if len(parts) != 3:
+        return ["expected the Kuril matrix and two independent scene builds"]
+    if not re.search(r"^objective-audit: cases 4224 findings \d+ errors 0$", parts[0], re.M):
+        return ["incomplete Kuril audit or new placement contract failures"]
+    for direct, (distance, aaa, sam, seed) in zip(parts[1:], [(5, 0, 2, 2), (50, 3, 0, 3)]):
+        pattern = (rf"^objective-case: KURILE QKSILO separation {distance} aaa {aaa} sam {sam} seed {seed} "
+                   r"units \d+ parked \d+ findings \d+ digest (\S+)$")
+        cached = re.findall(pattern, parts[0], re.M)
+        built = re.findall(r"^surface: digest (\S+)$", direct, re.M)
+        if len(cached) != 1 or built != cached:
+            return [f"Kuril final-front cache differs from direct build at {distance} nm, AAA {aaa}, SAM {sam}, seed {seed}"]
+    return []
 
 
 def runs(output: str) -> list[str]:
@@ -345,6 +405,8 @@ def battery_sa2_problems(output: str) -> list[str]:
         problems.append(f"the launcher {unit} showed on the RWR")
     if int(summary(live).get("missiles", "0")) == 0 or summary(live).get("radar-lock-tone") != "true":
         problems.append(f"the battery did not lock and launch: {summary(live)}")
+    if int(summary(live).get("hits", "0")) == 0:
+        problems.append("live SA-2 battery registered no hits")
     s = summary(optical)
     if int(s.get("missiles", "0")) == 0:
         problems.append("no optical launch in daylight")
@@ -380,6 +442,58 @@ def zsu23_problems(output: str) -> list[str]:
     m = re.search(rf"^surface-trace: stock {unit} m0 loaded (\d+) reserve (\d+)$", run, re.M)
     if not m or int(m.group(1)) + rounds != 2000 or m.group(2) != "2":
         problems.append(f"magazine: {m.group(0) if m else None} after {rounds} rounds of 2,000")
+    return problems
+
+
+# Tanks against aircraft (John, 2026-10-24: "max elevation of fire set to like
+# 20 degrees up"; tanks "should be a surprise if they kill you"): the T-72's
+# ceiling, its 1 s lock plus 3 s lay, and the jet passes the check flies.
+TANK_MAX_ELEVATION_DEG = 20.0
+TANK_LAY_S = 4.0  # the record's 1 s lock and the 3 s lay before the first round
+TANK_EYE_FT = 10.0  # a unit's sight above its reference point
+TANK_JET_FROM_FT = 3 * 6076.0
+TANK_JET_FPS = 450 * 1.6878
+TANK_JET_ALTITUDE_FT = 200.0
+
+
+def tank_aa_problems(output: str) -> list[str]:
+    """A T-72 against aircraft: a helicopter hovering 24 degrees up is not
+    engaged and costs no round; one hovering low 0.5 km out draws fire 4 s
+    after the lock (lock and lay); every round at a 450 kt jet 200 ft over it
+    leaves at 20 degrees or less; a jet passing 2,500 ft over it draws none."""
+    problems: list[str] = []
+    found = runs(output)
+    if len(found) != 4:
+        return [f"expected 4 runs (high hover, low hover, low jet, high jet), got {len(found)}"]
+    high, low, jet, over = found
+    for name, run in (("high hover", high), ("low hover", low), ("low jet", jet), ("high jet", over)):
+        if "T72.JT" not in run:
+            problems.append(f"{name}: the subject does not fire T72.JT")
+    unit = subject(high)
+    s = summary(high)
+    if s.get("rounds") != "0":
+        problems.append(f"high hover: {s.get('rounds')} rounds at a helicopter 24 degrees up")
+    if first(high, rf"^phase {unit} w0 (Prepare|Track)") is not None:
+        problems.append("high hover: the tank took a target above its gun's elevation")
+    if not re.search(rf"^surface-trace: stock {unit} m0 loaded 22 reserve 2$", high, re.M):
+        problems.append("high hover: the magazine is not full")
+    unit = subject(low)
+    track, shot = first(low, rf"^phase {unit} w0 Track"), first(low, rf"^shot {unit} ")
+    if track is None or shot is None:
+        problems.append(f"low hover: track {track}, first round {shot}")
+    elif not near(shot - track, TANK_LAY_S, 0.05):
+        problems.append(f"low hover: first round {shot - track:.2f} s after the lock, want {TANK_LAY_S}")
+    unit = subject(jet)
+    shots = [t for t, text in events(jet) if text.startswith(f"shot {unit} ")]
+    if not shots:
+        problems.append("low jet: no round fired")
+    for t in shots:
+        horizontal = abs(TANK_JET_FROM_FT - TANK_JET_FPS * t)
+        elevation = math.degrees(math.atan2(TANK_JET_ALTITUDE_FT - TANK_EYE_FT, horizontal))
+        if elevation > TANK_MAX_ELEVATION_DEG + 0.5:
+            problems.append(f"low jet: a round at {t:.2f} s, {elevation:.1f} degrees up")
+    if summary(over).get("rounds") != "0":
+        problems.append(f"high jet: {summary(over).get('rounds')} rounds at a jet always above 20 degrees")
     return problems
 
 
@@ -943,8 +1057,52 @@ def grounding_problems(output: str) -> list[str]:
     return problems
 
 
+def moving_sam_hit_problems(output: str) -> list[str]:
+    found = runs(output)
+    if not found:
+        return ["missing moving-jet SAM trace"]
+    return [f"moving jet received no SAM hits: {summary(run)}" for run in found
+            if int(summary(run).get("hits", "0")) < 1]
+
+
 def scenarios() -> list[Scenario]:
-    return [
+    moving_sams = []
+    for weapon, theater, index in [("SA2A", "TVIET", "6"), ("SA3", "SPA", "0"), ("SA6", "CUB", "0")]:
+        for altitude in [10000, 20000]:
+            moving_sams.append(Scenario(
+                name=f"surface-moving-hit-{weapon.lower()}-{altitude}", lane="ai", timeout=300,
+                args=trace(theater, *(["QSPSAM"] if weapon == "SA3" else []), "--over", weapon, "--index", index, "--solo", "--altitude", str(altitude),
+                           "--from", "20", "--seconds", "200", "--quiet-shots"),
+                check=moving_sam_hit_problems,
+                notes="Requires hits on a moving vulnerable jet, not just missile launches."))
+    return moving_sams + [
+        Scenario(
+            name="bridge-audit", lane="ai",
+            args=["--bridge-audit", "{work}/bridges", "UKR", "BAL", "--strict"], timeout=300,
+            expect=[r"^bridge-audit: [1-9]\d* layouts [1-9]\d* placements 0 flagged 0 missing textures$"],
+            notes="Imported bridge damage assets and shared deck/footing clearance, including bank cuts, 8 percent approaches, supported toes, sloping Ukraine crossings and bridge objectives.",
+        ),
+        Scenario(
+            name="bridge-end-ruins", lane="flight", window=True,
+            args=["--bridge-audit", "{work}/bridge-ends", "TVIET", "UKR", "--strict", "--capture",
+                  "--id=400000eb,400000b7,400000bc,40000092"], timeout=300,
+            expect=[r"^bridge-audit: [1-9]\d* layouts [1-9]\d* placements 0 flagged 0 missing textures$"],
+            outputs=["bridge-ends/TVIET-400000eb-destroyed.png", "bridge-ends/TVIET-400000b7-destroyed.png",
+                     "bridge-ends/TVIET-400000bc-destroyed.png", "bridge-ends/UKR-40000092-destroyed.png"],
+            notes="All four END types change only at zero HP, retain geometry, and match replay HP; uses the ordinary GPU scenery path.",
+        ),
+        Scenario(
+            name="a2g-bridge-destruction", lane="flight",
+            args=["--a2g-run", "UKR", "QUBRI", "--aircraft", "a10", "--load", "AGM65G",
+                  "--attack", "maverick", "--from", "3", "--heading", "90", "--altitude", "3000",
+                  "--defenses", "0", "0", "--seconds", "35", "--record", "{work}/bridge.toreplay",
+                  "--verify-render"], timeout=300,
+            expect=[r"^a2g-run: target box center 979636 568 801861 half 128\.0 24\.0 2456\.0$",
+                    r"^a2g-run: kill 0x50000000 class 0x0100$",
+                    r"^a2g-run: target 0x50000000 hp 0/100$",
+                    r"^a2g-run: verify-render: PASS ticks=[1-9]\d* missing=0 differing=0"],
+            notes="A real Maverick release destroys the Ukraine bridge span; recorded render snapshots retain its damage and effects.",
+        ),
         Scenario(
             name="surface-grounding", lane="ai",
             args=["--surface-dump", "--grounding"], timeout=300,
@@ -1026,8 +1184,8 @@ def scenarios() -> list[Scenario]:
         ),
         Scenario(
             name="surface-battery-sa2", lane="ai", timeout=400,
-            args=trace("TVIET", "--over", "SA2A", "--index", "6", "--altitude", "20000",
-                       "--from", "20", "--seconds", "200", "--invulnerable", "--quiet-shots"),
+            args=trace("TVIET", "--over", "SA2A", "--index", "6", "--solo", "--altitude", "20000",
+                       "--from", "20", "--seconds", "200", "--quiet-shots"),
             then=[
                 Step(trace("TVIET", "--over", "SA2A", "--index", "6", "--altitude", "20000",
                            "--from", "20", "--seconds", "200", "--invulnerable", "--quiet-shots",
@@ -1069,6 +1227,27 @@ def scenarios() -> list[Scenario]:
             notes=TRACE_NOTES + " A low pass over Afghanistan's airfield target (~QAPFAIR): one squad at each "
                   "experience, then every squad within 2.5 nm of it at average and ace experience, the other "
                   "units laid down (--solo); then ace passes at 1,000 ft, at 600 kt and 1,500 ft to the side.",
+        ),
+        Scenario(
+            name="surface-tank-aa", lane="ai", timeout=600,
+            args=trace("IRA", "QIRRETR", "--over", "T72", "--solo", "--skill", "1", "--rng", "11",
+                       "--aircraft", "ah64", "--altitude", "1500", "--speed", "0", "--from", "0.54",
+                       "--seconds", "60", "--quiet-shots"),
+            then=[
+                Step(trace("IRA", "QIRRETR", "--over", "T72", "--solo", "--skill", "1", "--rng", "11",
+                           "--aircraft", "ah64", "--altitude", "300", "--speed", "0", "--from", "0.27",
+                           "--seconds", "60", "--invulnerable"), timeout=300),
+                Step(trace("IRA", "QIRRETR", "--over", "T72", "--solo", "--skill", "1", "--rng", "11",
+                           "--aircraft", "f16c", "--altitude", "200", "--speed", "450", "--from", "3",
+                           "--seconds", "45", "--invulnerable"), timeout=300),
+                Step(trace("IRA", "QIRRETR", "--over", "T72", "--solo", "--skill", "3", "--rng", "11",
+                           "--aircraft", "f16c", "--altitude", "2500", "--speed", "400", "--from", "3",
+                           "--seconds", "50", "--quiet-shots"), timeout=300),
+            ],
+            check=tank_aa_problems,
+            notes=TRACE_NOTES + " One T-72 of Iraq's withdrawing column (~QIRRETR), the other units laid down "
+                  "(--solo): an AH-64 hovering 1,500 ft up 1 km out (24 degrees), then 300 ft up 0.5 km out; "
+                  "an F-16C at 450 kt 200 ft straight over it; at 400 kt 2,500 ft over it (John, 2026-10-24).",
         ),
         Scenario(
             name="surface-squad-killable", lane="ai", timeout=600,
@@ -1195,6 +1374,29 @@ def scenarios() -> list[Scenario]:
             notes=TRACE_NOTES + " The first area SAM unit (heavy SAM strength, no guns) drained at the start "
                   "rearms from its supply truck in 300 to 600 s; with the truck killed at once it does not "
                   "(nr-b23b).",
+        ),
+        Scenario(
+            name="surface-objectives-audit", lane="ai",
+            args=["--surface-dump", "--objectives", "--fast", "--seeds", "1", "LFA", "UKR"],
+            timeout=600,
+            expect_exit=None,
+            expect=[r"^objective-audit: cases 264 findings \d+ errors \d+$"],
+            forbid=[r"^finding\t.*\t(?:objective-anchor-stale|nondeterministic|duplicate-id|object-count|missing-element|unavailable-grounding-geometry)"],
+            then=[Step(args=("--surface-dump", "--objectives", "--fast", "--seeds", "1", "LFA", "UKR", "--uncached"), timeout=600, expect_exit=None)],
+            check=objective_audit_problems,
+            notes="All eleven separations, four defense levels, fleet/shore, airport and area layouts. Independent category ceilings accept improvements, reject placement regressions and compare cached/direct output.",
+        ),
+        Scenario(
+            name="surface-objectives-cache-kuril", lane="ai",
+            args=["--surface-dump", "--objectives", "--seeds", "3", "KURILE"],
+            timeout=900,
+            expect=[r"^objective-audit: cases 4224 findings \d+ errors 0$"],
+            then=[
+                Step(args=("--surface-dump", "KURILE", "QKSILO", "--defenses", "0", "2", "--surface-seed", "2", "--separation", "5")),
+                Step(args=("--surface-dump", "KURILE", "QKSILO", "--defenses", "3", "0", "--surface-seed", "3", "--separation", "50")),
+            ],
+            check=objective_cache_kuril_problems,
+            notes="The final front can appear or move at a new separation despite identical raw geometry. Compare both observed cache regressions with independent full scene builds.",
         ),
         Scenario(
             name="surface-start-placement", lane="ai",

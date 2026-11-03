@@ -54,7 +54,7 @@
 use super::{EffectKind, MAX_PROJECTILES, Projectile, State, is_gun};
 use crate::attitude::{Vector, dot};
 use crate::combat::gun_round::{self, service_ticks};
-use crate::combat::missiles::{self, Flight, LaunchMode, Motion, Rules, seeker};
+use crate::combat::missiles::{self, Flight, LaunchMode, Motion, seeker};
 use crate::combat::{FallState, axial_speed, commanded_speed, engine_phase, launch_speed};
 use tore_formats::weapons::Weapon;
 
@@ -251,10 +251,10 @@ impl State {
         }
         let w = &shot.weapon;
         let gun = is_gun(w);
-        let profile = (self.weapon_rules == Rules::Spec)
+        let profile = (self.weapon_rules.uses_seeker())
             .then(|| missiles::Profile::for_weapon(w))
             .flatten();
-        if !gun && profile.is_none() && self.weapon_rules == Rules::Spec {
+        if !gun && profile.is_none() && self.weapon_rules.uses_seeker() {
             return Err(Refused::Unreviewed);
         }
         let speed = missiles::length(shot.velocity);
@@ -288,7 +288,9 @@ impl State {
             owner: shot.owner,
             weapon: Some(shot.weapon.clone()),
             guidance,
-            motion: profile.map(|_| Motion::launch(w, shot.velocity, shot.position[1])),
+            motion: profile.map(|_| {
+                Motion::launch_rules(w, shot.velocity, shot.position[1], self.weapon_rules)
+            }),
             guidance_ticks: profile.map(|p| p.guidance_ticks),
             age: 0,
             incoming,

@@ -44,6 +44,7 @@ the master.
 - [Proving an address](#proving-an-address)
 - [Common fields](#common-fields)
 - [Listing a game](#listing-a-game)
+  - [Finding the master again](#finding-the-master-again)
 - [Browsing](#browsing)
 - [Mapping test](#mapping-test)
 - [Introductions](#introductions)
@@ -317,6 +318,50 @@ listed again within one heartbeat.
 
 **Unregister** (kind 9): token (64). The listing is removed at once. No
 answer. A host sends it three times when it stops hosting or unlists.
+
+### Finding the master again
+
+*Agent decisions, 0.2.2,* after two public servers stayed unlisted on
+2026-10-23 until restarted by hand: a saturated uplink made the master look
+silent, the host moved to the master's IPv6 address, the machine had no IPv6
+route, and nothing moved it back. A host's listing now always recovers on
+its own once any of the master's addresses answers
+(`tore_net::master::rendezvous`, "Finding the master again"):
+
+- An unanswered Register or Heartbeat is sent again every 3 seconds; 10
+  seconds without an answer is a silent master. Each request to a silent
+  master then waits 2, 4, 8 and at most 15 seconds (a Keep's interval, so a
+  silent host sends no more than a listed one; 60 seconds before 0.2.2), and
+  goes to the master's next address, round and back to the first.
+- A send that fails (no route to the network or the host, no such local
+  address, an address family the socket lacks, any error the socket
+  reports) moves the listing to the next usable address at once and asks
+  there without waiting. At most one move per address that has not failed,
+  so a host whose every address fails does not spin.
+- When choosing an address, the usable come first; then one a send failed
+  to since the last lookup; then one the system has no route to (found at
+  each lookup without sending anything); last one of a family the game
+  port's socket cannot send to. An IPv4-only socket never uses an IPv6
+  address while an IPv4 one exists.
+- A new lookup keeps the address in use only while it is usable, else the
+  listing moves to the first usable address and keeps its listing (the same
+  master); an address no longer given means a master that moved, and the
+  game registers there afresh. The marks of failed sends are then cleared.
+  While the master is silent its name is looked up again every minute.
+- An answer from one of the master's addresses (a Challenge, Listed,
+  Heartbeat ack or Unknown listing) makes it the address in use, so the
+  Register with a Challenge's cookie goes back where the cookie came from.
+- A host's log has one line per change of address, with why, and one per
+  address a send failed to with nowhere else to go, until the next lookup.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Listed
+  Listed --> Silent: no answer for 10 s
+  Silent --> Silent: next request, next usable address, wait 2 to 15 s
+  Silent --> Silent: send failed, next usable address at once
+  Silent --> Listed: any address answers
+```
 
 ### The listing summary
 

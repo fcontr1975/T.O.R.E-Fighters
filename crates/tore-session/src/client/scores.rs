@@ -302,7 +302,7 @@ mod rig_tests {
     #[test]
     fn late_join_and_rejoin_use_the_ongoing_host_deadline() {
         let mut rig = Rig::with_config(
-            spec(3, 1, 200),
+            spec(3, 1, 150),
             LinkConfig::for_round_trip(40 * MS, 0., 0., 0.),
             29,
             |c| {
@@ -348,7 +348,7 @@ mod rig_tests {
 
     #[test]
     fn an_unlimited_flight_has_no_client_countdown() {
-        let mut rig = Rig::with_config(spec(1, 1, 200), LinkConfig::one_way(10 * MS), 30, |_| {});
+        let mut rig = Rig::with_config(spec(1, 1, 150), LinkConfig::one_way(10 * MS), 30, |_| {});
         let player = rig.join(|_| {}, super::super::tests::level_script());
         assert!(rig.run_until(Duration::from_secs(5), |r| r.seated(player)));
         rig.run(Duration::from_secs(1));

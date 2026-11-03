@@ -18,6 +18,12 @@
 //!   yellow for parked aircraft, green for supply trucks, cyan for battery
 //!   radars, orange for battery launchers, magenta for units whose shape the
 //!   reader cannot draw yet.
+//! - `--surface-dump --objectives [--seeds N] [--fast] [--uncached]
+//!   [THEATER ...]` checks every distance and defense pair in the completed
+//!   scene, retaining authored exceptions as findings. `--objective-starts`
+//!   checks full mission aircraft starts, ground slots and assignment references.
+//!   See docs/DEVELOPMENT.md for scope, reuse checks and known policy conflicts.
+//!
 //! - `--surface-dump --sweep [--seeds N] [THEATER ...]` places every
 //!   template with seeds 1 to N (20) and reports the site rules each breaks,
 //!   and each theater's base-layout batteries; `--surface-dump --starts
@@ -36,6 +42,9 @@
 //! The import does not keep the templates or the unit types only they name
 //! yet, so both commands add what the pack lacks from the retail `FA_2.LIB`
 //! the data directory remembers (read at runtime, never stored).
+mod objective_starts;
+mod objectives;
+
 use crate::{
     AppResult,
     camera::Camera,
@@ -70,6 +79,7 @@ pub(crate) fn world_without_front(
         resources,
         seating,
         &mut tore_world::world::Hooks {
+            inspect_invalid_placement: true,
             ground_variation: Some(Variation {
                 front: false,
                 ..Variation::ON
@@ -168,6 +178,10 @@ pub fn run() -> AppResult<()> {
     let mut seed = 1u32;
     let mut nationality = None;
     let mut night = false;
+    let mut objective_starts = false;
+    let mut objectives = false;
+    let mut fast = false;
+    let mut uncached = false;
     let mut all = false;
     let mut sweep = false;
     let mut starts = false;
@@ -195,6 +209,10 @@ pub fn run() -> AppResult<()> {
             "--surface-seed" => seed = next()?.parse()?,
             "--enemy-nationality" => nationality = Some(next()?.parse()?),
             "--night-stealth" => night = true,
+            "--objective-starts" => objective_starts = true,
+            "--objectives" => objectives = true,
+            "--fast" => fast = true,
+            "--uncached" => uncached = true,
             "--all" => all = true,
             "--sweep" => sweep = true,
             "--starts" => starts = true,
@@ -219,6 +237,12 @@ pub fn run() -> AppResult<()> {
     let mut resources = resources()?;
     if grounding_sites {
         with_retail_records(&mut resources, true)?;
+    }
+    if objective_starts {
+        return objective_starts::run(&resources, seeds.unwrap_or(3), &positional, fast);
+    }
+    if objectives {
+        return objectives::run(&resources, seeds.unwrap_or(3), &positional, fast, uncached);
     }
     if all {
         return resolve_all(&resources, seeds.unwrap_or(3));

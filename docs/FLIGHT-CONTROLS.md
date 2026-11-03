@@ -72,7 +72,8 @@ keys change with the aircraft ([the full table](INPUT.md#vtol-tiltrotor-and-heli
   helicopter mode. Z and X stay rudder keys.
 - **All six**: **Ctrl+Shift+A** cycles the stability level, announced as
   `Stability: Off`, `Damper` or `Attitude`; Pref → Stability level does the
-  same and the choice is kept for later flights. **Damper** (the default)
+  same and the choice is kept for later flights; a right click on the row turns
+  the level back (Off, Attitude, Damper). **Damper** (the default)
   stops the aircraft rotating when you let go of the stick and leaves it at
   the attitude you left it; **Attitude** also returns it to the trimmed
   attitude, and at the Attitude level Ctrl+arrows move that attitude
@@ -263,7 +264,11 @@ opinionated, requested by John on 2026-09-26 (the label and messages are agent
 choices). `--debug-panels` starts a launch with it on, and `--flight-panels
 thought,telemetry,guidance,comms,menu` also opens those panels, for captures.
 
-**Escape → Debug** is a tab after the retail ones with two AI test settings and
+**Escape > Debug > Slow-frame log** turns performance logging on or off for
+this session, including in joined games. It starts at 50 ms. Send the current
+session log after a slowdown. [Usage and log locations](DEVELOPMENT.md#diagnosing-slow-frames).
+
+**Escape → Debug** is a tab after the retail ones with a slow-frame log switch, two AI test settings and
 a Back to defaults row, for measuring what the AI's observation costs and how it
 fights without part of it. *AI observation rate* cycles 120 Hz, 60 (the default
 since optimization round 2), 40, 30 and 20: AI aircraft observe that often, staggered across ticks, while

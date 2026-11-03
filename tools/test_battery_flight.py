@@ -398,3 +398,14 @@ class RotorProbeTests(unittest.TestCase):
         slow = ROTOR_PROBE.replace("ROTOR V22.PT forward 80kt +1000fpm: climb=1008fpm speed_off=0.9kt",
                                    "ROTOR V22.PT forward 80kt +1000fpm: climb=1008fpm speed_off=9.9kt")
         self.assertTrue(any("missed" in p for p in _powered.check_rotor_probe(slow)))
+
+
+class CountermeasureCadenceTests(unittest.TestCase):
+    def test_actual_release_ticks_are_checked(self):
+        from battery_scenarios.flight import check_countermeasure_cadence
+        def trace(ticks):
+            return "\n".join(f"missile-study: device AIM9M.JT seed 0 t=0 release_tick={t} kind=Flare" for t in ticks)
+        self.assertEqual(check_countermeasure_cadence(trace([94, 124, 334, 364, 574])), [])
+        self.assertTrue(check_countermeasure_cadence(trace([94, 124, 184, 214])))
+        self.assertTrue(check_countermeasure_cadence(trace([94, 125, 334, 364])))
+        self.assertTrue(check_countermeasure_cadence(trace([])))

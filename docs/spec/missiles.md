@@ -8,6 +8,12 @@
 > the original's internals, it is out of date.
 > <!-- tore-header v2 -->
 
+The energy-flight overhaul has its own [behaviour contract](missile-energy.md)
+and [calibration baseline](../baselines/missile-energy.md). This page remains
+the home of reviewed roles, acquisition/support and the previous Spec motion.
+Energy-specific flight, estimates and physical decoy consequences supersede
+those parts only when Energy rules are selected.
+
 Implementation mode, 2026-09-17. Delivery status is in the
 [feature matrix](../features.md) and measured checks in the
 [baseline](../baselines/missiles.md).
@@ -777,15 +783,14 @@ What a player sees:
   percent of it for a weapon whose percent is 100 (every bomb) and half for
   any other.
 - The aircraft or object a round struck directly takes only that direct hit.
-- The shooter can be caught in its own blast, as the manual warns (p. 126:
-  "Firing a missile within its minimum range, or launching a bomb at too low
-  an altitude, can put you within this radius"). That damage credits no one,
-  like a crash: no kill, no strike, no friendly-fire count.
-  Not while the burst is still inside the shooter's own hit box: see
-  [launch grace](#launch-grace).
+- Bombs and unguided stores can catch the shooter in their own blast, as the
+  manual warns (p. 126). That damage credits no one: no kill, strike or
+  friendly-fire count. Their [launch grace](#launch-grace) still applies.
+  Missiles instead follow John's permanent
+  [launcher exclusion](missile-energy.md#motion), in every weapon mode.
 - With friendly fire off, splash spares everything of the shooter's side,
-  the shooter included: aircraft, ground objects and parked aircraft. With
-  it on (single player), it spares no one.
+  including aircraft, ground objects and parked aircraft. With it on, other
+  aircraft remain vulnerable; a missile's own launcher remains excluded.
 - A splash kill is credited to the shooter in the debrief, the replay and the
   multiplayer score, exactly as a direct kill is, and an ownship's splash
   kills count on its kill tally. Strikes, radio hit calls and jolts follow.
@@ -837,7 +842,8 @@ Spec-derived from the original's collateral routine
 ([format notes](../formats/weapons.md#collateral-damage)): who is reached,
 the straight-line falloff to the target's surface, the struck target
 excluded, and the ground share. Spec-derived from the manual (p. 126): the
-shooter can be caught in its own blast. Fitted by the agent: which
+shooter can be caught in its own blast. The missile exception is opinionated,
+requested by John on 2026-10-26; bombs retain the manual rule. Fitted by the agent: which
 direct hits count as ground bursts (TORE: a hit on a ground object or ship;
 the original's split between its two direct-hit calls was not traced); the
 splash applied at once (the original delays each target's share by about
@@ -851,62 +857,29 @@ unidentified flag; see [unknowns](#splash-unknowns).
 
 ### Launch grace
 
-Requested by John on 2026-10-13 (opinionated), because stores now hang close to
-the aircraft and in places inside its hit volume: a store cannot hurt the
-aircraft that launched it while the store is still inside that aircraft's hit
-box. The box is the aircraft contact sphere the missile and bomb hit tests
-already use (28 ft for an ownship), and the grace holds for the player, the AI
-and online peers alike, because it is a plain rule of the combat step: it uses
-positions only, so it does not depend on frame rate, the view or what a
-replay shows.
+Missiles use the permanent [launcher exclusion](missile-energy.md#motion)
+requested by John on 2026-10-26. They cannot acquire, hit or blast-damage their
+own firing aircraft, even after separation, on return, or at a ground impact.
+This applies to Energy, Spec and Compatibility weapon modes. Another aircraft
+in the path or blast remains vulnerable under the usual friendly-fire rule.
 
-What a player sees:
+Other stores retain John's 2026-10-13 launch grace. A store inside its firing
+aircraft's contact sphere (28 ft for an ownship), widened by its fuze radius,
+cannot hit that aircraft directly. An airburst inside the aircraft's own
+contact sphere spares it. Once outside, an unguided store or bomb can return
+and hit its launcher, and its blast outside the sphere can damage it.
+Ground bursts are not covered by this grace: a bomb dropped too low or a
+rocket fired into the runway can still damage its firing aircraft. Ground,
+sea, ground-object, ship and parked-aircraft hits use the ground blast share.
+Other drop-launched stores retain the fitted one-second separation grace
+after ignition. Guns never hit their own shooter directly.
 
-- A rocket, missile or bomb leaves its pylon without ever exploding on its own
-  aircraft, however close or deep its mount sits.
-- A proximity fuze does not fire on the launcher while the store is inside
-  the box widened by the fuze radius (an AIM-7's 100 ft makes that 128 ft).
-- A store that goes off in the air while still inside the box (it struck
-  another aircraft there) hurts everything its splash reaches except its own
-  launcher. A burst even one foot outside the box is the normal own blast
-  described above.
-- A burst on the ground is not covered (John, 2026-10-13: ground bursts damage
-  aircraft with splash regardless of initial proximity). A store that goes off
-  on the terrain, the sea, a ground object, a ship or a parked aircraft gives
-  its launcher the normal ground share even when the burst point is inside the
-  box, so a bomb dropped too low, or a rocket fired into the runway under a
-  parked aircraft, still hurts it. Ground objects and ships count as ground
-  bursts (agent decision, matching the rule that already gives them the ground
-  share).
-- Once the store has left the box the grace is over: a missile that turns back
-  and re-enters hits the launcher as any other target (its fuze fires at the
-  widened box edge, before it is inside), and its blast outside the box still
-  reaches the launcher.
-- A drop-launched store (one whose motor lights after release: the AIM-54,
-  AIM-7, AA-9 and PL-10 at 2 s, the AA-6, AIM-7E, AGM-65 and AS-7 at 1 s)
-  spares its launcher, wherever it is, until 1 s after its motor lights.
-  It falls about 124 ft under the aircraft, which leaves it at the very edge
-  of a 128 ft box, and a lofting AIM-54 then climbs ahead through the
-  launcher's height and is clear of the box about 0.6 s after it lights. Without
-  this a level F-14 fuzed every Phoenix it fired on itself (fitted, agent
-  decision 2026-10-20; the 1 s is the record's quarter-second steps, 4 of them).
-  A store whose motor lights on the rail, a rocket and a bomb have no such
-  window.
-- Another aircraft overlapping the launcher's box is hit as always, and a
-  store of any other aircraft bursting inside the box still hurts it.
-- Guns are unchanged: a gun round never hits its shooter at all.
-
-How it is built (agent decision, no new state): the direct-hit and fuze test
-ignores the launcher for a store whose position at the start of the tick was
-inside the box widened by its fuze radius, or that is a drop-launched store
-within 1 s of its motor lighting (its age against the record's ignition time), and the splash step skips the
-launcher when an airburst's point is inside the box. Both read positions only, so
-there is nothing to store in a checkpoint or a replay and nothing on the wire.
-The arming time of a bomb or missile (`fuze_arm_t`) is unchanged and still
-keeps an unarmed store from exploding on anything. A store that leaves the box
-and returns to burst in the air on a different target inside it counts as
-inside the box (the grace follows the burst point, not the store's history;
-John, 2026-10-13: leave it that way).
+The combat step applies these rules to the player, AI and online peers.
+The contact and blast tests read owner identity and current geometry; they
+need no new checkpoint or network state. Arming time (`fuze_arm_t`) remains
+separate: an unarmed store does not explode on any target. A bomb that leaves
+the sphere and bursts on another target back inside it still gets the airburst
+grace, because that rule follows the burst point rather than flight history.
 
 ### Splash unknowns
 
@@ -915,8 +888,8 @@ John, 2026-10-13: leave it that way).
   shooter carries a flag (object byte 0x10, bit 0x80); neither is
   identified. The manual says a player can be caught in his own blast, so
   the flag may mark the player's aircraft. TORE follows the friendly fire
-  setting instead, per John's decision, and lets the shooter be hurt, per the
-  manual. Next step: name object type 4 and the flag from the object creator.
+  setting instead, with permanent missile launcher immunity; bombs and unguided
+  stores can still hurt the shooter as the manual describes. Next step: name object type 4 and the flag from the object creator.
 - Which of the original's two direct-hit collateral calls (full share, or
   the ground share) serves which kind of target.
 
@@ -1293,8 +1266,8 @@ Reviewed AI missiles use the same seeker activation, acquisition, propulsion,
 last-intercept memory and expiry rules as player missiles. Each supported shot
 reads only its firing actor's current fire-control observation. Player support
 cannot support an AI shot. AI seekers can acquire the player as target ID 0;
-player seekers cannot acquire their own launcher. The explicit compatibility
-weapon path retains its prior steering.
+no missile seeker may acquire its own launcher. The explicit compatibility
+weapon path retains its prior steering apart from this permanent owner exclusion.
 
 The [shared threat service](ai-awareness.md#missile-awareness-and-defense) reads
 actual missile state for warning onset. Countermeasures can decoy a spec-guided

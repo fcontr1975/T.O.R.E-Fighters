@@ -1,6 +1,6 @@
 [package]
 name = "tore-world"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
@@ -15,6 +15,14 @@ tore-sim = { path = "../tore-sim" }
 # Synthetic fixtures (terrain, aircraft profile, AI wings, combat) that tests in
 # other crates share. Always on under this crate's own tests.
 test-support = []
+
+[dev-dependencies]
+tore-import = { path = "../tore-import" }
+
+# High-resolution thread CPU timing for the developer performance probe only.
+# This version is already in the workspace lockfile; the runtime library stays independent.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["time"] }
 
 [lints]
 workspace = true

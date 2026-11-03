@@ -107,8 +107,9 @@ fn targets_of(f: &Fixture, unit: u32) -> Vec<u32> {
 
 #[test]
 fn opposing_tanks_in_range_engage_each_other_before_an_aircraft() {
-    // A Blue jet low over the Red tank, inside its gun's air zone: the tank
-    // still takes the Blue tank 3,000 ft off first.
+    // A Blue jet low near the Red tank, inside its gun's air zone and below
+    // its 20 degree elevation: the tank still takes the Blue tank 3,000 ft
+    // off first.
     let mut f = Fixture::new(
         vec![
             tank(RED_TANK, 0., 0., RED),
@@ -116,7 +117,7 @@ fn opposing_tanks_in_range_engage_each_other_before_an_aircraft() {
         ],
         Vec::new(),
     );
-    f.jet.position = [0., 1_500., 1_000.];
+    f.jet.position = [0., 800., 3_500.];
     // Search at once, 20 s unready preparation, 1 s lock.
     f.run(25 * TPS);
     assert_eq!(targets_of(&f, RED_TANK), vec![BLUE_TANK]);
@@ -131,6 +132,118 @@ fn opposing_tanks_in_range_engage_each_other_before_an_aircraft() {
     f.run(60 * TPS);
     assert_eq!(targets_of(&f, RED_TANK), vec![BLUE_TANK, JET]);
     assert!(rounds_at(&f, RED_TANK, JET) >= 1);
+}
+
+/// The retail BMP-2 record (an IFV's 2A42): air and surface flags, fire zone
+/// 50 to 3,000 ft below 3,000 ft. Not a tank gun: the tank rules leave it be.
+fn bmp2() -> Weapon {
+    let mut w = gun(
+        "BMP2.JT",
+        0x300c0,
+        0,
+        [
+            zone(32767, 0, 20_000, i32::MIN, i32::MAX),
+            zone(8190, 50, 3_000, i32::MIN, 3_000),
+        ],
+        3666,
+    );
+    w.burst.game_rounds_in_burst = 2;
+    w.burst.game_burst_t = 2;
+    w.burst.reload_t = 12;
+    w.damage.by_class = [5; 5];
+    w
+}
+
+/// The first tick `unit` fired at `target`.
+fn first_round_at(f: &Fixture, unit: u32, target: u32) -> Option<u64> {
+    f.fired
+        .iter()
+        .find(|(_, t)| {
+            matches!(t, Trace::Shot { unit: u, target: aimed, rounds, .. }
+                if u.0 == unit && *aimed == target && *rounds > 0)
+        })
+        .map(|(tick, _)| *tick)
+}
+
+/// Tanks against aircraft (John, 2026-10-24: tanks "should be a surprise if
+/// they kill you"): a tank's gun elevates to 20 degrees above its hull, so
+/// it does not take, track or fire at a jet above that, and spends no
+/// round; once the jet is lower in the sky it engages. An IFV's cannon keeps
+/// its old rules and fires at the same high jet.
+#[test]
+fn a_tank_does_not_engage_an_aircraft_above_its_20_degree_elevation() {
+    // About 26 degrees above the tank's sight, 2,240 ft away: inside the
+    // gun's 5,000 ft reach and 3,000 ft ceiling.
+    let high = [0., 1_000., 2_000.];
+    let mut f = Fixture::new(vec![tank(RED_TANK, 0., 0., RED)], Vec::new());
+    f.jet.position = high;
+    f.run(60 * TPS);
+    assert!(targets_of(&f, RED_TANK).is_empty(), "never takes the jet");
+    assert_eq!(f.rounds(), 0);
+    assert_eq!(
+        f.unit_state(RED_TANK).mounts[0].loaded,
+        f.surface.arsenal.units[0].weapons[0].magazine
+    );
+    // Awake, looking: the jet is in its detection range.
+    assert_eq!(f.phase(RED_TANK), Phase::Search);
+    // Lower in the sky (about 14 degrees): taken and fired at.
+    f.jet.position = [0., 1_000., 4_000.];
+    f.run(40 * TPS);
+    assert_eq!(targets_of(&f, RED_TANK), vec![JET]);
+    assert!(rounds_at(&f, RED_TANK, JET) >= 1);
+    // The same high jet draws an IFV's fire.
+    let ifv = placed(RED_TANK, "BMP2.NT", 0x0400, 0., 0., 1)
+        .with_gun(bmp2(), "BMP2", arc(0, FREE, FREE), 0)
+        .on(RED);
+    let mut f = Fixture::new(vec![ifv], Vec::new());
+    f.jet.position = high;
+    f.run(30 * TPS);
+    assert_eq!(first_round_at(&f, RED_TANK, JET), Some(21 * TPS));
+}
+
+/// A tank lays on an aircraft for 3 s inside its gates before the first
+/// round, on top of its 1 s lock; at a ground target it keeps the record's
+/// timing.
+#[test]
+fn a_tank_lays_on_an_aircraft_but_not_on_a_tank() {
+    let mut f = Fixture::new(vec![tank(RED_TANK, 0., 0., RED)], Vec::new());
+    f.jet.position = [0., 500., 3_000.];
+    f.run(30 * TPS);
+    // 20 s unready preparation, 1 s lock, 3 s lay.
+    let lay = (control::TANK_AIR_LAY_S * TPS as f64) as u64;
+    assert_eq!(lay, 3 * TPS);
+    assert_eq!(first_round_at(&f, RED_TANK, JET), Some(21 * TPS + lay));
+    let mut f = Fixture::new(
+        vec![
+            tank(RED_TANK, 0., 0., RED),
+            tank(BLUE_TANK, 0., 3_000., BLUE),
+        ],
+        Vec::new(),
+    );
+    f.run(30 * TPS);
+    assert_eq!(first_round_at(&f, RED_TANK, BLUE_TANK), Some(21 * TPS));
+}
+
+/// The ceiling is in the vehicle's own frame, and the tracking rate is the
+/// sight line's turn.
+#[test]
+fn hull_elevation_and_angular_rate() {
+    let level = Basis::new(0., 0., 0.);
+    let d: Vector = [0., 1_000., 2_000.];
+    let world = d[1].atan2(d[2]).to_degrees();
+    assert!((hull_elevation_deg(&level, d) - world).abs() < 1e-9);
+    // A hull pitched on a slope: the same line, measured from its deck.
+    let pitched = Basis::new(0., 0.2, 0.);
+    let deck = attitude::dot(d, pitched.up)
+        .atan2(attitude::dot(d, pitched.right).hypot(attitude::dot(d, pitched.forward)));
+    assert!((hull_elevation_deg(&pitched, d) - deck.to_degrees()).abs() < 1e-9);
+    assert!((hull_elevation_deg(&pitched, d) - world).abs() > 5.);
+    // A 450 kt jet crossing 1,000 ft away: about 43.5 degrees a second.
+    let rate = angular_rate_deg_s([0., 0., 1_000.], [759.5, 0., 0.], [0.; 3]);
+    assert!((rate - 0.7595_f64.to_degrees()).abs() < 1e-6);
+    // Head on, or hovering: the line does not turn.
+    assert!(angular_rate_deg_s([0., 0., 1_000.], [0., 0., -759.5], [0.; 3]).abs() < 1e-9);
+    assert_eq!(angular_rate_deg_s([0., 300., 3_000.], [0.; 3], [0.; 3]), 0.);
 }
 
 #[test]
@@ -293,9 +406,10 @@ fn a_unit_engaging_a_surface_target_holds_and_one_engaging_aircraft_does_not() {
     f.kill(BLUE_TANK);
     f.run(TPS);
     assert!(!movement::engaging_surface(f.unit_state(RED_TANK)));
-    // Fighting the jet alone does not stop it.
+    // Fighting the jet alone does not stop it (the jet below the gun's 20
+    // degree elevation).
     f.jet.side = BLUE;
-    f.jet.position = [0., 1_500., 1_000.];
+    f.jet.position = [0., 800., 3_500.];
     f.run(25 * TPS);
     assert!(f.phase(RED_TANK).locked());
     assert!(!movement::engaging_surface(f.unit_state(RED_TANK)));

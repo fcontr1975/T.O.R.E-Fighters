@@ -596,6 +596,26 @@ pub fn is_small_arms(record: &str) -> bool {
         .any(|row| row.mount == Mount::Infantry && row.record.eq_ignore_ascii_case(record))
 }
 
+/// The main battle tanks' gun records: the M1's M256 and the 2A46 the T-72,
+/// T-80 and T-90 fire. Each tank NT carries this one gun and no machine gun
+/// (survey 2.3 to 2.5). Against aircraft these guns aim with the tank rules
+/// ([`crate::ai::surface::tank_air_aim_error_deg`],
+/// [`crate::ai::surface::TANK_AIR_LAY_S`], [`TANK_MAX_ELEVATION_DEG`]).
+pub const TANK_GUN_RECORDS: [&str; 2] = ["M1.JT", "T72.JT"];
+
+/// The highest a tank gun elevates, degrees above the hull's horizontal
+/// plane (opinionated, John, 2026-10-24: "max elevation of fire set to like
+/// 20 degrees up"; the M1's M256 elevates to +20 degrees, the T-72's 2A46 to
+/// about +14). An aircraft higher than this above the hull is not engaged.
+pub const TANK_MAX_ELEVATION_DEG: f64 = 20.;
+
+/// Whether `record` is a main battle tank's gun ([`TANK_GUN_RECORDS`]).
+pub fn is_tank_gun(record: &str) -> bool {
+    TANK_GUN_RECORDS
+        .iter()
+        .any(|tank| tank.eq_ignore_ascii_case(record))
+}
+
 /// Puts a row of the table on the gun record `weapon` a unit of the NT
 /// `unit` fires and returns the row, or leaves the record alone and returns
 /// `None` when the table has no row for it (aircraft guns, missiles). The

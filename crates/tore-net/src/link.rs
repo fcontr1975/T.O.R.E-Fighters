@@ -212,6 +212,10 @@ impl<D: Datagrams> Datagrams for Linked<D> {
             }
         }
     }
+
+    fn can_send_to(&self, to: SocketAddr) -> bool {
+        to == LINK_ADDRESS || self.socket.can_send_to(to)
+    }
 }
 
 #[cfg(test)]

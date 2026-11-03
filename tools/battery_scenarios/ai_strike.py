@@ -27,6 +27,9 @@ what the simulation reports. Two kinds of scenario use it:
   a player's GBU-10; an AI F-14 with only a GBU-10 and no designator drops on a player's spot; the
   same F-14 with nobody lasing does not choose the bomb). The runs print `PHASE`, `HOLD` and
   `LASER` lines for them.
+* The committed-to-release window (John, 2026-10-28): `ai-strike-commit-aaa`, gunfire inside the
+  last 5 s of a straight Mk 82 pass waits for the release (`COMMIT ... held_defence=yes`), and the
+  same pass with a gun moved out under the run line breaks into Defend before the window opens.
 
 `parse_runs` reads the output; the check functions are tested in
 tools/test_battery_ai_strike.py.
@@ -406,7 +409,10 @@ def lase_flown_problems(run: Run, label: str, ordered_at: float) -> list[str]:
     return problems
 
 
-def clear_air_strike_problems(output: str) -> list[str]:
+def clear_air_strike_problems(output: str, kill: bool = True) -> list[str]:
+    """`kill=False` (the Mk 82 run) asks for a bomb on its target instead of a building kill: one
+    Mk 82 rarely destroys a 500 hp HQ building, and the Maverick wingman often kills the striker's
+    bunker first, so a kill there depended on which target a long pass happened to pick."""
     runs = parse_runs(output)
     if len(runs) != 1:
         return [f"expected one strike run, got {len(runs)}"]
@@ -414,8 +420,13 @@ def clear_air_strike_problems(output: str) -> list[str]:
     problems = consistency_problems(run, "HQ strike")
     if not any(number(r.get("t")) > 10 for r in run.of("RELEASE")):
         problems.append("no release after the air threat was removed")
-    if not any(k.get("victim", "").startswith("0x500000") for k in run.of("KILL")):
+    if kill and not any(k.get("victim", "").startswith("0x500000") for k in run.of("KILL")):
         problems.append("the strike did not destroy a building at the HQ site")
+    limit = MISS_FT_MAX.get(run.skill)
+    if not kill and limit is not None and not any(
+        number(i.get("miss_ft")) <= limit for i in run.of("IMPACT")
+    ):
+        problems.append(f"no bomb landed within {limit:.0f} ft of its target")
     if not run.of("EGRESS"):
         problems.append("the strike did not egress")
     return problems
@@ -459,10 +470,36 @@ BREAK_PITCH_MAX_DEG = 10.0
 HELI_AGL_MIN_FT = 150.0
 
 
+def leave_problems(run: Run, label: str, unknown_shooter: bool) -> list[str]:
+    """The ambush rule (John, 2026-10-29): `threat_leave` is the answer to a shot from a site the
+    helicopter did not know, so each `threat_leave` follows a `SHOT ... known=no` fired since the
+    previous `threat_leave` (or the start). A leave that follows only shots from sites it knew
+    (`known=yes`, or `none` for no picture) is a fault in every run; with `unknown_shooter` wanted,
+    a leave with no shot at all before it is one too (a gun's ambush has no SHOT line, so only the
+    run that lays out a missile ambush asks for this)."""
+    problems: list[str] = []
+    shots = [(float(f["t"]), f.get("known", "none")) for f in run.of("SHOT") if "t" in f]
+    previous = float("-inf")
+    for leave in (f for f in run.of("THREAT") if f.get("decision") == "threat_leave"):
+        at = float(leave.get("t", "nan"))
+        since = [known for t, known in shots if previous < t <= at]
+        if since and "no" not in since:
+            problems.append(f"{label}: threat_leave at t={at:.1f} after only shots from sites it knew ({since})")
+        elif unknown_shooter and not since:
+            problems.append(f"{label}: threat_leave at t={at:.1f} with no SHOT from an unknown site before it")
+        previous = at
+    if unknown_shooter and not any(f.get("known") == "no" for f in run.of("SHOT")):
+        problems.append(f"{label}: no SHOT with known=no, the ambush was not by a site it did not know")
+    return problems
+
+
 def heli_defense_problems(output: str, runs_wanted: list[dict]) -> list[str]:
     """`ai-strike-heli-defended`: for each run (`label`, `profile` or None for any, `breaks` BREAK
     lines at least, `release` wanted, `no_release`, `hurt`, `kill`, `egress`, `decisions` the THREAT reasons
-    wanted in this order, `sead` the SEAD stand-in fired), the AI named its pass, flew the helicopter
+    wanted in this order, `no_decisions` none made, `sead` the SEAD stand-in fired, `unknown_shooter` every
+    `threat_leave` follows a SHOT from a site it did not know, `ahead` a move-ahead plan made,
+    `outside_reach` never inside the reach of a defence it knew, the summary's `reach_margin_ft`), the AI
+    named its pass, flew the helicopter
     break (each BREAK at an offset of 60, 90 or 120 degrees, at 75 knots or more, no steeper than 10
     degrees, never blocked by the ground), made its threat decisions (slice H4: hold off outside a
     known ring, resume, switch targets, go home, leave an ambush's ring), released as wanted, was not
@@ -495,6 +532,14 @@ def heli_defense_problems(output: str, runs_wanted: list[dict]) -> list[str]:
         rest = iter(made)
         if not all(any(d == m for m in rest) for d in wanted):
             problems.append(f"{label}: threat decisions {made}, want {wanted} in that order")
+        if want.get("no_decisions") and made:
+            problems.append(f"{label}: threat decisions {made}, want none")
+        if want.get("ahead") and not run.of("AHEAD"):
+            problems.append(f"{label}: no move-ahead plan (AHEAD line)")
+        if want.get("outside_reach") and not number(run.summary.get("reach_margin_ft")) >= 0:
+            problems.append(f"{label}: came {run.summary.get('reach_margin_ft')} ft inside the reach of a "
+                            "defence it knew")
+        problems += leave_problems(run, label, want.get("unknown_shooter", False))
         if want.get("sead") and not run.of("SEAD"):
             problems.append(f"{label}: the SEAD stand-in never fired")
         if want.get("release") and not (run.of("RELEASE") and run.of("IMPACT")):
@@ -581,6 +626,102 @@ def strike_problems(output: str, runs_wanted: list[dict]) -> list[str]:
             problems.append(f"{label}: never defended against the defences")
         if want.get("hit") and not _target_hurt(run):
             problems.append(f"{label}: the target is unhurt ({run.summary.get('target_hp')})")
+    return problems
+
+
+# The committed-to-release window (docs/spec/ai-strike.md, John 2026-10-28): it opens 5 s or less
+# from the release (the driver prints the estimate to 0.01 s), and the striker answers a held defence
+# on the tick after the release (1/120 s); half a second is room for the controller's hand-over.
+COMMIT_WINDOW_S = 5.0
+COMMIT_REACT_S = 0.5
+
+
+def _phase_at(run: Run, t: float) -> str | None:
+    """The strike phase the last PHASE line before `t` named."""
+    phase = None
+    for p in run.of("PHASE"):
+        if number(p.get("t")) < t:
+            phase = p.get("name")
+    return phase
+
+
+def commit_held_problems(run: Run, label: str) -> list[str]:
+    """`ai-strike-commit-aaa`, a held run: a COMMIT window opens at most 5 s from the release; gunfire
+    reaches the striker while it is open (`held_defence=yes`, `held_at` inside the window); the run is
+    not broken (no Defend between the opening and the release); the bomb leaves inside the window; and
+    the striker defends right after the release."""
+    problems: list[str] = []
+    commits = run.of("COMMIT")
+    opened = next((c for c in commits if c.get("open") == "yes"), None)
+    if opened is None:
+        return [f"{label}: the committed-to-release window never opened"]
+    t_open = number(opened.get("t"))
+    release_s = number(opened.get("release_s"))
+    if not 0.0 <= release_s <= COMMIT_WINDOW_S:
+        problems.append(f"{label}: the window opened {opened.get('release_s')} s from the release, want 0 to 5")
+    closed = next((c for c in commits if c.get("open") == "no" and number(c.get("t")) >= t_open), None)
+    if closed is None:
+        return problems + [f"{label}: the window opened at t={t_open:.3f} and never closed"]
+    t_close = number(closed.get("t"))
+    held_at = number(closed.get("held_at"))
+    if closed.get("held_defence") != "yes":
+        problems.append(f"{label}: no defence came while the window was open (held_defence={closed.get('held_defence')})")
+    elif not t_open <= held_at <= t_close:
+        problems.append(f"{label}: the held defence at t={closed.get('held_at')} lies outside the window "
+                        f"{t_open:.3f} to {t_close:.3f}")
+    inside = [t for t in run.times("RELEASE") if t_open <= t <= t_close]
+    if not inside:
+        problems.append(f"{label}: no RELEASE inside the window {t_open:.3f} to {t_close:.3f} "
+                        f"(releases at {run.times('RELEASE')})")
+        return problems
+    released = inside[0]
+    if held_at > released:
+        problems.append(f"{label}: the defence at t={held_at:.3f} came after the release at t={released:.3f}")
+    broke = [number(p.get("t")) for p in run.of("PHASE")
+             if p.get("name") == "Defend" and t_open <= number(p.get("t")) < released]
+    if broke:
+        problems.append(f"{label}: the run broke into Defend at t={broke[0]:.3f}, inside the window")
+    defended = [number(p.get("t")) for p in run.of("PHASE")
+                if p.get("name") == "Defend" and released <= number(p.get("t")) <= released + COMMIT_REACT_S]
+    if not defended:
+        problems.append(f"{label}: no Defend within {COMMIT_REACT_S} s after the release at t={released:.3f}")
+    return problems
+
+
+def commit_breaks_problems(run: Run, label: str) -> list[str]:
+    """`ai-strike-commit-aaa`, the control: the same guns reach the striker before the window opens,
+    so the attack breaks into Defend as before, with no window open and nothing released before it."""
+    problems: list[str] = []
+    defends = [number(p.get("t")) for p in run.of("PHASE") if p.get("name") == "Defend"]
+    if not defends:
+        return [f"{label}: the striker never defended"]
+    t_defend = defends[0]
+    if _phase_at(run, t_defend) != "Attack":
+        problems.append(f"{label}: the first Defend at t={t_defend:.3f} came in {_phase_at(run, t_defend)}, "
+                        "want it to break an attack run")
+    early = [number(c.get("t")) for c in run.of("COMMIT") if c.get("open") == "yes" and number(c.get("t")) <= t_defend]
+    if early:
+        problems.append(f"{label}: the window opened at t={early[0]:.3f}, before the Defend at t={t_defend:.3f}; "
+                        "the control must break outside it")
+    if any(t <= t_defend for t in run.times("RELEASE")):
+        problems.append(f"{label}: released before the Defend at t={t_defend:.3f}")
+    return problems
+
+
+def commit_problems(output: str, runs_wanted: list[dict]) -> list[str]:
+    """`ai-strike-commit-aaa`: each wanted run is `held` (gunfire inside the window waits for the
+    release) or `breaks` (gunfire before it breaks the run)."""
+    runs = parse_runs(output)
+    if len(runs) != len(runs_wanted):
+        return [f"{len(runs)} runs finished, want {len(runs_wanted)}"]
+    problems: list[str] = []
+    for run, want in zip(runs, runs_wanted):
+        label = want["label"]
+        problems += consistency_problems(run, label)
+        if want["kind"] == "held":
+            problems += commit_held_problems(run, label)
+        else:
+            problems += commit_breaks_problems(run, label)
     return problems
 
 
@@ -990,17 +1131,15 @@ def scenarios() -> list[Scenario]:
     at2 = ["--aircraft", "mi24", "--load", "AT2", *heli]
     heli_rockets = ["--aircraft", "ah64", "--load", "LAU61", *heli]
     heli_rockets_out = [*heli_rockets, "--seconds", "300", "--follow-egress"]
-    # Light SAMs with the layout of surface seed 16: the Mi-24's pop-up goes through their warnings,
-    # breaks and gets its AT-2 away (slice ST-H; before it, the fighters' defence sank a helicopter).
-    # Seed 19, ST-H's layout, holds a SAM that out-ranges the AT-2: since slice H4 the helicopter
-    # holds off there (ai-strike-heli-defended).
+    # Light SAMs with the layout of surface seed 16 (an SA-14 team 12,100 ft from the Mi-24's start):
+    # ai-strike-heli-defended, "mi24 ambushed by the SA-14 it starts inside". Seed 19, ST-H's layout,
+    # holds a SAM that out-ranges the AT-2: since slice H4 the helicopter holds off there
+    # (ai-strike-heli-defended).
     sams16 = ["--defenses", "0", "1", "--surface-seed", "16"]
     sams19 = ["--defenses", "0", "1", "--surface-seed", "19"]
     heli_runs = [
         (pilot_run("UKR", "QUCOL", *at2, "--skill", "2"),
          dict(label="mi24 at2 popup", profile="popup", skill=2, miss=None, hit=True)),
-        (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams16),
-         dict(label="mi24 at2 popup under SAMs", profile="popup", skill=2, miss=None, hit=True, defends=True)),
         # The rocket runs follow the helicopter out (slice HF1): it turns away from the column and
         # masks low; before, it flew on over the column and a site it had not seen shot it down 2 s
         # after the old run end.
@@ -1009,6 +1148,23 @@ def scenarios() -> list[Scenario]:
         (pilot_run("UKR", "QUCOL", *heli_rockets_out, "--skill", "3"),
          dict(label="ah64 rockets skill 3", profile="popup", skill=3, miss=MISS_FT_MAX[3])),
     ]
+    # The committed-to-release window (John, 2026-10-28; docs/spec/ai-strike.md "Committed to the
+    # release, 5 s"): an A-4E's forced straight Mk 82 pass on the column under medium AAA, surface
+    # seed 1. The window opens at t=23.1 to 23.4 and the release follows 4.5 s later; a gun's rounds
+    # reach the striker at t=26.6, about 1.1 s before the release, at every skill. Before the window
+    # that broke the run 0.2 s before its release (Vladivostok HQ). The control moves the column's
+    # nearest ZSU-23 (0x5000000a, 3,660 ft from the target) 14,000 ft south, under the run line: it
+    # fires at t=21.7, 1.5 s before the window would open and 6 s before the release, and the run
+    # breaks into Defend as it did before the change.
+    commit = ["--aircraft", "a4e", "--load", "MK82", "--profile", "straight", "--defenses", "2", "0",
+              "--surface-seed", "1"]
+    commit_runs = [
+        *((pilot_run("UKR", "QUCOL", *commit, "--skill", str(k), "--seconds", "35"),
+           dict(label=f"a4e held skill {k}", kind="held")) for k in (2, 0, 3)),
+        (pilot_run("UKR", "QUCOL", *commit, "--skill", "2", "--seconds", "30",
+                   "--place-site", "0x5000000a,180,14000"),
+         dict(label="a4e breaks before the window", kind="breaks")),
+    ]
     # The helicopter's defence (slice ST-H) and threat awareness (slice H4, John's rule of
     # 2026-10-12): the AI picks its own pass; a known SAM or gun ring it does not fly into (it attacks
     # from outside every ring, or holds off up to 3 minutes for SEAD, then switches targets or goes
@@ -1016,40 +1172,104 @@ def scenarios() -> list[Scenario]:
     # threat is quiet. Every run lives. The switch to another target outside the rings is the unit
     # tests' (no driver layout has a second target outside every ring).
     sams = ["--defenses", "0", "1"]
+
+    def ambush_site(site: str) -> list[str]:
+        """The ambusher's layout (2026-10-29): the shoulder-fired team `site` 7,000 ft south-south-west
+        of the target (bearing 190), destroyed 4 s after its first launch. The game hides the team: the
+        helicopter spots it only within 3,000 to 4,000 ft by its skill, or once it launches."""
+        return ["--place-site", f"{site},190,7000", "--sead-site", site, "--sead-after-shot", "4"]
+
     defended_runs = [
-        # Heavy AAA on the column (before H4 the Mi-24 flew the pop-up through it and was lost):
-        # a firing point off the straight line, outside the guns' rings.
+        # Heavy AAA on the column (before H4 the Mi-24 flew the pop-up through it and was lost). Until
+        # 2026-10-29 it fired from a point off the straight line and guided its AT-2 on into the 9,500 ft
+        # ring of the column's ZSU-23 3,660 ft from the tank. Since the stand-off's advance is the AT-2's
+        # flight at its speed and its range search reaches the AT-2's reliable 14,500 ft (John,
+        # 2026-10-29), every firing point planned on the tank's place was spoiled within seconds as the
+        # column drove on among the guns, which stand still (it does not drive with them: every gun of
+        # `--defenses` stands; the column's nine tanks are its only movers), and it held off at 113 s.
+        # Since the move-ahead ambush (John, 2026-10-29) it plans on where the tank will be: from 1 s it
+        # sets up west of the road; the column turns south-east at about 62 s, which spoils that plan;
+        # it plans again on the new course and fires at about 86 s from 13,900 ft, its advance outside
+        # every gun ring it knows, and the AT-2 hurts the tank (120 of 200). Its exit turn takes it up to
+        # about 960 ft into the 2,000 ft margin of a ZSU-23's ring, never into a gun's reach. No hold-off
+        # is called.
         (pilot_run("UKR", "QUCOL", *at2, "--skill", "1", "--defenses", "3", "0"),
-         dict(label="mi24 under heavy AAA", profile="standoff", release=True, hurt=True)),
-        (pilot_run("UKR", "QUFACT", *at2, "--skill", "1", "--defenses", "1", "0"),
-         dict(label="mi24 under light AAA at the factory", profile="popup", release=True, kill=True)),
+         dict(label="mi24 under heavy AAA", profile="standoff", no_decisions=True, ahead=True, release=True,
+              hurt=True, outside_reach=True)),
+        # Light AAA at the factory: it sets out on the pop-up, learns of a ZSU-23 near the factory 20 s
+        # in and, its ring covering the factory, gives the pop-up up for a stand-off from outside the
+        # ring ("not pressed through"). Until 0.2.2 it flew the pop-up on into the guns and was lost
+        # guiding the energy rules' slower AT-2; the faster one had hidden it. The gun stood 2,650 ft
+        # from the factory; since the stand-off's advance is the AT-2's flight (John, 2026-10-29) no
+        # firing point leaves room for it outside that ring, so the run moves the gun 4,500 ft north of
+        # the factory, where the stand-off still clears it.
+        (pilot_run("UKR", "QUFACT", *at2, "--skill", "1", "--defenses", "1", "0",
+                   "--place-site", "0x5000000c,0,4500"),
+         dict(label="mi24 under light AAA at the factory", profile="standoff", release=True, kill=True)),
         # A SAM that out-ranges the AT-2 (the open ST-H question): hold off, then home.
         (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams19, "--seconds", "240"),
          dict(label="mi24 under a SAM that out-ranges the AT-2", decisions=["hold_off", "home"],
               no_release=True)),
-        # An SA-14 on the target: hold off, nothing outside the ring, home.
-        (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams, "--surface-seed", "4", "--seconds", "240"),
-         dict(label="mi24 holds off then goes home", decisions=["hold_off", "home"], no_release=True)),
+        # An SA-14 on the target (0x50000009, 2,935 ft from the tank): hold off, then home, no release.
+        # Since the game hides shoulder-fired teams and the move-ahead ambush (John, 2026-10-29) both
+        # SA-14 teams of the seed are hidden, so the way there is an ambush and an attack: the team on
+        # the target launches at 29 s from 15,900 ft (`SHOT ... known=no`), its launch gives it away, the
+        # helicopter holds off its ring (`threat_hold_off`) and breaks the round (`threat_leave`, the
+        # team known only by that launch) and takes one hit. The column drives out from under that
+        # ring, and at 198 s, 11 s before the three minutes run out, a move-ahead shot from 14,500 ft
+        # stands clear of it (`threat_resume`, an AHEAD line, 8,800 ft or more outside the team's
+        # reach). On the way the seed's other hidden SA-14 team (0x5000000d), 16,500 ft off, launches
+        # at 204 s (`known=no`): it holds off again, leaves that ambush and, with nothing clear of the
+        # two rings when that hold's three minutes run out, goes home at 385 s without firing.
+        (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams, "--surface-seed", "4", "--seconds", "400"),
+         dict(label="mi24 holds off then goes home",
+              decisions=["hold_off", "leave", "resume", "hold_off", "leave", "home"], ahead=True,
+              no_release=True, unknown_shooter=True)),
         # The same with SEAD killing the sites a minute in: it resumes and fires.
         (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams, "--surface-seed", "4", "--seconds", "240",
                    "--sead-at", "60"),
          dict(label="mi24 resumes after SEAD", decisions=["hold_off", "resume"], sead=True, release=True,
               hurt=True)),
         # An ambush by a site it had not seen (slice H4's rule; restored in slice HF1, John
-        # 2026-10-13). Seed 15 with its SA-14 moved 5,000 ft south-west of the column
-        # (`--place-site`): it holds off that known ring, resumes once the column has driven out of
-        # it and fires; on its way out (the exit turns away and masks) an SA-7 it had not seen
-        # engages it: it breaks, leaves that ring, holds off, resumes and fires again, killing the
-        # tank. The run follows it (`--follow-threat`) to the shot after the resume.
-        (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams, "--surface-seed", "15", "--seconds", "420",
-                   "--follow-threat", "--place-site", "0x50000019,240,5000"),
-         dict(label="mi24 ambushed", decisions=["hold_off", "resume", "leave", "resume"], breaks=5,
-              release=True, kill=True)),
-        # From 4 nm at 200 ft on seed 1 the AI would choose the stand-off under the SAMs; it holds off.
+        # 2026-10-13; a new layout for John's rules of 2026-10-29, when `threat_leave` came to mean a
+        # shot from an unknown site). A lone SA-7 of seed 7 (an SA-14 of seed 8, at skill 3, in the
+        # second run) stands 7,000 ft south-south-west of the factory. Since 2026-10-29 the game hides a
+        # shoulder-fired team (John): the helicopter's eye spots it only within 3,500 ft (skill 2;
+        # 4,000 ft at skill 3), not 19,968 ft, and its launch gives it away. Before, the runs needed the
+        # driver's `--site-sight` stand-in: terrain cannot hide a site here, because a site needs about
+        # 20 s of clear line before its first launch and the eye lists it within 6 s of the line
+        # opening. The site launches at the helicopter 10,900 ft away on its way in (`SHOT ... known=no`),
+        # it breaks (`threat_leave`), takes the first round's hit, leaves the ambush ring, holds off and
+        # resumes once the ring has been quiet a minute; the factory dies to the shot after the resume.
+        # The SEAD stand-in destroys the site 4 s after its first launch (`--sead-after-shot`): its
+        # second round, 10 s later, would hit too, take the helicopter below half its hit points and
+        # send it home. The margins are in docs/spec/ai-strike.md, "The ambush layout of 2026-10-29".
+        (pilot_run("UKR", "QUFACT", *at2, "--skill", "2", *sams, "--surface-seed", "7", "--seconds", "400",
+                   "--follow-threat", *ambush_site("0x5000000f")),
+         dict(label="mi24 ambushed by an SA-7", decisions=["leave", "resume"], breaks=2, release=True, kill=True,
+              unknown_shooter=True)),
+        (pilot_run("UKR", "QUFACT", *at2, "--skill", "3", *sams, "--surface-seed", "8", "--seconds", "400",
+                   "--follow-threat", *ambush_site("0x5000000e")),
+         dict(label="mi24 ambushed by an SA-14", decisions=["leave", "resume"], breaks=2, release=True, kill=True,
+              unknown_shooter=True)),
+        # From 4 nm at 200 ft on seed 1 the AI once chose the stand-off under the SAMs and turned
+        # away at once; since a line out of a ring must lead straight out it holds off from the
+        # start (no pass is named), with the same decisions.
         (pilot_run("UKR", "QUCOL", "--aircraft", "mi24", "--load", "AT2", "--altitude", "200", "--from", "4",
                    "--speed", "120", "--seconds", "200", "--skill", "2", *sams, "--surface-seed", "1"),
-         dict(label="mi24 holds off the SAMs it would stand off under", profile="standoff",
+         dict(label="mi24 holds off the SAMs it would stand off under",
               decisions=["hold_off", "home"], no_release=True)),
+        # Surface seed 16: the Mi-24 starts 12,100 ft from an SA-14 team, inside its ring. Until 0.2.2 it
+        # flew the pop-up through the warnings and broke (slice ST-H); then, knowing the SA-14 from the
+        # start, it flew the stand-off from outside the ring and hurt the tank (ai-strike-heli, "mi24 at2
+        # under SAMs it starts inside"). Since the game hides shoulder-fired teams (John, 2026-10-29) it
+        # does not know the team: the team launches 20 s in (`SHOT ... known=no`), the helicopter
+        # breaks and leaves (`threat_leave`), the launch gives the team away, its second round 10 s
+        # later is a known site's shot (`known=yes`), both rounds hit and it goes home without firing.
+        # The line out of a ring it knows is the unit tests' (helicopter_threat_tests).
+        (pilot_run("UKR", "QUCOL", *at2, "--skill", "2", *sams16),
+         dict(label="mi24 ambushed by the SA-14 it starts inside", decisions=["leave"], breaks=2,
+              no_release=True, unknown_shooter=True)),
     ]
     # The AC-130 (slice ST-F) on the moving armoured column: the TVIET truck park's radar-laid guns
     # (26,200 and 44,250 ft reach) shoot it down on its way in, so the quiet column it is.
@@ -1292,11 +1512,15 @@ def scenarios() -> list[Scenario]:
         Scenario(
             name="qmc-strike-a10-clear-air", lane="flight",
             args=pilot_run("VLA", "QVCMHQ", "--aircraft", "a10", "--load", "MK82",
-                           "--quick-wing", "--clear-air-at", "10", "--follow-egress", "--seconds", "480"),
+                           "--quick-wing", "--clear-air-at", "10", "--follow-egress", "--seconds", "900"),
             timeout=900,
             expect=[r"CLEAR_AIR .*count=1", r"RELEASE", r"IMPACT", r"EGRESS"],
-            check=clear_air_strike_problems,
-            notes="An A-10 Quick Mission strike wing must attack Vladivostok HQ after the last bandit is removed at ten seconds.",
+            check=lambda out: clear_air_strike_problems(out, kill=False),
+            notes="An A-10 Quick Mission strike wing must attack Vladivostok HQ after the last bandit is removed at "
+                  "ten seconds: the Mk 82 striker releases, lands within the miss limit of its target and egresses. "
+                  "Its Maverick wingman can kill the striker's target first, and a gun hit can break a pass, so "
+                  "the run has 900 s (2026-10-28: an energy-model change moved the first pass by 1 ft/s and "
+                  "the 480 s run, which needed a lucky bunker kill, stopped passing).",
         ),
         Scenario(
             name="qmc-strike-wing", lane="flight",
@@ -1373,7 +1597,8 @@ def scenarios() -> list[Scenario]:
             then=[Step(a, timeout=300) for a, _ in heli_runs[1:]],
             check=lambda out: strike_problems(out, [w for _, w in heli_runs]),
             notes="Helicopters strike the Ukraine armored column: a Mi-24's AT-2 from the pop-up, the "
-                  "same pass through light SAMs (it defends and its AT-2 still hurts the tank), an "
+                  "same target under light SAMs whose ring it starts in (it attacks from a stand-off "
+                  "outside the ring and its AT-2 hurts the tank), an "
                   "AH-64's rocket burst from the pop-up at skills 2 and 3, the drawn aim inside the "
                   "circle and every rocket within the circle plus the gate plus 400 ft, followed out "
                   "(--follow-egress) until it egresses, turning away from the column. None is lost. "
@@ -1386,11 +1611,17 @@ def scenarios() -> list[Scenario]:
             then=[Step(a, timeout=600) for a, _ in defended_runs[1:]],
             check=lambda out: heli_defense_problems(out, [w for _, w in defended_runs]),
             notes="A Mi-24 against defences (slices ST-H and H4, John's threat rule of 2026-10-12): "
-                  "heavy AAA on the column (it fires its AT-2 from outside every gun ring and hurts the "
-                  "tank), light AAA at the factory (pop-up, kill), a SAM that out-ranges the AT-2 and an "
-                  "SA-14 on the target (it holds off, then goes home), the SA-14 with SEAD a minute in "
-                  "(it resumes and fires), an ambush by a site it had not seen on its way out (it "
-                  "breaks, leaves the ring, holds off, resumes and fires again), and the stand-off layout of seed 1 (it holds "
+                  "heavy AAA on the moving column (the move-ahead ambush of 2026-10-29: it plans on where "
+                  "the tank will be, fires its AT-2 from outside every gun ring it knows, never comes "
+                  "within a known gun's reach and hurts the tank), light AAA at the factory (the pop-up given up for a stand-off once the guns are known, "
+                  "kill), a SAM that out-ranges the AT-2 and an "
+                  "SA-14 team on the target (hidden: its launch is an ambush, it holds off, a move-ahead shot "
+                  "is cut short by the seed's other hidden team's ambush, then it goes home), the SA-14 "
+                  "with SEAD a minute in "
+                  "(it resumes and fires), two ambushes on the factory by an SA-7 and an SA-14 team the "
+                  "game hides until it is near or launches (a launch with known=no, then it breaks, "
+                  "leaves the ring, holds off, resumes and kills the factory; the site is destroyed after "
+                  "its first launch), and the stand-off layout of seed 1 (it holds "
                   "off). Each break is the retail plus or minus 90 degrees to the threat's bearing (or "
                   "the masking alternatives), kept at speed, within 10 degrees of level and clear of "
                   "the ground; the helicopter is never lost.",
@@ -1419,6 +1650,19 @@ def scenarios() -> list[Scenario]:
                   "reach and fires its linked guns in bursts (skills 0, 2 and 3): each burst's walked-in "
                   "aim inside the skill circle, the target inside the guns' 13,000 ft and the bank "
                   "under 30 degrees once settled, the tank killed, the gunship not lost.",
+        ),
+        Scenario(
+            name="ai-strike-commit-aaa", lane="flight",
+            args=commit_runs[0][0], timeout=600,
+            then=[Step(a, timeout=300) for a, _ in commit_runs[1:]],
+            check=lambda out: commit_problems(out, [w for _, w in commit_runs]),
+            notes="The committed-to-release window (John, 2026-10-28): an A-4E's straight Mk 82 pass on "
+                  "the column under its medium AAA (surface seed 1). The window opens 5 s out, a gun "
+                  "reaches the striker about 1 s before the release, and the run holds: the bomb leaves "
+                  "in the window and the striker defends on the next tick (skills 2, 0 and 3). The "
+                  "control moves the column's nearest ZSU-23 14,000 ft out under the run line, so it "
+                  "fires about 6 s before the release: the run breaks into Defend with no window open "
+                  "and nothing released.",
         ),
         Scenario(
             name="ai-strike-defended", lane="flight",

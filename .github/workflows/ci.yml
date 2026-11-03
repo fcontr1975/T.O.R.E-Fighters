@@ -6,6 +6,12 @@ on:
   # pull requests do not start it: the pre-push hook covers each push locally
   # (John, 2026-10-23, after a backed-up GitHub queue held runs for hours).
   workflow_dispatch:
+    inputs:
+      skip_macos:
+        description: 'Skip the macOS jobs, when the Mac runner is in use'
+        type: boolean
+        required: false
+        default: false
   push:
     tags:
       - 'v*'
@@ -29,11 +35,7 @@ jobs:
         # builds on ubuntu-22.04, the release floor, so CI tests what ships.
         # 32-bit Windows was dropped on 2026-10-25 (John): every Windows player
         # is on 64-bit. An entry may still name a `target` to cross-build.
-        include:
-          - os: macos-14
-          - os: macos-15-intel
-          - os: ubuntu-22.04
-          - os: windows-2022
+        include: ${{ fromJSON(inputs.skip_macos && '[{"os":"ubuntu-22.04"},{"os":"windows-2022"}]' || '[{"os":"macos-14"},{"os":"macos-15-intel"},{"os":"ubuntu-22.04"},{"os":"windows-2022"}]') }}
     # TORE_SELF_HOSTED, a repository variable, lists the platforms that run on
     # the project's own machines instead of GitHub's (docs/CI-RUNNERS.md).
     runs-on: ${{ contains(vars.TORE_SELF_HOSTED, matrix.os) && fromJSON(format('["self-hosted","tore-{0}"]', matrix.os)) || matrix.os }}

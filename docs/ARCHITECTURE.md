@@ -43,7 +43,9 @@ packs from that cache directory. Cleanup is best effort and does not touch
 source media or extracted assets. [Retention contract](spec/import-cache.md).
 
 Static ground foundations live in `tore_world::grounding::pads`. World construction
-levels qualifying base footprints before placing objects. Simulation and scenery
+levels qualifying base footprints before placing objects. Bridge footprints
+and their shared support datum and bank earthworks come from `grounding::bridges`
+([behavior](spec/bridges.md)). Simulation and scenery
 share the resulting triangles, including the transition skirt. Vegetation
 workers retain this immutable terrain, and cached habitat and seam data
 include its triangles in their identity. See the
@@ -99,6 +101,14 @@ All sample, palette-remap and shadow paths use the corresponding addressing.
 [Source coverage and static variant composition](spec/terrain-detail.md).
 
 `terrain.rs` (in `tore-world`) builds `Terrain` from the selected retail MM and its resolved T2: the grid, the airport scene and the weather clock, with the height, surface and wind queries the simulation uses. It holds no art and reads no environment variable. `scenery.rs` builds `Scenery` from the same resources and the finished `Terrain`: the named or numbered texture references, the map's [retail weather palette family](formats/weather.md#theater-palette-families), terrain mesh, sky art, static airport geometry and per-camera weather. Neither has a GPU or window dependency. `sim_renderer.rs` uploads geometry and a texture array, owns depth targets and draws terrain plus a fullscreen sky pass; `terrain.wgsl` supplies the initial perspective, sampling and fog. `renderer.rs` composes this scene with the transparent CPU HUD, resizing depth and surface together. This separation allows aircraft/object/weather passes and a deterministic simulation to be added without coupling format readers to wgpu.
+
+The Quick Mission creator calls `mission_layout::availability` on a background
+worker to check its current imported layout. `World::build` and the older headless
+launch entry point share the surface placement refusal rules. Final vehicle
+placement and front-line checks happen after airport replacement and before
+shared grounding. The UI retains the checked seed through the map and lobby;
+[the behavior spec](spec/quick-mission-menu.md#keeping-the-enemy-on-the-map)
+defines which settings are offered and which limitations are shown.
 
 The initial implementation uses full-resolution fixed triangles and an authored sky/fog projection. It is not the native adaptive renderer. All geometry/colors come from local source data at runtime; no retail derivatives are embedded. See [theater findings](formats/theater.md) for recovered versus authored behavior. The Hornet adapter now advances at 120 fixed ticks/second; the developer free camera still uses elapsed wall time for inspection.
 
@@ -299,7 +309,9 @@ of zero reproduces world-coordinate vertices exactly. Target-window framing
 converts those relative mesh vertices back to world positions before fitting
 them against its world-space camera.
 
-Frame pacing lives in `frame_pacing.rs`, following the Graphics screen's [frame rate](spec/graphics-options.md#frame-rate) choice (V-sync by default). V-sync presents with `Fifo` and a maximum frame latency of one, and live views (flight, the terrain viewer, replays) ask for the next redraw as soon as a frame is presented, so the display paces them; with `Fifo` the window requests Wayland frame callbacks. The 60, 100 and 200 choices present with `Mailbox` (else `Immediate`) and `about_to_wait` sleeps (`WaitUntil`) until a timer's evenly spaced slot. A stopped single-player flight whose camera pose has settled waits for an event or its next notice to expire; an unfocused window draws about ten frames a second; a hidden one (`WindowEvent::Occluded`, or a zero-size window) draws nothing, and a hidden or minimised single-player flight pauses as on focus loss. A session's network turn (`net_tick`) also runs from `about_to_wait` whenever its next wake is due and no redraw is, so multiplayer keeps ticking and sending keepalives while drawing waits. Input scripts, performance measurements, captures and smoke tests draw uncapped and unthrottled unless `TORE_FRAME_LIMIT` is set; `TORE_FRAME_LIMIT=off` gives uncapped rendering for benchmarks. Idle menus draw only on input or news (see Menu pacing below). With the frame-rate counter shown every screen is a live view instead: `frame_pacing::counted` turns whatever a screen wants after its frame into "again as often as the frame rate allows" (the menus, the lobby, the replay viewer and a paused flight alike), the menu-pace and 20 Hz loading redraws step aside for the same timer (`App::loading_next_frame`, `loading_wait`), and `frame_pacing::too_soon` holds an event's redraw request for the timer's slot under a capped rate so the counter never reads above the cap. The check is live: `Renderer::counter_shown` reads the setting each frame, so it applies at once either way. Failed/zero-size presentation does not continually schedule simulation redraws. `performance.rs` provides opt-in bounded CPU wall-time sampling via environment variables, with warmup exclusion and view cycling.
+Renderer setup goes through two small modules. `graphics_api.rs` holds the player's [graphics API](spec/graphics-options.md#graphics-api) choice and gives each new `wgpu::Instance` its backends, so a choice on the import screen reaches the game renderer built after it. It also holds the per-process marker that lets a later launch notice one that did not finish GPU setup, and `graphics_prompt.rs` is the screen that then asks. `gpu_setup.rs` wraps every shader module and pipeline creation, plus the instance, surface, adapter and device steps, so the [log and crash report name the driver call in progress](spec/startup-diagnostics.md#gpu-setup-steps-and-the-watchdog). The root `clippy.toml` rejects direct calls outside tests.
+
+Frame pacing lives in `frame_pacing.rs`, following the Graphics screen's [frame rate](spec/graphics-options.md#frame-rate) choice (V-sync by default). V-sync presents with `Fifo` and a maximum frame latency of one, and live views (flight, the terrain viewer, replays) ask for the next redraw as soon as a frame is presented, so the display paces them; with `Fifo` the window requests Wayland frame callbacks. The 60, 100 and 200 choices present with `Mailbox` (else `Immediate`) and `about_to_wait` sleeps (`WaitUntil`) until a timer's evenly spaced slot. A stopped single-player flight whose camera pose has settled waits for an event or its next notice to expire; an unfocused window draws about ten frames a second; a hidden one (`WindowEvent::Occluded`, or a zero-size window) draws nothing, and a hidden or minimised single-player flight pauses as on focus loss. A session's network turn (`net_tick`) also runs from `about_to_wait` whenever its next wake is due and no redraw is, so multiplayer keeps ticking and sending keepalives while drawing waits. Input scripts, performance measurements, captures and smoke tests draw uncapped and unthrottled unless `TORE_FRAME_LIMIT` is set; `TORE_FRAME_LIMIT=off` gives uncapped rendering for benchmarks. Idle menus draw only on input or news (see Menu pacing below). With the frame-rate counter shown every screen is a live view instead: `frame_pacing::counted` turns whatever a screen wants after its frame into "again as often as the frame rate allows" (the menus, the lobby, the replay viewer and a paused flight alike), the menu-pace and 20 Hz loading redraws step aside for the same timer (`App::loading_next_frame`, `loading_wait`), and `frame_pacing::too_soon` holds an event's redraw request for the timer's slot under a capped rate so the counter never reads above the cap. The check is live: `Renderer::counter_shown` reads the setting each frame, so it applies at once either way. An unfocused window's redraw requests wait for its frame already due in the same way (`too_soon`), counter or not, so the pointer passing over a background window or a menu's news cannot add frames to its ten a second. A zero-size window draws nothing. A frame whose surface gives no image (`Lost`, `Outdated`, `Timeout` or `Other` from `get_current_texture`) never asks for its own redraw: the surface is configured again where that helps, and `App::pace` schedules the next try after `frame_pacing::surface_retry` (16 ms, doubling to 256 ms while it keeps failing, and never while hidden), so a surface stuck failing, as one can be while a Windows window minimises or changes mode, costs a few frames a second instead of a loop at full speed; the first-run window (`CanvasPresenter`) does the same. While the window is unfocused or hidden, controllers are polled at the menus' cadence, since the bindings ignore them there. `performance.rs` provides opt-in bounded CPU wall-time sampling via environment variables, with warmup exclusion and view cycling.
 
 The GPU cockpit texture survives view and size changes; projection uniforms track the current aspect. Aircraft GPU resources are prepared when the renderer/theater loads. Live camera panels submit bounded asynchronous readbacks (at most one pending per camera page), consume completed rasters on later frames, and retain their last image while pending. The simulation renderer caches world-pass attachments (depth, multisampled colour and the render-scale image) for up to five output sizes, so the display, mirrors and 138×114 panels do not reallocate at every refresh. The rear mirrors are one 768×384 rear camera, 66 degrees vertical (10% wider than a 1x view), drawn on every other visible flight frame (`mirrors::Cadence`; always for a capture) and cropped by the cockpit shader into each mirror; on a frame that skips it, the flown aircraft's vertex buffer is still left as the mirror pass leaves it, so the main view is the same either way. Work that does not depend on the camera is done once per frame and shared by the views: the effect sprites' fire fitting and their glows (until the next `effects` or `emitters` call), the airfield flasher pattern (per weather tick), and the burning city's frame, which the mirror takes from the main view. The mirror keeps its own encoder and submission: every view writes the same uniform, vertex and cull buffers with `Queue::write_buffer`, which a submission applies before any of its commands, so two views in one submission would both see the second view's data. World pipelines live together in `sim_renderer::Pipelines` and are rebuilt when the anti-aliasing sample count changes. After the world pass, an optional resample pass scales the render-scale image to the output, and the spotting-aid pass draws single-sampled outlines using the world depth; `graphics.rs` holds the options and the [graphics options](spec/graphics-options.md) page specifies them. Offline captures retain an explicit blocking readback so smoke evidence contains the requested image. Direct GPU panel composition, full GPU UI rendering and native terrain LOD remain future optimization work.
 
@@ -403,6 +415,26 @@ change; they differ by running without audio, so the cause of a rate below
 than 4 ms on average.
 
 #### The firing estimate and its exact shortcuts
+
+The following describes the preserved Spec path. Energy-mode flight uses a
+world-owned bounded prediction service. Its shared body carries explicit class
+control and post-burn defeat policy; the checkpointed flight carries the
+consecutive low-Mach count and permanent inert state. A single projectile
+capability check suppresses inert threat snapshots and incoming/target cues
+while keeping the body visible, described in the
+[energy specification](spec/missile-energy.md#estimates-and-acceptance).
+Player point jobs receive reserved admission and a quarter of the unchanged
+work budget first. Turn-projected advice is exposed through the player launcher
+view; AI launch authorization retains strict point compatibility. Both measured
+turn rates and pending/publication rates are checkpoint state.
+Its checkpointed observation snapshots and cache tolerances are deliberately
+separate from these exact historical shortcuts. All powered-guided release
+constructors pass the selected rules to the same force kernel; bombs and
+rocket pods keep their existing paths. Public carried masses are resolved
+without rewriting decoded weapon fields, so damage and radar-signature
+proxies remain on the reviewed data. New mission recordings store actual motor
+phase intervals in extensible launch-event fields; old recordings retain
+imported timers. The renderer reads the existing powered flag.
 
 While a missile is selected and a target is designated, each ownship works out
 the weapon's maximum range and favourable firing band every 60 ticks
@@ -966,7 +998,11 @@ in view: after the world pass a one-workgroup compute pass
 eases the fraction per camera slot into a small storage buffer, and the
 composition reads it the same frame (no readback); points off the view take the
 share of five terrain rays (`lens_flare::terrain_clear`) that the whiteout also
-uses, and the world pass keeps its depth when a flare is drawn. Water's solar glint tests geometric light visibility
+uses, and the world pass keeps its depth when a flare is drawn. Runtime
+anti-aliasing changes rebuild the measurement pipeline against the new world
+depth layout, retaining its per-camera visibility buffer, timing and probe
+bindings. The [runtime graphics audit](baselines/runtime-graphics-2026-10-25.md)
+lists the other dependent resources. Water's solar glint tests geometric light visibility
 before adding reflected sunlight; ordinary water shadow tint is a separate
 operation. See [glare](spec/sun-glow.md#continuous-lens-flare-composition) and
 [water reflection](spec/ocean.md#separate-sun-and-environment-reflection-trial).
@@ -1955,24 +1991,18 @@ the player included. Missiles were split: one aimed at the player could hit only
 the player, and any other could hit any aircraft row, its own launcher included,
 but never the player.
 
-Built in B1's fourth step (rule from John, 2026-09-28, single player included): **a
-gun round can hit any aircraft except the one that fired it, and a missile or
-bomb can hit any aircraft once its fuze has armed**, whether it is an aircraft
-that gets in the way, a new target it shifts to or its own launcher. One search
-covers every aircraft row and every ownship, and the nearest contact along the
-round's path wins. This ended the missile split: an enemy missile aimed at the
-player can hit a wingman in its path, a missile aimed at someone else can hit the
-player, and a decoyed missile no longer keeps aiming its hit at the player alone.
-Damage follows the pilot: a hit on an ownship goes through the player pipeline, a
-hit on an AI row through the AI pipeline.
+The shared hit search covers every aircraft row and every ownship, choosing
+the nearest contact along the round's path. Guns and missiles exclude their
+own firing aircraft. Missiles additionally exclude it from seeker observations
+and collateral damage, per John's 2026-10-26 decision in the
+[weapon contract](spec/missiles.md#launch-grace). Bombs and unguided stores
+retain their geometry-based launch grace and can damage their launcher after
+it ends. Arming time and friendly-fire policy remain separate gates.
 
-*Agent decisions:* a round that starts inside its own launcher's hit volume
-(every rocket and bomb with no arming delay does) is not a hit, so it cannot
-explode on its pylon; only a round that comes back into the volume from outside
-counts. This matches John's words at the design review: "missiles should be
-able to hit anything once it leaves the shooting aircraft". Easy aiming widens the volume of other aircraft, never the shooter's own.
-Missile and bomb records in the synthetic test fixtures keep an arming delay of
-zero, so their tests rely on that rule.
+An enemy missile aimed at the player can hit a wingman in its path, and a
+missile aimed elsewhere can hit the player. Damage follows the pilot: an
+ownship uses the player pipeline and an AI row uses the AI pipeline. Easy
+aiming widens the volume of other aircraft, never the shooter's own.
 
 Friendly fire is a mission setting, `State::friendly_fire`. `On` is single
 player's behaviour and the default. `Off`, a lobby choice, means no round damages
@@ -3814,8 +3844,9 @@ naps sleep with no spin tail. A flying host with nobody connected wakes for its
 ticks alone. A host that is not flying honours `next_wake` (10 ms) and never
 spins, and with no connection at all it sleeps 20 ms (`EMPTY_NAP`), so a lobby
 join, keepalive, console command or status line is served at most that much
-later. Tick pacing and catch-up are the host's and are unchanged; the Windows
-margin (2 ms) is unchanged and should be re-measured there. Stage E runs the same host, with the same loop, on a
+later. Tick pacing and catch-up are the host's and are unchanged. The Windows
+margin, 2 ms until 0.2.2, was re-measured on Windows 11 and is now 0.75 ms
+([sleep and wait accuracy](#sleep-and-wait-accuracy-on-each-system-ef-x)). Stage E runs the same host, with the same loop, on a
 thread inside the game ([the host inside the game](#the-host-inside-the-game-stage-e)).
 
 **The calls** (agreed with the server slice, D7b). `Host::new(spec,
@@ -4649,8 +4680,10 @@ shared 3), UTF-8 key length `u32`, key bytes, and its existing manifest digest
 `u64`. All integers are little endian. The content probes, rather than a new
 file list, determine the items and fingerprints.
 
-`SIMULATION_VERSION` is 2 for protocol 73: cumulative mission accounting, its
-checkpoint state and revival member retention. Raise it and the network protocol whenever
+`SIMULATION_VERSION` is 11 for protocol 82: hidden shoulder-fired SAM teams and the helicopter move-ahead ambush, on top of version 10's rules. Version 10 was for protocol 81: helicopter threat rings from real launch reach, flight-time advance, unknown-shooter ambushes and stand-off releases outside known rings, on top of version 9's rules. Version 9 was for protocol 80: AI helicopters keep out of known threat rings they planned through, on top of version 8's rules. Version 8 was for protocol 79: the AI strike's early retarget and 5 second release commitment, on top of version 7's rules. Version 7 was for protocol 78: the Quick Mission situation (advantage and disadvantage starts) and the fixed distance table, on top of version 6's rules. Version 6 was for protocol 77: the chaff multiplier doubled to 2.60, on top of version 5's rules. Version 5 was for protocol 76: AI countermeasure pair spacing, the chaff buff, range-cue regions in the shared prediction service and new motor fits for three stores, on top of version 4's rules. Version 4 was for protocol 75: the energy model for guided ordnance (thrust, mass, drag, lift-limited turning, class control budgets, post-burn defeat, physical decoys and the shared prediction service), even paired store loading, the reworked AI missile defense, bridge grounding and Quick Mission placement and seed retry, on top of version 3's rules. Version 3 was for protocol 74: tanks against aircraft (a 20 degree
+gun ceiling, a lay and wider aim) and the host migration resume fixes, on top of
+version 2's cumulative mission accounting, its checkpoint state and revival
+member retention. Raise it and the network protocol whenever
 simulation, rules, checkpoint or replay interpretation changes can make
 peers disagree, including compile-time tuning. Raise the protocol for wire
 changes too. Documentation, UI-only changes, commits and release tags do not
@@ -5447,7 +5480,7 @@ since EF7 and EF8 from its menus (New on Direct Connection opens a lobby).
   binds the socket itself, so a port in use is refused at once, then the
   thread builds the `Host` and runs the dedicated server's loop: receive,
   update, transmit, then wait until the next wake or 4 ms, whichever is
-  sooner, sleeping and then spinning the last 0.4 ms (2 ms on Windows). The
+  sooner, sleeping and then spinning the last 0.4 ms (0.75 ms on Windows). The
   game's client starts joining at once; its first handshake packets wait in
   the link until the host is built (a client retries for 10 seconds).
 - **Commands and reports.** In: `Stop`. *EF4:* the lobby's verbs are not
@@ -5791,8 +5824,20 @@ three runs each, and a C probe on macOS; a range is the runs' spread:
 | macos-14 (Apple silicon) | 4.4 to 8.4 / 11.7 ms | 48 to 90 / 154 ms | 6.2 to 7.5 / 36 ms |
 | macos-15-intel | 1.9 to 6.5 / 10.1 ms | 27 to 66 / 142 ms | 1.2 to 2.1 / 20 ms |
 
-A Windows host has no such problem: the 2 ms spin margin is more than its
-sleeps need. The macOS runners' processes run at utility QoS (0x11) and
+A Windows host has no such problem: the 2 ms spin margin was more than its
+sleeps need. *Re-measured (2026-10-24, Windows 11 24H2 CI machine, a
+12-thread virtual machine):* the standard library's sleep uses a
+high-resolution waitable timer there, so a 1 or 2 ms sleep overshoots by
+0.53 to 0.55 ms typically and 0.59 to 0.77 ms at the 99th percentile (4 and
+7.5 ms sleeps: 0.09 to 0.12 ms typically). In a host's loop whose tick does
+1 to 2.5 ms of work, 10 seconds a run, the 2 ms margin spun 1.65 to 1.72 ms
+a tick, 20 to 21 percent of a core, while 0.75 ms spun 0.23 to 0.62 ms (2.7
+to 7.4 percent) and 0.4 ms 0.12 to 0.19 ms; lateness did not change with the
+margin (99th percentile 0.02 to 0.3 ms at every margin, the worst 1 to 2 ms
+from preemption). *Agent decision, fitted:* the Windows margin is 0.75 ms,
+covering the measured sleep overshoot; Linux and macOS keep 0.4 ms. The
+same machine's `thread::park_timeout` is not high resolution: 4 ms lasts
+15.9 ms and 16 ms lasts 31.7 ms. The macOS runners' processes run at utility QoS (0x11) and
 the kernel's timer coalescing lets their timers slip by up to 75 ms
 (`kern.timer_coalesce_tier3_ns_max`). In a C probe on the same runners,
 user-interactive QoS and `taskpolicy -l 0 -t 0` changed nothing, and a Mach
@@ -8781,7 +8826,15 @@ not, *password* lists with the lock). The hosting thread takes
    No answer to anything for 10 seconds means the master is silent: the game
    reads "The Internet Lobby does not answer, so the game is not listed.
    Players can still join by address." and tries again after 2, 4, 8 and up
-   to 60 seconds.
+   to 15 seconds, each time at the master's next address, round and back to
+   the first. A send that fails (no route, no such address, a family the
+   socket lacks) moves to the next address at once; addresses the socket
+   cannot send to, or the system has no route to, are tried last; the name
+   is looked up again every minute while the master is silent, and an
+   answer from any address makes it the one in use, so the game is listed
+   again within 15 seconds of the master answering
+   ([finding the master again](formats/master-protocol.md#finding-the-master-again),
+   0.2.2).
 5. Stopping, or unlisting, sends Unregister three times.
 
 The rendezvous reports to the hosting thread, which passes it to the game as
@@ -9612,7 +9665,12 @@ help:
   a loop that is late. The host loop (`Host::fly`, so a hosted game and the
   dedicated server) reports after each batch of ticks, late meaning more than
   one tick owed; the flight frame loop (`main.rs`) reports once per frame,
-  late meaning a frame over 100 ms.
+  late meaning more than 100 ms since the last frame that the frame pacer
+  did not ask to wait (`Pacer::busy`): an unfocused window's tenth of a
+  second between frames, a capped rate's slot and a still picture's wait for
+  events are not lateness (before, an unfocused multiplayer flight counted
+  each of its ten frames a second as late and kept the four workers busy in
+  the background: [the measurement](baselines/away-cpu.md)).
 - **Back to serial** a second after the last report of pressure
   (`KEEP_UP`), so a loop hovering at its budget does not flap every frame.
   The pool stays parked, not spinning: rayon's idle workers sleep.
@@ -9798,6 +9856,11 @@ ticks. Aircraft are staggered by their place in the mission,
 `(tick + index) % divisor == 0` (`AiMission::observation_due`), so every tick
 carries the same share of the work. The controller, the flight model, the
 missile threat service and the incoming fire service stay at 120 Hz.
+`AiWings::step` also passes combat's explicit inert-store notices to
+`AiMission::end_missile_threats` before that tick's defense assessment. This
+keeps confirmed threat endings separate from observation gaps; see the
+[defense policy](spec/ai.md#missile-defense-flown-by-ai) and
+[checkpoint notice state](formats/checkpoint.md).
 
 | Between two observations the aircraft | |
 | --- | --- |
@@ -9925,7 +9988,11 @@ compared before and after):
   and the strings in them are reused. The four per-actor maps are one id-sorted
   walk of the roster; the AI aircraft's drawn stores are kept per actor
   (`RenderHistory::ai_stores`, forgotten at a restart) while their loads and
-  loadout stay as they were; `places` is a sorted list; a piece of debris finds
+  loadout stay as they were. The cache compares the drawing inputs by value,
+  including weapon shapes, rack geometry, hardpoint mapping and tank sizes. A
+  handoff can replace a configuration at the same address with the same store
+  counts, so neither its address nor those counts establish an unchanged loadout.
+  `places` is a sorted list; a piece of debris finds
   its owner's row by id. Debug builds make every history snapshot a second time
   from nothing and compare. `snapshot()` keeps its signature for the host's
   per-seat pictures.
@@ -10978,7 +11045,16 @@ never paced.
 **Status.** At most twice a second a standby reports the newest tick it
 holds, whether it is ready, warm or cold, its mean step cost, the last check's
 result and whether it needs a checkpoint. The host's log and status line show
-each standby.
+each standby. *Fixed 2026-10-24 (agent decision):* the host goes by the
+newest status. It had kept an ask for a checkpoint from any status, so the
+statuses a standby sent while a resync checkpoint was still on its way asked
+for a second one, sent 2 seconds after the first had gone out. A warm copy
+restored from the first and stepped on refused the second ("a checkpoint at
+tick T the journal does not continue"), which asked for another, and so on
+every 10 seconds for the rest of the flight (the battery's planned handover,
+`net-migrate-handover`). The standby now also drops a checkpoint its copy in
+good standing has no use for before it judges the journal, so a checkpoint it
+does not need is never refused.
 
 **On the standby's side** (`tore_session::standby`): a state machine that takes
 the records in order, builds the fresh world (`World::new` from the flight's
@@ -11051,6 +11127,14 @@ does.
 6. A player still absent 5 seconds after the takeover (the drop timeout) is
    dropped: its plane goes to the AI, reserved for it
    ([rejoin](#rejoin-tokens-and-reservations)).
+   *Changed 2026-10-24 (agent decision):* the drop timeout counts from the
+   new host's first update after the takeover, when it can first answer
+   anyone, not from before its restore and replay. A standby that took
+   seconds to replay (a cold one, or a warm one far behind on a busy machine;
+   `net-window-migrate-smoke` saw 4.8 seconds in a debug build) had spent the
+   5 seconds before it, and every player, its own included, was dropped at
+   its first update. The resume window still counts from the takeover: once
+   it is over the host goes on, and the players resume with it live.
 
 **The present** is where the old host's clock would be now. The standby's own
 client already estimates the host's newest tick from the snapshots' arrivals
@@ -11083,7 +11167,15 @@ were.
   under load with "corrected 1" where the old host had repeated the pilots'
   inputs (up to 57 ticks behind, frames more than 120 ticks ahead dropped).
 - **Backlog** sends its inputs from T to its newest tick and the commands not
-  yet applied, numbered afresh for the new flight.
+  yet applied, numbered afresh for the new flight. *Fixed 2026-10-24 (agent
+  decision):* a player whose Resume the new host answered in the resume window
+  but whose Backlog came only after the host went live keeps its kept inputs
+  until the Backlog comes; its Inputs meanwhile are kept and fed tick by tick,
+  as for a player resumed after the host went live. Going live had dropped
+  them, the late Backlog was refused ("Nothing is being resumed for you
+  here."), the player never counted as done resuming, and no snapshot went to
+  it again. The battery's planned handover (`net-migrate-handover`) met it
+  with the new host's own game, whose Backlog came late on a busy machine.
 - A new flight starts the wire state afresh (baselines, names, events) but
   keeps the prediction, the clocks and the other aircraft's histories: the
   others hold still through the gap and then jump to the present, as after a
@@ -11846,3 +11938,5 @@ defines durability, error handling and lifecycle behavior. Named feedback
 events travel on the reliable session channel, are stamped with host identity and kept by the client capture's
 observer during conversion. See [the behavior spec](spec/replay-feedback.md)
 and [event layout](formats/replay-feedback.md).
+
+Energy range searches keep each contiguous sampled hit region outward from the decoded minimum; the cue advises the region for the present range (containing it, else the nearest below, else the first), with both edges carried through combat estimates and readouts. Exact-point prediction remains the AI launch gate. Searches stay in the fixed-budget world queue; display readers never perform synchronous flyouts. See the [prediction contract](spec/missile-energy.md#estimates-and-acceptance).

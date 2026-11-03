@@ -115,6 +115,8 @@ pub struct StationSpec {
     pub pacing: ProjectilePacing,
     /// Maximum employment range, feet. `None` leaves the bound unrestricted.
     pub maximum_range_ft: Option<f64>,
+    /// Energy-model permission for this target; Some(None) is pending or unreachable.
+    pub energy_target: Option<Option<u32>>,
     pub minimum_range_ft: f64,
     /// All-aspect flag and nominal IR seeker reach, absent for other stores.
     pub infrared_envelope: Option<(bool, f64)>,
@@ -400,7 +402,8 @@ pub struct AiActor {
     route_random: super::DecisionRandom,
     pending_threats: Vec<ThreatReport>,
     pending_events: Vec<FrameEvent>,
-    device_schedule: Vec<(u64, SeekerClass, u8)>,
+    /// Due tick, class, count, and whether loss of the observed threat cancels it.
+    device_schedule: Vec<(u64, SeekerClass, u8, bool)>,
     activity: Activity,
     last_input: PilotInput,
     alive: bool,
@@ -2005,6 +2008,17 @@ impl AiMission {
         self.ground_ceiling = ceiling;
     }
 
+    /// Apply combat's explicit inert-store notices before stepping the mission.
+    /// Only existing checkpointed observation and defense state is changed.
+    pub fn end_missile_threats(&mut self, ids: &[u32]) {
+        for actor in &mut self.actors {
+            for &id in ids {
+                actor.missile_threats.end_threat(id);
+                actor.defense_state.end_threat(id);
+            }
+        }
+    }
+
     pub fn set_missiles(&mut self, missiles: Vec<MissileSnapshot>) {
         self.missiles = missiles;
     }
@@ -3221,6 +3235,7 @@ impl AiMission {
         // Write-only records start afresh on every mission step.
         actor.trace = ActorTrace::begin(tick);
         actor.adapter.set_gun_aim(None);
+        actor.adapter.set_defense(None);
         actor
             .adapter
             .set_strike_handling(super::strike::Handling::PLAIN);
@@ -3956,9 +3971,29 @@ impl AiMission {
         if let Some(devices) = batch.devices {
             actor
                 .device_schedule
-                .push((tick, devices.class, devices.count));
+                .push((tick, devices.class, devices.count, false));
         }
         if let Some(burst) = actor.last_defense.and_then(|d| d.burst) {
+            let available = |class| {
+                let stock: u32 = actor
+                    .dispensers
+                    .iter()
+                    .filter(|d| d.class == class)
+                    .map(|d| d.count)
+                    .sum();
+                let queued: u32 = actor
+                    .device_schedule
+                    .iter()
+                    .filter(|(_, c, _, _)| *c == class)
+                    .map(|(_, _, count, _)| u32::from(*count))
+                    .sum();
+                stock.saturating_sub(queued)
+            };
+            let burst = burst.with_inventory(
+                available(SeekerClass::Radar),
+                available(SeekerClass::Infrared),
+                actor.last_defense.is_some_and(|d| d.reserve_allowed),
+            );
             let mut classes = Vec::new();
             for index in 0..burst.chaff.max(burst.flares) {
                 if index < burst.chaff {
@@ -3982,13 +4017,20 @@ impl AiMission {
                     tick + index as u64 * super::QUARTER_SECOND_TICKS,
                     class,
                     1,
+                    true,
                 ));
             }
         }
         let schedule = std::mem::take(&mut actor.device_schedule);
-        for (due, class, remaining) in schedule {
+        let current_threat = actor.last_defense.is_some_and(|d| !d.debug.passed);
+        for (due, class, remaining, defensive) in schedule {
+            if defensive && !current_threat {
+                continue;
+            }
             if tick < due {
-                actor.device_schedule.push((due, class, remaining));
+                actor
+                    .device_schedule
+                    .push((due, class, remaining, defensive));
             } else if let Some(event) = actor.release_devices(class, 1) {
                 output.devices.push(event);
                 if remaining > 1 {
@@ -3996,6 +4038,7 @@ impl AiMission {
                         due + super::QUARTER_SECOND_TICKS,
                         class,
                         remaining - 1,
+                        defensive,
                     ));
                 }
             }
@@ -4004,6 +4047,16 @@ impl AiMission {
         // 6. Motion through the adapter and this actor's own flight model.
         actor.adapter.set_gun_aim(batch.gun_aim);
         actor.adapter.set_strike_handling(handling);
+        let defensive =
+            actor.controller.defending() && !actor.fire_defending && !actor.is_rotorcraft();
+        let reduce_heat = !actor.fire_defending
+            && actor
+                .last_defense
+                .and_then(|d| d.motion)
+                .is_some_and(|m| m.reduce_heat);
+        actor
+            .adapter
+            .set_defense(defensive.then_some((actor.controller.experience().level, reduce_heat)));
         let motion = batch
             .motion
             .map(|intent| actor.avoid_traffic(tick, intent, world));
@@ -4752,7 +4805,8 @@ impl AiActor {
             usable_turn_rate_deg_s: coordinated_rate * 0.5,
             usable_pitch_rate_deg_s: (32.174 * (g - 1.0) / speed).to_degrees() * 0.5,
             roll_in_time_s: (bank + own.bank_deg.abs()) / own.roll_limit_deg_per_s.max(1.0) + 0.7,
-            dive_speed_safe: own.speed.0 + 32.174 * 20_f64.to_radians().sin() * 5.0
+            dive_speed_safe: own.speed.0
+                + 32.174 * (-defense::DIVE_PITCH_DEG).to_radians().sin() * 5.0
                 <= own.limits.maximum.0,
         };
         self.last_defense = defense::decide(
@@ -4785,6 +4839,11 @@ impl AiActor {
         let mut every_round = self.incoming_fire.clone();
         #[cfg(test)]
         every_round.observe(tick, self.id(), defense_own, rounds.all(), visible, clear);
+        let gunfire_own = defense::DefenseOwn {
+            dive_speed_safe: own.speed.0 + 32.174 * 20_f64.to_radians().sin() * 5.0
+                <= own.limits.maximum.0,
+            ..defense_own
+        };
         self.incoming_fire.observe_near(
             tick,
             self.id(),
@@ -4802,7 +4861,7 @@ impl AiActor {
         );
         let fire_motion = self
             .incoming_fire
-            .motion(tick, self.id(), defense_own, |p| ground(p[0], p[2]));
+            .motion(tick, self.id(), gunfire_own, |p| ground(p[0], p[2]));
         let missile_motion = self.last_defense.and_then(|d| d.motion);
         let fire_selected = fire_motion.is_some()
             && (missile_motion.is_none()
@@ -4848,6 +4907,7 @@ impl AiActor {
         } else if rotorcraft && self.last_defense.is_some() {
             Some(missile_motion.unwrap_or(defense::MotionSuggestion {
                 maneuver: defense::Maneuver::Jink,
+                reduce_heat: false,
                 heading_deg: own.heading_deg,
                 flight_path_pitch_deg: 0.,
             }))
@@ -4903,6 +4963,12 @@ impl AiActor {
             self.trace.rotor_break = Some((answer, threat));
             (answer.heading_deg, answer.flight_path_pitch_deg)
         });
+        // A striker inside its committed-to-release window flies its run on
+        // and releases; the defence waits until it has (T.O.R.E, John,
+        // 2026-10-28, docs/spec/ai-strike.md). Countermeasures and the
+        // defence's own state go on.
+        let held = self.strike.as_deref().is_some_and(|s| s.holds_run(tick));
+        let motion = motion.filter(|_| !held);
         self.controller
             .set_defense_motion(motion.map(|(heading_deg, pitch_deg)| {
                 super::controller::DefenseMotion {
@@ -4910,6 +4976,8 @@ impl AiActor {
                     heading_deg,
                     pitch_deg,
                     rotorcraft,
+                    extend: !fire_selected
+                        && missile_motion.is_some_and(|m| m.maneuver == defense::Maneuver::Drag),
                 }
             }));
     }
@@ -5162,7 +5230,7 @@ impl AiActor {
             self.identity.human_controlled,
         );
         (
-            positive * self.control_health(),
+            health_scaled_positive_g(positive, self.control_health()),
             negative * self.control_health(),
         )
     }
@@ -5304,6 +5372,7 @@ impl AiActor {
                         .then_some(pointing),
                     minimum_range_ft: s.minimum_range_ft,
                     maximum_range_ft: s.maximum_range_ft,
+                    energy_target: s.energy_target,
                     infrared_envelope: s.infrared_envelope,
                     requires_radar: s.requires_radar,
                     requires_sensor: s.requires_sensor,
@@ -5896,6 +5965,7 @@ pub fn simple_stations(
             employment_zone: None,
             mount: [0.0; 3],
             maximum_range_ft: Some(40000.0),
+            energy_target: None,
         });
     }
     if gun_rounds > 0 {
@@ -5927,6 +5997,7 @@ pub fn simple_stations(
             employment_zone: None,
             mount: [0.0; 3],
             maximum_range_ft: Some(6000.0),
+            energy_target: None,
         });
     }
     stations
@@ -5950,6 +6021,20 @@ pub fn simple_dispensers(each: u32) -> Vec<DispenserStore> {
 pub fn is_ported(aircraft: AircraftId) -> bool {
     AircraftId::ALL.contains(&aircraft.source())
 }
+
+/// The health-scaled positive G request. The caution factor never takes the
+/// request below [`HEALTH_SCALED_G_FLOOR`], or the healthy limit where that is
+/// lower: a damaged aircraft that the flight model still lets pull 1 G must be
+/// able to hold its flight path. Without the floor a hit but fault-free
+/// aircraft flying a heavy final was held below 1 G and flew into the ground
+/// short of the runway (review of branch ai-defense, 2026-10-25).
+pub(crate) fn health_scaled_positive_g(positive: f64, health: f64) -> f64 {
+    (positive * health).max(positive.min(HEALTH_SCALED_G_FLOOR))
+}
+
+/// Fitted (agent decision, 2026-10-25): the lowest positive G the health
+/// caution factor asks for.
+pub const HEALTH_SCALED_G_FLOOR: f64 = 1.25;
 
 #[cfg(test)]
 mod tests {
@@ -6648,7 +6733,7 @@ mod tests {
             }
         }
         let actor = mission.actor(1).unwrap();
-        assert_eq!(actor.activity(), Activity::Defending);
+        assert!(actor.defense_decision().unwrap().motion.is_none());
         assert!(
             actor
                 .missile_threats()
@@ -6714,7 +6799,35 @@ mod tests {
     }
 
     #[test]
-    fn supported_warning_defends_immediately_and_debits_two_chaff_on_schedule() {
+    fn an_uncertain_pass_keeps_its_queued_pair_and_compatibility_releases() {
+        use crate::combat::missiles::Guidance;
+        let mut mission = AiMission::new();
+        mission.push(perception_actor(Experience::Ace));
+        let mut missile = incoming_snapshot(Guidance::Supported, [0.0, 20000.0, -1000.0]);
+        mission.set_missiles(vec![missile]);
+        let first = mission.step(&[], &flat, TimeOfDay(0)).unwrap();
+        assert_eq!(first.devices.len(), 1);
+        assert_eq!(first.devices[0].class, SeekerClass::Radar);
+        assert!(!mission.actor(1).unwrap().device_schedule.is_empty());
+        missile.velocity = [0.0, 0.0, -2000.0];
+        mission.set_missiles(vec![missile]);
+        mission
+            .actor_mut(1)
+            .unwrap()
+            .device_schedule
+            .push((30, SeekerClass::Infrared, 1, false));
+        let mut later = Vec::new();
+        for tick in 1..=31 {
+            later.extend(mission.step(&[], &flat, TimeOfDay(tick)).unwrap().devices);
+        }
+        assert_eq!(later.len(), 2);
+        assert!(later.iter().any(|d| d.class == SeekerClass::Radar));
+        assert!(later.iter().any(|d| d.class == SeekerClass::Infrared));
+        assert!(mission.actor(1).unwrap().device_schedule.is_empty());
+    }
+
+    #[test]
+    fn novice_reaction_delays_defense_then_debits_two_chaff_on_schedule() {
         use crate::combat::missiles::Guidance;
         let mut mission = AiMission::new();
         let mut actor = perception_actor(Experience::Novice);
@@ -6733,12 +6846,12 @@ mod tests {
             [0., 20000., -1000.],
         )]);
         let mut releases = Vec::new();
-        for tick in 0..90 {
+        for tick in 0..270 {
             let output = mission.step(&[], &flat, TimeOfDay(tick)).unwrap();
             assert!(output.launches.is_empty());
             if tick == 0 {
                 let actor = mission.actor(1).unwrap();
-                assert_eq!(actor.activity(), Activity::Defending);
+                assert!(actor.defense_decision().unwrap().motion.is_none());
                 assert!(actor.missile_threats().any(|r| r.targeting_receiver));
             }
             for device in output.devices {
@@ -6747,7 +6860,7 @@ mod tests {
         }
         assert_eq!(
             releases,
-            [(0, SeekerClass::Radar, 1), (30, SeekerClass::Radar, 1)]
+            [(180, SeekerClass::Radar, 1), (210, SeekerClass::Radar, 1)]
         );
         assert_eq!(mission.actor(1).unwrap().dispensers()[1].count, initial - 2);
     }
@@ -6773,7 +6886,7 @@ mod tests {
     fn pitbull_acquisition_and_receiver_failure_gate_the_same_ai_service() {
         use crate::combat::missiles::Guidance;
         let mut mission = AiMission::new();
-        mission.push(perception_actor(Experience::Novice));
+        mission.push(perception_actor(Experience::Ace));
         let mut missile = incoming_snapshot(Guidance::Active, [0., 20000., -1000.]);
         missile.radar_active = true;
         mission.set_missiles(vec![missile]);
@@ -6784,7 +6897,7 @@ mod tests {
         mission.step(&[], &flat, TimeOfDay(1)).unwrap();
         assert_eq!(mission.actor(1).unwrap().activity(), Activity::Defending);
         let mut failed = AiMission::new();
-        let mut actor = perception_actor(Experience::Novice);
+        let mut actor = perception_actor(Experience::Ace);
         actor.flight_mut().systems.counts[32] = 2;
         failed.push(actor);
         failed.set_missiles(vec![missile]);
@@ -6793,10 +6906,10 @@ mod tests {
     }
 
     #[test]
-    fn a_visually_observed_ir_threat_requests_a_mixed_burst_without_hidden_classification() {
+    fn a_visually_observed_ir_threat_requests_only_flares_without_hidden_classification() {
         use crate::combat::missiles::Guidance;
         let mut mission = AiMission::new();
-        mission.push(perception_actor(Experience::Novice));
+        mission.push(perception_actor(Experience::Ace));
         let mut missile = incoming_snapshot(Guidance::Infrared, [0., 20000., 5000.]);
         missile.velocity = [0., 0., -3000.];
         mission.set_missiles(vec![missile]);
@@ -6809,14 +6922,14 @@ mod tests {
         assert_eq!(actor.activity(), Activity::Defending);
         assert_eq!(
             actor.defense_decision().unwrap().burst,
-            Some(defense::BurstRequest::MIXED)
+            Some(defense::BurstRequest::INFRARED)
         );
         assert!(actor.missile_threats().all(|r| r.guidance_class.is_none()));
         assert_eq!(output.devices.len(), 1);
     }
 
     #[test]
-    fn a_distant_novice_maneuvers_without_devices_while_an_ace_preserves_its_flight() {
+    fn a_distant_ace_drags_without_devices_while_a_novice_reacts_late() {
         use crate::combat::missiles::Guidance;
         for skill in [Experience::Novice, Experience::Ace] {
             let mut mission = AiMission::new();
@@ -6830,7 +6943,7 @@ mod tests {
             let output = mission.step(&[], &flat, TimeOfDay(0)).unwrap();
             let actor = mission.actor(1).unwrap();
             let decision = actor.defense_decision().unwrap();
-            assert_eq!(decision.motion.is_some(), skill == Experience::Novice);
+            assert_eq!(decision.motion.is_some(), skill == Experience::Ace);
             assert!(decision.burst.is_none());
             assert!(output.devices.is_empty());
             assert!(decision.debug.estimated_threat_time_s.unwrap() > 30.);
@@ -7852,7 +7965,9 @@ mod tests {
         let mut mission = AiMission::new();
         let mut actor = AiActor::new(setup(1, 1, 0, [0.0, 20000.0, 0.0], 0.0)).unwrap();
         actor.dispensers[0].count = 2;
-        actor.device_schedule.push((0, SeekerClass::Infrared, 3));
+        actor
+            .device_schedule
+            .push((0, SeekerClass::Infrared, 3, false));
         mission.push(actor);
         let mut releases = Vec::new();
         for tick in 0..100 {
@@ -7944,6 +8059,23 @@ mod tests {
         assert_eq!(mission.actor(1).unwrap().controller.target(), None);
         assert!(mission.actor(2).unwrap().controller.target().is_some());
         assert!(mission.actor(3).unwrap().controller.target().is_some());
+    }
+
+    #[test]
+    fn health_caution_never_holds_a_damaged_aircraft_below_its_flight_path_load() {
+        // The ai-long-5v5 case: a heavy final, 24 percent airframe damage.
+        let healthy = 1.16;
+        assert_eq!(
+            health_scaled_positive_g(healthy, 0.759),
+            HEALTH_SCALED_G_FLOOR.min(healthy)
+        );
+        // Maneuvering authority is still reduced, never raised.
+        assert!((health_scaled_positive_g(7.0, 0.5) - 3.5).abs() < 1e-12);
+        assert_eq!(health_scaled_positive_g(7.0, 1.0), 7.0);
+        assert_eq!(health_scaled_positive_g(7.0, 0.0), HEALTH_SCALED_G_FLOOR);
+        // A loaded limit already below the floor is kept, not raised.
+        assert_eq!(health_scaled_positive_g(0.9, 0.5), 0.9);
+        assert_eq!(health_scaled_positive_g(1.1, 1.0), 1.1);
     }
 
     #[test]

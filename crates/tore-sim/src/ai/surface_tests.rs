@@ -34,6 +34,22 @@ fn zsu23() -> Profile {
     }
 }
 
+/// A T-72's 2A46 with the tuning table's row: one round, then 7.25 s; NPC
+/// 20 / 80 / 40; `trackT` 4.
+fn t72() -> Profile {
+    Profile {
+        timing: Timing::from_quarters(20, 80, 40, 4, 32_767, 1),
+        arm: Arm::Gun {
+            burst: 1,
+            burst_ticks: QUARTER_SECOND_TICKS,
+            pause: 29 * QUARTER_SECOND_TICKS,
+            opening: 0,
+            opening_gap: 0,
+            swap: 60 * TPS,
+        },
+    }
+}
+
 fn stock(loaded: u32, magazines: u32) -> Stock {
     Stock {
         loaded,
@@ -54,6 +70,7 @@ struct Run {
     gates: bool,
     blind: bool,
     hold: bool,
+    lay: u64,
     fired: Vec<(u64, FireRequest)>,
     swaps: Vec<u64>,
 }
@@ -72,6 +89,7 @@ impl Run {
             gates: true,
             blind: false,
             hold: false,
+            lay: 0,
             fired: Vec::new(),
             swaps: Vec::new(),
         }
@@ -86,6 +104,7 @@ impl Run {
             blind: self.blind,
             slow: false,
             hold: self.hold,
+            lay: self.lay,
         };
         let outcome = self.controller.advance(&self.profile, &inputs);
         if let Some(fire) = outcome.fire {
@@ -195,6 +214,62 @@ fn small_arms_aim_wider_than_any_cannon_and_tighten_with_experience() {
 }
 
 #[test]
+fn tank_guns_aim_wider_at_aircraft_and_wider_still_at_a_fast_crossing_one() {
+    for skill in 0..4 {
+        let hover = tank_air_aim_error_deg(skill, 0.);
+        let visual = aim_error_deg(skill, false);
+        assert!((hover - visual - TANK_AIR_RANGING_ERROR_DEG).abs() < 1e-12);
+        assert!(hover > visual && hover < small_arms_aim_error_deg(skill));
+        // A 450 kt jet crossing 1,000 ft away turns the sight line at about
+        // 44 degrees a second: the lag alone is several degrees.
+        let crossing = tank_air_aim_error_deg(skill, 44.);
+        assert!((crossing - hover - 44. * TANK_AIR_TRACKING_LAG_S).abs() < 1e-12);
+        assert!(crossing > 5.);
+        assert_eq!(
+            tank_air_aim_error_deg(skill, -3.),
+            tank_air_aim_error_deg(skill, 3.)
+        );
+    }
+}
+
+/// A tank gun's lay on an aircraft ([`Inputs::lay`]): the first round waits
+/// for the lock and the lay inside the gates, later rounds follow the gun's
+/// cycle, and a target that leaves the gates and comes back is laid on
+/// again. Without a lay the lock held outside the gates fires at once.
+#[test]
+fn a_lay_holds_the_first_round_until_the_target_has_been_in_the_gates_that_long() {
+    let lay = 3 * TPS;
+    let mut run = Run::new(t72(), 22, 2);
+    run.lay = lay;
+    let track = run.first_phase(Phase::Track, 60 * TPS);
+    let fire = run.first_fire(60 * TPS);
+    assert_eq!(fire, track + TPS + lay, "1 s lock and the 3 s lay");
+    let next = run.first_fire(60 * TPS);
+    assert_eq!(
+        next,
+        fire + 30 * QUARTER_SECOND_TICKS,
+        "the 7.5 s cycle, no new lay"
+    );
+    // Out of the gates for 2 s after the pause, then back.
+    run.gates = false;
+    run.run_until(next + 30 * QUARTER_SECOND_TICKS + 2 * TPS);
+    assert_eq!(run.controller.phase(), Phase::Track);
+    run.gates = true;
+    let back = run.tick;
+    let again = run.first_fire(back + 60 * TPS);
+    assert_eq!(again, back + TPS + lay, "laid on again");
+    // No lay: the lock held while the target was out of the gates fires the
+    // moment it is back.
+    let mut run = Run::new(t72(), 22, 2);
+    run.gates = false;
+    let track = run.first_phase(Phase::Track, 60 * TPS);
+    run.run_until(track + 5 * TPS);
+    run.gates = true;
+    let back = run.tick;
+    assert_eq!(run.first_fire(back + 60 * TPS), back);
+}
+
+#[test]
 fn failing_gates_hold_the_lock_for_15_seconds() {
     let mut run = Run::new(sa6(1), 3, 0);
     run.gates = false;
@@ -264,6 +339,7 @@ fn zsu23_bursts_pauses_empties_and_swaps() {
         blind: false,
         slow: false,
         hold: false,
+        lay: 0,
     };
     run.controller.advance(&run.profile, &inputs);
     assert_eq!(run.controller.phase(), Phase::Reload);
@@ -426,6 +502,7 @@ fn optical_backup_doubles_preparation() {
         blind: false,
         slow: true,
         hold: false,
+        lay: 0,
     };
     controller.advance(&profile, &inputs);
     assert_eq!(controller.phase(), Phase::Prepare);

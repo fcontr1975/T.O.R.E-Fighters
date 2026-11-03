@@ -726,7 +726,7 @@ pub fn status(
             .state
             .projectiles
             .iter()
-            .filter(|p| p.incoming.is_some())
+            .filter(|p| p.incoming.is_some() && p.threatening())
             .count(),
         scope.channel,
         scope.mode.unwrap_or("OFF"),

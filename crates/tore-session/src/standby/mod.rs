@@ -614,6 +614,16 @@ impl Standby {
             }
             return;
         }
+        if let Some(copy) = &self.copy
+            && (copy.world.tick() >= tick || !copy.catching_up)
+        {
+            // A copy in good standing, or already past it: nothing to gain.
+            // Judged before the journal, which such a copy has stepped and
+            // dropped up to its own tick: a checkpoint it does not need is
+            // not refused, so it does not ask for another.
+            self.needs_checkpoint = false;
+            return;
+        }
         // The journal must run on from the checkpoint's tick.
         let from = self.journal_from();
         match self.next_tick {
@@ -625,13 +635,6 @@ impl Standby {
                 ));
                 return;
             }
-        }
-        if let Some(copy) = &self.copy
-            && (copy.world.tick() >= tick || !copy.catching_up)
-        {
-            // A copy in good standing, or already past it: nothing to gain.
-            self.needs_checkpoint = false;
-            return;
         }
         let restored = if self.warm() {
             let mut world = match self.fresh() {

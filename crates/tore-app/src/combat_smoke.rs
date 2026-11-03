@@ -349,6 +349,7 @@ pub fn smoke(h: &AircraftType, data: &BTreeMap<String, Vec<u8>>) -> AppResult<()
                     combat.state.own().configuration(),
                     "UKR",
                 )?);
+                recorder.as_mut().unwrap().model(&combat.state)?;
                 combat.start_tape();
             }
             combat.reset(&mut flight)?;
@@ -555,7 +556,7 @@ pub fn smoke(h: &AircraftType, data: &BTreeMap<String, Vec<u8>>) -> AppResult<()
                     - if internal {
                         0.
                     } else {
-                        f64::from(weapon.weight.max(0)) * f64::from(initial)
+                        weapon.carried_weight_lb() * f64::from(initial)
                     };
                 jettison.command(0, live::Command::Jettison, l);
                 if jettison.own().rounds(index) != expected_rounds

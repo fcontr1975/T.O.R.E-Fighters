@@ -222,7 +222,9 @@ pub(super) fn decoyed_event(roll: &DecoyRoll, owner: Option<u32>) -> Event {
         event = event.with_subject(owner);
     }
     if let Some(draw) = roll.draw {
-        event = event.with(field::ROLL, i64::from(draw.value));
+        event = event
+            .with(field::ROLL, i64::from(draw.value))
+            .with(field::ROLL_BOUND, i64::from(draw.bound));
         if let Some(threshold) = draw.threshold {
             event = event.with(field::THRESHOLD, i64::from(threshold));
         }
@@ -234,8 +236,15 @@ fn roll_reason(roll: &DecoyRoll) -> String {
     let draw = roll
         .draw
         .map_or_else(|| "a roll".to_owned(), |d| trees::draw_text(&d));
+    let units = roll.draw.map_or(String::new(), |d| {
+        if d.bound == 10000 {
+            " in basis points".to_owned()
+        } else {
+            String::new()
+        }
+    });
     format!(
-        "{draw} (susceptibility {}% x effectiveness {}%)",
+        "{draw}{units} (susceptibility {}% x effectiveness {}%)",
         roll.susceptibility, roll.effectiveness
     )
 }

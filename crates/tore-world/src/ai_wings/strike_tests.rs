@@ -364,3 +364,31 @@ fn a_laser_missile_with_no_laze_support_goes_home_and_the_radio_says_so() {
             .all(|p| p.owner != wingman)
     );
 }
+
+/// A helicopter's stand-off advance reads its guided store's time of flight
+/// (John, 2026-10-29): the energy model's flight out to each share of the
+/// zone, rising with the range, the same every time; under the other rules
+/// the range at the record's top speed.
+#[test]
+fn a_guided_stores_flight_time_rises_with_range_and_is_the_same_every_time() {
+    use tore_sim::combat::missiles::Rules;
+    let mut world = quiet();
+    let id = friendly(&world)[0];
+    arm_with_laser(&mut world, id, true);
+    let wings = world.ai_wings.as_ref().unwrap();
+    let mut w = wings.configs.get(&id).unwrap().stations[1].weapon.clone();
+    w.seeker.zones[1].maximum_range = 12_000;
+    w.movement.maximum_speed = 1_200;
+    let spec = super::flight_times(&w, Rules::Spec).expect("a zone and a speed");
+    for (range, seconds) in spec.points {
+        assert!((seconds - range / 1_200.).abs() < 1e-9, "{range} {seconds}");
+    }
+    let energy = super::flight_times(&w, Rules::Energy).expect("a zone and a speed");
+    assert_eq!(super::flight_times(&w, Rules::Energy), Some(energy));
+    let mut previous = (0., 0.);
+    for point in energy.points {
+        assert!(point.0 > previous.0 && point.1 > previous.1, "{energy:?}");
+        previous = point;
+    }
+    assert_eq!(energy.points[3].0, 12_000.);
+}

@@ -262,6 +262,7 @@ struct LayerCache {
 }
 impl FlightCanvas {
     pub fn begin(&mut self, size: [u32; 2], h: &Airframe, s: &State, panels: &Instruments) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Panels);
         self.begin_with(tore_workers::shared(), size, h, s, panels);
     }
 
@@ -377,6 +378,7 @@ impl FlightCanvas {
     /// Makes `pending` cover everything drawn so far this frame, for the
     /// renderer to upload.
     pub fn prepare_upload(&mut self) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Ui);
         self.pending.merge(&self.touched);
     }
     /// Fills the whole canvas with one opaque `color`.
@@ -687,6 +689,7 @@ impl FlightCanvas {
     /// pixel like `anchored_layer`, so small text stays crisp. Only those
     /// rectangles are read: the debug panels and menus know where they drew.
     pub fn centered_rects(&mut self, pixels: &[u8], rects: &[(i32, i32, i32, i32)]) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Ui);
         let (w, h) = (self.size[0] as f64, self.size[1] as f64);
         let scale = (w / 640.).min(h / 480.);
         let (left, top) = ((w - 640. * scale) / 2., (h - 480. * scale) / 2.);
@@ -819,6 +822,7 @@ impl FlightCanvas {
         zoom / HUD_SCALE as f32 * (h as f32 / (480. * (w as f32 / 640.).min(h as f32 / 480.)))
     }
     pub fn legacy_layer(&mut self, pixels: &[u8], factor: f64) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Ui);
         let key = (self.size, factor.to_bits());
         // The two layers drawn most recently (the map, the menus over it)
         // keep their scaled result while neither they nor what lies under

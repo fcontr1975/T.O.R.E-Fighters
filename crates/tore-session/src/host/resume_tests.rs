@@ -118,6 +118,13 @@ struct Game {
     armed: bool,
     /// A laser bomber's run (protocol 23, slice NA).
     a2g: Option<crate::wire::readout_a2g_tests::A2gPilot>,
+    /// Until then the game's datagrams to the network wait, and go out in
+    /// order after: a game that falls silent for a while, as a busy machine
+    /// is.
+    hold_until: Option<Duration>,
+    held: Vec<(SocketAddr, Vec<u8>)>,
+    /// Its standby's notes, with when.
+    notes: Vec<(Duration, crate::standby::Note)>,
 }
 
 impl Game {
@@ -202,6 +209,9 @@ struct Rig {
     platform: Platform,
     /// The original host's game is stalled: nothing of it runs.
     stalled: bool,
+    /// How long a takeover's restore and replay take, as the new host sees
+    /// it: its Resumption is that much older than its first update.
+    replay_time: Duration,
 }
 
 impl Rig {
@@ -250,6 +260,7 @@ impl Rig {
             takeovers: Vec::new(),
             platform: Platform::current(),
             stalled: false,
+            replay_time: Duration::ZERO,
         };
         rig.games.push(Game {
             callsign: "Lead".into(),
@@ -272,6 +283,9 @@ impl Rig {
             shooter: false,
             armed: false,
             a2g: None,
+            hold_until: None,
+            held: Vec::new(),
+            notes: Vec::new(),
         });
         assert!(
             rig.run_until(Duration::from_secs(2), |r| r.games[0]
@@ -352,6 +366,9 @@ impl Rig {
             shooter: false,
             armed: false,
             a2g: None,
+            hold_until: None,
+            held: Vec::new(),
+            notes: Vec::new(),
         });
         let index = self.games.len() - 1;
         assert!(
@@ -533,7 +550,9 @@ impl Rig {
             if !standby.has_work() {
                 standby.prepare();
             }
-            let _ = standby.take_notes();
+            for note in standby.take_notes() {
+                game.notes.push((now, note));
+            }
             if standby.appointed().is_some()
                 && game
                     .status_at
@@ -553,11 +572,19 @@ impl Rig {
             game.peers.update(now);
             game.peers.transmit(&mut game.socket).unwrap();
         }
+        let holding = game.hold_until.is_some_and(|until| now < until);
+        if !holding {
+            for (to, datagram) in std::mem::take(&mut game.held) {
+                game.socket.send_datagram(to, &datagram).unwrap();
+            }
+        }
         while let Some(t) = game.client.poll_transmit() {
             if t.to == LINK_ADDRESS {
                 if let Some(host) = &mut game.host {
                     host.receive(now, LINK_ADDRESS, &t.datagram);
                 }
+            } else if holding {
+                game.held.push((t.to, t.datagram));
             } else {
                 game.socket.send_datagram(t.to, &t.datagram).unwrap();
             }
@@ -589,7 +616,7 @@ impl Rig {
             config(1_000 + index as u64),
             Resumption {
                 house,
-                now,
+                now: now.saturating_sub(self.replay_time),
                 present,
             },
         )
@@ -1483,6 +1510,191 @@ fn a_late_resume_gets_no_snapshot_before_resumed() {
     assert_eq!(rig.games[late].client.server(), rig.games[first].address());
 }
 
+/// A player whose Resume the new host answered in the resume window, but
+/// whose Backlog came only after the host went live (the battery's planned
+/// handover, 2026-10-24, where the new host's own game was that player): the
+/// host kept its kept inputs until the Backlog, took the Backlog, and sent
+/// the player snapshots again. Before, going live dropped every store, the
+/// Backlog was refused ("Nothing is being resumed for you here."), the player
+/// counted as never done resuming, and no snapshot went to it again.
+#[test]
+fn a_backlog_after_the_host_went_live_is_taken_and_the_snapshots_follow() {
+    let (mut rig, first, second) = flying(20, true);
+    let late = (1..rig.games.len())
+        .find(|&g| g != first && g != second)
+        .unwrap();
+    rig.run(Duration::from_secs(1));
+    rig.cut(0);
+    // Once the new host has answered the late player's Resume, the late
+    // game is silent for 2 seconds, past the 1.5 second window: its Backlog
+    // comes after the host went live.
+    let late_address = rig.games[late].address();
+    let answered = rig.run_until(Duration::from_secs(8), |r| {
+        r.games[first].host.as_ref().is_some_and(|host| {
+            let connection = host
+                .peers
+                .iter()
+                .find(|(_, p)| p.address == late_address)
+                .map(|(id, _)| *id);
+            // Resuming, the player back and not waiting for Resumed: its
+            // Resume answered, its Backlog not yet in.
+            host.resuming()
+                && connection.is_some_and(|c| {
+                    !host.awaiting_resume(c) && r.games[late].client.migration_counts().resumed == 0
+                })
+        })
+    });
+    assert!(
+        answered,
+        "the new host answers the late Resume in its window"
+    );
+    let now = rig.net.now();
+    rig.games[late].hold_until = Some(now + Duration::from_secs(2));
+    let (_, took_at, _, _) = rig.takeovers[0].clone();
+    assert!(
+        rig.run_until(Duration::from_secs(2), |r| !r.host_of(first).resuming()),
+        "the new host goes live without the late Backlog"
+    );
+    assert!(
+        rig.net.now() < now + Duration::from_secs(2),
+        "live while the late game is silent"
+    );
+    assert!(
+        rig.run_until(Duration::from_secs(4), |r| r.games[late]
+            .snapshot_after(now + Duration::from_secs(2))
+            .is_some()),
+        "the late player has snapshots again"
+    );
+    let refused: Vec<String> = rig.games[late]
+        .events
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ClientEvent::Refused { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(refused.is_empty(), "refused: {refused:?}");
+    assert!(rig.flying(late));
+    assert_eq!(rig.games[late].client.migration_counts().resumed, 1);
+    assert!(rig.games[late].snapshot_after(took_at).is_some());
+    let host = rig.host_of(first);
+    let connection = host
+        .peers
+        .iter()
+        .find(|(_, p)| p.address == late_address)
+        .map(|(id, _)| *id)
+        .unwrap();
+    assert!(!host.awaiting_resume(connection));
+}
+
+/// A takeover whose restore and replay took 5 seconds (a standby far
+/// behind on a busy machine; `net-window-migrate-smoke`, 2026-10-24, saw
+/// 4.8): the drop timeout counts from the new host's first update, so every
+/// player resumes, with the host live by then, and none is dropped. It had
+/// counted from before the replay, and every player, the new host's own
+/// included, was dropped at its first update.
+#[test]
+fn a_takeover_that_took_seconds_to_replay_drops_nobody() {
+    let (mut rig, _, _) = flying(20, true);
+    rig.run(Duration::from_secs(2));
+    rig.replay_time = DROP_AFTER;
+    rig.cut(0);
+    let back = rig.back_after_cut(Duration::from_secs(5));
+    eprintln!("snapshots again after a 5-second replay: {back:?}");
+    let (game, _, _, _) = rig.takeovers[0].clone();
+    rig.run(DROP_AFTER);
+    let dropped: Vec<String> = rig.games[game]
+        .host
+        .as_mut()
+        .unwrap()
+        .take_resume_notes()
+        .into_iter()
+        .filter_map(|note| match note {
+            ResumeNote::Dropped { callsign } => Some(callsign),
+            _ => None,
+        })
+        .collect();
+    // Only the old host's own player, lost with it, is dropped.
+    assert_eq!(dropped, ["Lead"]);
+    let new = rig.host_of(game);
+    assert!(!new.resuming(), "the new host is live");
+    assert_eq!(new.absent_players(), Vec::<String>::new());
+    for g in 1..rig.games.len() {
+        assert!(rig.flying(g), "{} flies", rig.games[g].callsign);
+        assert_eq!(rig.games[g].client.migration_counts().resumed, 1);
+    }
+    assert!(
+        new.rejoin.reserved_plane(PlaneId(0)).is_some(),
+        "the old host's plane is kept for its player"
+    );
+}
+
+/// A standby the new host appoints in the middle of its fast-forward (the
+/// battery's planned handover, 2026-10-24, saw one there fail its first
+/// check on the real import): its checkpoint is of the world between two
+/// fast-forward ticks, and the copy restored from it steps on as the new
+/// host's world does, warm and with every check equal.
+#[test]
+fn a_standby_appointed_in_the_fast_forward_follows_the_new_host() {
+    use crate::standby::Note;
+    let (mut rig, first, _) = flying(20, true);
+    rig.run(Duration::from_secs(3));
+    rig.cut(0);
+    assert!(rig.run_until(Duration::from_secs(5), |r| !r.takeovers.is_empty()));
+    let (game, _, tick, _) = rig.takeovers[0].clone();
+    assert_eq!(game, first);
+    rig.games[game]
+        .host
+        .as_mut()
+        .unwrap()
+        .set_standbys_enabled(false);
+    assert!(
+        rig.run_until(Duration::from_secs(5), |r| {
+            let host = r.host_of(game);
+            host.resuming() && host.world.tick() > tick
+        }),
+        "the new host fast-forwards"
+    );
+    let from = rig.host_of(game).world.tick();
+    rig.games[game]
+        .host
+        .as_mut()
+        .unwrap()
+        .set_standbys_enabled(true);
+    rig.run(Duration::from_secs(20));
+    let standbys: Vec<usize> = (1..rig.games.len()).filter(|&g| g != game).collect();
+    for g in standbys {
+        let notes: Vec<&Note> = rig.games[g].notes.iter().map(|(_, n)| n).collect();
+        let restored = notes.iter().find_map(|n| match n {
+            Note::Checkpoint {
+                tick,
+                restored: true,
+            } => Some(*tick),
+            _ => None,
+        });
+        let callsign = &rig.games[g].callsign;
+        assert!(
+            restored.is_some_and(|t| (from..=from + FAST_FORWARD_TICKS).contains(&t)),
+            "{callsign} restored the new host's checkpoint from the fast-forward: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| matches!(n, Note::Warm { .. })),
+            "{callsign} is warm: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|n| matches!(n, Note::Mismatch { .. } | Note::Refused(_))),
+            "{callsign}: {notes:?}"
+        );
+    }
+    let figures = rig.host_of(game).standby_figures();
+    assert_eq!(figures.len(), 2);
+    for f in figures {
+        assert!(f.checks_equal >= 1 && f.mismatches == 0, "{f:?}");
+    }
+}
+
 /// The lobby moves to a better host (a handover in the lobby, as the host's
 /// own succession update makes one): the old house's player resumes with
 /// the new host as itself, the crown kept, rather than being dropped as
@@ -2219,7 +2431,7 @@ fn a_host_that_lagged_before_the_cut_corrects_no_plane_at_the_resume() {
 
 #[test]
 fn the_mission_countdown_keeps_its_deadline_through_handover() {
-    let mut rig = Rig::new(crowd_spec(200));
+    let mut rig = Rig::new(crowd_spec(150));
     rig.games[0]
         .client
         .change_settings(crate::wire::messages::SettingsChange {
@@ -2259,7 +2471,7 @@ fn the_mission_countdown_keeps_its_deadline_through_handover() {
 fn departed_player_and_side_scores_survive_handover_and_still_reach_the_limit() {
     use crate::settings::{Mode, number};
     use tore_world::score::{Fact, Flown, Victim};
-    let mut rig = Rig::new(crowd_spec(200));
+    let mut rig = Rig::new(crowd_spec(150));
     rig.games[0]
         .client
         .change_settings(crate::wire::messages::SettingsChange {

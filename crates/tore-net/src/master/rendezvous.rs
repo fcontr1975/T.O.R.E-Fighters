@@ -28,7 +28,8 @@
 //! 4. A request (Register or Heartbeat) unanswered is sent again every 3
 //!    seconds (agent decision); no answer at all for 10 seconds means the
 //!    master is silent, and the request is then repeated after 2, 4, 8 and
-//!    up to 60 seconds, the next of the master's addresses each time.
+//!    up to 15 seconds, the next of the master's addresses each time, round
+//!    and back to the first ("Finding the master again" below).
 //! 5. Unlisting, or stopping, sends Unregister three times at once (*agent
 //!    decision:* at once, since the socket may close right after).
 //!
@@ -45,6 +46,35 @@
 //!    with the token from its own port, which moves the listing and its
 //!    channels there, and an old host that learns another hosts now lets
 //!    the listing go without a word ([`Rendezvous::release`]).
+//!
+//! **Finding the master again** (0.2.2, agent decisions after two public
+//! servers stayed unlisted on 2026-10-23: a silence moved them to the
+//! master's IPv6 address on a host with no IPv6 route, and nothing ever
+//! moved them back). The listing always comes back on its own once any of
+//! the master's addresses answers:
+//!
+//! - Every request to a silent master goes to the next of its addresses,
+//!   round and back to the first, so no dead address holds the listing.
+//! - A send that fails (no route to the network or the host, no such local
+//!   address, an address family the socket lacks, or any other error the
+//!   socket reports) moves the listing to the next address at once, if one
+//!   has not failed too, and asks there without waiting.
+//! - Addresses the host cannot use come last: an address of a family the
+//!   game port's socket cannot send to ([`Datagrams::can_send_to`]), then
+//!   one the system has no route to ([`HostListing`] asks the system at
+//!   each lookup), then one a send failed to since the last lookup. An
+//!   IPv4-only socket never picks an IPv6 address while an IPv4 one exists.
+//! - A lookup that gives the same addresses keeps the one in use only if
+//!   it is usable; else the listing moves to the first usable one. While the
+//!   master is silent its name is looked up again every minute.
+//! - An answer from any of the master's addresses makes that address the one
+//!   in use, and the longest wait between requests to a silent master is 15
+//!   seconds (a Keep's interval, so a silent host sends no more than a
+//!   listed one): a master that comes back lists the game again within one
+//!   wait, and a restarted one within the Unknown listing's exchange.
+//! - Each change of address is one [`RendezvousEvent::MasterAddress`], and
+//!   each address a send fails to without a change one
+//!   [`RendezvousEvent::SendFailed`] per lookup, which the host's log shows.
 //!
 //! The summary is the host's discovery answer without its nonce. The host's
 //! loop offers it through [`Rendezvous::wants_summary`] and
@@ -87,10 +117,18 @@ pub const LISTING_GAP: Duration = Duration::from_secs(2);
 pub const SUMMARY_LOOK: Duration = Duration::from_secs(1);
 /// The first wait after the master falls silent; each next one doubles.
 pub const FIRST_BACKOFF: Duration = Duration::from_secs(2);
-/// The longest wait between requests to a silent master.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// The longest wait between requests to a silent master: a Keep's interval,
+/// so a silent host sends no more than a listed one (agent decision, 0.2.2;
+/// 60 seconds before).
+pub const MAX_BACKOFF: Duration = Duration::from_secs(15);
+/// The longest wait before looking up a master's name that could not be
+/// looked up.
+pub const MAX_LOOKUP_BACKOFF: Duration = Duration::from_secs(60);
 /// The master's name is looked up again this often while listing.
 pub const LOOKUP_INTERVAL: Duration = Duration::from_secs(600);
+/// The master's name is looked up again this often while the master is
+/// silent (agent decision, 0.2.2).
+pub const SILENT_LOOKUP_INTERVAL: Duration = Duration::from_secs(60);
 /// Probes of one mapping test are sent this many times at most while no
 /// answer comes, [`REQUEST_RETRY`] apart (agent decision).
 const PROBE_TRIES: u32 = 3;
@@ -157,6 +195,50 @@ pub enum RendezvousEvent {
     Refused(String),
     /// The mapping test's result: how the host's router maps the game port.
     MappingTested(MappingType),
+    /// The listing goes to another of the master's addresses (0.2.2).
+    MasterAddress {
+        /// The address it went to before.
+        from: SocketAddr,
+        /// The address it goes to now.
+        to: SocketAddr,
+        /// Why it moved.
+        why: MasterSwitch,
+    },
+    /// A send to one of the master's addresses failed and the listing had
+    /// no other address to move to (0.2.2): once per address until the
+    /// master's name is looked up again.
+    SendFailed {
+        /// The master's address.
+        to: SocketAddr,
+        /// What the system said.
+        error: String,
+    },
+}
+
+/// Why a listing moved to another of the master's addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MasterSwitch {
+    /// The master did not answer: the next request tries the next address.
+    NoAnswer,
+    /// A send to the address failed: what the system said.
+    SendFailed(String),
+    /// The master answered from the new address.
+    Answered,
+    /// A new lookup of the master's name left the old address unusable or
+    /// gave it no more.
+    Lookup,
+}
+
+impl MasterSwitch {
+    /// Why, in a few words for a log line.
+    pub fn text(&self) -> String {
+        match self {
+            Self::NoAnswer => "no answer".into(),
+            Self::SendFailed(error) => format!("cannot send there: {error}"),
+            Self::Answered => "the master answered from it".into(),
+            Self::Lookup => "a new lookup of the master's name".into(),
+        }
+    }
 }
 
 /// What the rendezvous counted.
@@ -467,6 +549,20 @@ pub struct Rendezvous {
     next_ask: Duration,
     silent: bool,
     backoff: Duration,
+    /// The master's addresses the system has no route to, as the last
+    /// lookup found ([`Rendezvous::set_masters_routed`]).
+    no_route: BTreeSet<SocketAddr>,
+    /// The master's addresses the game port's socket cannot send to (its
+    /// family is missing), as the last transmit found.
+    no_family: BTreeSet<SocketAddr>,
+    /// The master's addresses a send failed to since the last lookup.
+    failed: BTreeSet<SocketAddr>,
+    /// Sends that failed, by the master's address, for the next update.
+    unsent: Vec<(SocketAddr, String)>,
+    /// The address in use was chosen by something other than a request to
+    /// a silent master (a failed send, an answer, a lookup), so the next
+    /// request goes there before the round moves on.
+    untried: bool,
     refused: Option<String>,
     mapping: Mapping,
     meets: Meets,
@@ -514,6 +610,11 @@ impl Rendezvous {
             next_ask: now,
             silent: false,
             backoff: FIRST_BACKOFF,
+            no_route: BTreeSet::new(),
+            no_family: BTreeSet::new(),
+            failed: BTreeSet::new(),
+            unsent: Vec::new(),
+            untried: false,
             refused: None,
             mapping: Mapping::new(MappingType::Unknown, now),
             meets: Meets::default(),
@@ -686,12 +787,32 @@ impl Rendezvous {
     }
 
     /// The master's main addresses (IPv4 first, as a lookup gives them) and
-    /// the host's own candidates. A listing made with an address no longer
-    /// among them is made again with the first.
+    /// the host's own candidates, every address counted as one the system
+    /// has a route to: see [`Rendezvous::set_masters_routed`].
     pub fn set_masters(
         &mut self,
         masters: Vec<SocketAddr>,
         candidates: Vec<Candidate>,
+        now: Duration,
+    ) {
+        self.set_masters_routed(masters, candidates, |_| true, now);
+    }
+
+    /// The master's main addresses (IPv4 first, as a lookup gives them), the
+    /// host's own candidates, and `routed`, which says whether the system
+    /// has a route to an address: one it has none to is tried only when no
+    /// other will do. The address in use is kept while it is among them and
+    /// usable (a route, a socket of its family, no failed send since the
+    /// last lookup); else the listing moves to the first usable address,
+    /// keeping its listing (the same master), or, when the address in use
+    /// is no longer among them, is made again there (the master moved). The
+    /// marks of failed sends are then cleared, so a later round tries those
+    /// addresses again.
+    pub fn set_masters_routed(
+        &mut self,
+        masters: Vec<SocketAddr>,
+        candidates: Vec<Candidate>,
+        routed: impl Fn(SocketAddr) -> bool,
         now: Duration,
     ) {
         let mut unique: Vec<SocketAddr> = Vec::new();
@@ -703,16 +824,38 @@ impl Rendezvous {
         let before = self.masters.get(self.current).copied();
         self.own = candidates;
         self.apply_mapped();
+        self.no_route = unique.iter().copied().filter(|m| !routed(*m)).collect();
+        self.no_family.retain(|m| unique.contains(m));
         self.masters = unique;
-        self.current = before
+        let kept = before
             .and_then(|before| self.masters.iter().position(|m| *m == before))
+            .filter(|&at| self.rank(self.masters[at]) == 0);
+        self.current = kept
+            .or_else(|| self.next_master(self.masters.len().saturating_sub(1), false))
             .unwrap_or(0);
-        if before.is_some() && before != self.masters.get(self.current).copied() {
-            self.listing = None;
-            self.moving = false;
-            self.asked_since = None;
+        self.failed.clear();
+        let after = self.masters.get(self.current).copied();
+        if let Some(from) = before
+            && after != Some(from)
+        {
+            if self.masters.contains(&from) {
+                // The same master at another of its addresses: ask there now.
+                self.last_listing_send = None;
+            } else {
+                self.listing = None;
+                self.moving = false;
+                self.asked_since = None;
+            }
             self.next_ask = now;
             self.part_changes += 1;
+            self.untried = true;
+            if let Some(to) = after {
+                self.events.push_back(RendezvousEvent::MasterAddress {
+                    from,
+                    to,
+                    why: MasterSwitch::Lookup,
+                });
+            }
         }
         if self.masters.is_empty() {
             return;
@@ -720,6 +863,106 @@ impl Rendezvous {
         if before.is_none() {
             self.next_ask = self.next_ask.max(now);
             self.mapping = Mapping::new(self.mapping.result, now);
+        }
+    }
+
+    /// How usable one of the master's addresses is, best first: 0 usable, 1
+    /// a send to it failed since the last lookup, 2 the system has no route
+    /// to it, 3 the game port's socket cannot send to its family.
+    fn rank(&self, address: SocketAddr) -> u8 {
+        if self.no_family.contains(&address) {
+            3
+        } else if self.no_route.contains(&address) {
+            2
+        } else if self.failed.contains(&address) {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// The master's address to try after the one at `after`, going round
+    /// and back to the first: the first of the best rank, which is `after`
+    /// itself when no other is as good. With `usable_only`, only a usable
+    /// address other than `after`, or none.
+    fn next_master(&self, after: usize, usable_only: bool) -> Option<usize> {
+        let count = self.masters.len();
+        let mut round = (1..=count).map(|step| (after + step) % count);
+        if usable_only {
+            round.find(|&at| at != after && self.rank(self.masters[at]) == 0)
+        } else {
+            round.min_by_key(|&at| self.rank(self.masters[at]))
+        }
+    }
+
+    /// Moves the listing to the master's address at `to`, with one event;
+    /// false when it is the address in use already.
+    fn switch_master(&mut self, to: usize, why: MasterSwitch) -> bool {
+        let (Some(&from), Some(&address)) = (self.masters.get(self.current), self.masters.get(to))
+        else {
+            return false;
+        };
+        if to == self.current {
+            return false;
+        }
+        self.current = to;
+        self.part_changes += 1;
+        self.untried = true;
+        self.events.push_back(RendezvousEvent::MasterAddress {
+            from,
+            to: address,
+            why,
+        });
+        true
+    }
+
+    /// The master's main address `to` is one of its addresses at, either
+    /// port; `None` for any other address.
+    fn master_of(&self, to: SocketAddr) -> Option<SocketAddr> {
+        let to = canonical(to);
+        self.masters
+            .iter()
+            .copied()
+            .find(|m| *m == to || probe_address(*m) == Some(to))
+    }
+
+    /// Tells the rendezvous that a datagram it gave ([`Rendezvous::poll_transmit`])
+    /// could not be sent to `to`: one to the master's address in use moves
+    /// the listing to the next usable address at the next update, and asks
+    /// there at once. [`Rendezvous::transmit`] does this itself. Nothing
+    /// happens for an address that is not the master's.
+    pub fn send_failed(&mut self, to: SocketAddr, error: &io::Error) {
+        if let Some(master) = self.master_of(to) {
+            self.unsent.push((master, error.to_string()));
+        }
+    }
+
+    /// Acts on the sends that failed since the last update: see the module
+    /// documentation's "Finding the master again".
+    fn fail_over(&mut self, now: Duration) {
+        for (address, error) in std::mem::take(&mut self.unsent) {
+            let fresh = self.failed.insert(address);
+            let moved = self.master() == Some(address)
+                && self.next_master(self.current, true).is_some_and(|next| {
+                    self.switch_master(next, MasterSwitch::SendFailed(error.clone()))
+                });
+            if moved {
+                // The failed datagram never reached the master: ask anew.
+                self.next_ask = now;
+                self.last_listing_send = None;
+            } else if fresh {
+                self.events
+                    .push_back(RendezvousEvent::SendFailed { to: address, error });
+            }
+        }
+    }
+
+    /// The master answered from `from`: that address works, so it is the
+    /// one in use from now on.
+    fn answered_from(&mut self, from: SocketAddr) {
+        self.failed.remove(&from);
+        if let Some(at) = self.masters.iter().position(|m| *m == from) {
+            self.switch_master(at, MasterSwitch::Answered);
         }
     }
 
@@ -877,10 +1120,43 @@ impl Rendezvous {
         self.out.pop_front()
     }
 
-    /// Sends every queued master datagram on `socket`, carrying on past
-    /// failures; returns the first error.
+    /// Sends every queued datagram on `socket`, carrying on past failures.
+    /// A send to one of the master's addresses that fails, or that the
+    /// socket has no socket of its family for, is the rendezvous's to act on
+    /// ([`Rendezvous::send_failed`]); the first other error is returned.
     pub fn transmit<D: Datagrams + ?Sized>(&mut self, socket: &mut D) -> io::Result<()> {
-        crate::datagram::transmit_all(&mut self.out, socket)
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        for &master in &self.masters {
+            if socket.can_send_to(master) {
+                self.no_family.remove(&master);
+            } else {
+                self.no_family.insert(master);
+            }
+        }
+        let mut first_error = None;
+        while let Some(transmit) = self.out.pop_front() {
+            let master = self.master_of(transmit.to);
+            if let Some(master) = master
+                && self.no_family.contains(&master)
+            {
+                self.unsent.push((
+                    master,
+                    "the game port has no socket of that address family".into(),
+                ));
+                continue;
+            }
+            if let Err(error) = socket.send_datagram(transmit.to, &transmit.datagram) {
+                match master {
+                    Some(master) => self.unsent.push((master, error.to_string())),
+                    None => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// A datagram from one of the master's addresses.
@@ -898,6 +1174,9 @@ impl Rendezvous {
                     return;
                 }
                 self.heard(now, true);
+                // The cookie is for the address the master saw from this
+                // one of its addresses: the Register goes back there.
+                self.answered_from(from);
                 self.send_register(challenge.cookie, now);
                 // The Register with the cookie is a request of its own.
                 self.asked_since = Some(now);
@@ -909,6 +1188,7 @@ impl Rendezvous {
                     return;
                 }
                 self.heard(now, true);
+                self.answered_from(from);
                 let again = self
                     .listing
                     .is_some_and(|l| l.listing_id == listed.listing_id && l.token == listed.token);
@@ -962,6 +1242,7 @@ impl Rendezvous {
                         .push_back(RendezvousEvent::SeenChanged(ack.seen));
                 }
                 self.heard(now, true);
+                self.answered_from(from);
             }
             MasterPacket::UnknownListing(unknown) => {
                 if self.listing.is_none_or(|l| l.token != unknown.token) {
@@ -971,6 +1252,7 @@ impl Rendezvous {
                 // The master restarted, or dropped the listing: register again
                 // at once.
                 self.heard(now, true);
+                self.answered_from(from);
                 self.listing = None;
                 self.moving = false;
                 self.part_changes += 1;
@@ -1075,8 +1357,10 @@ impl Rendezvous {
         }
         self.relays.channels.forget_idle(now);
         if !self.wanted || self.refused.is_some() || self.masters.is_empty() {
+            self.unsent.clear();
             return;
         }
+        self.fail_over(now);
         // A move the master has not acknowledged may only be waiting out
         // its once-a-minute rule (slice K8).
         let silent_after = if self.moving {
@@ -1090,12 +1374,8 @@ impl Rendezvous {
         {
             self.silent = true;
             self.events.push_back(RendezvousEvent::MasterSilent);
-            // The next try goes to the master's next address, if it has one.
-            let before = self.current;
-            self.current = (self.current + 1) % self.masters.len();
-            if self.current != before {
-                self.part_changes += 1;
-            }
+            // The next try goes to the master's next address, if it has one
+            // ([`Rendezvous::ask`]).
             if self.listing.is_none() {
                 self.nonce = self.rng.next_u64();
             }
@@ -1140,6 +1420,15 @@ impl Rendezvous {
     /// Sends the request of the moment (a Register before Listed, a
     /// Heartbeat after) and sets its retry.
     fn ask(&mut self, now: Duration) {
+        // A silent master is asked at its next address each time, round and
+        // back to the first, unless the address in use is yet untried.
+        if self.silent
+            && !self.untried
+            && let Some(next) = self.next_master(self.current, false)
+        {
+            self.switch_master(next, MasterSwitch::NoAnswer);
+        }
+        self.untried = false;
         if self.listing.is_some() {
             self.send_heartbeat(now);
         } else {
@@ -1434,8 +1723,10 @@ impl HostTally {
 }
 
 /// A host's listing with what needs the real world: the master's name looked
-/// up on a thread (again every 10 minutes and after the master falls
-/// silent), and the host's own addresses toward it. The host's loop changes
+/// up on a thread (again every 10 minutes, at once when the master falls
+/// silent and every minute while it stays silent), the host's own addresses
+/// toward it, and which of the master's addresses the system has a route
+/// to. The host's loop changes
 /// by a line or two:
 ///
 /// ```ignore
@@ -1579,8 +1870,15 @@ impl HostListing {
             match answer {
                 Ok(masters) => {
                     let candidates = host_candidates(&masters, self.game_port, own_address_toward);
-                    self.rendezvous.set_masters(masters, candidates, now);
-                    self.next_lookup = now + LOOKUP_INTERVAL;
+                    // An address the system has no route to (an IPv6 one on a
+                    // host without IPv6) is tried last.
+                    self.rendezvous.set_masters_routed(
+                        masters,
+                        candidates,
+                        |master| own_address_toward(master).is_some(),
+                        now,
+                    );
+                    self.next_lookup = now + self.lookup_interval();
                     self.lookup_backoff = FIRST_BACKOFF;
                 }
                 Err(error) => {
@@ -1588,7 +1886,7 @@ impl HostListing {
                         .events
                         .push_back(RendezvousEvent::LookupFailed(error));
                     self.next_lookup = now + self.lookup_backoff;
-                    self.lookup_backoff = (self.lookup_backoff * 2).min(MAX_BACKOFF);
+                    self.lookup_backoff = (self.lookup_backoff * 2).min(MAX_LOOKUP_BACKOFF);
                 }
             }
         }
@@ -1611,6 +1909,16 @@ impl HostListing {
     /// See [`Rendezvous::transmit`].
     pub fn transmit<D: Datagrams + ?Sized>(&mut self, socket: &mut D) -> io::Result<()> {
         self.rendezvous.transmit(socket)
+    }
+
+    /// How long until the master's name is looked up again: a minute while
+    /// the master is silent, else 10 minutes.
+    fn lookup_interval(&self) -> Duration {
+        if self.rendezvous.state() == ListingState::Silent {
+            SILENT_LOOKUP_INTERVAL
+        } else {
+            LOOKUP_INTERVAL
+        }
     }
 
     /// See [`Rendezvous::poll_event`].
@@ -1654,3 +1962,7 @@ mod tests;
 #[cfg(test)]
 #[path = "listing_part_tests.rs"]
 mod listing_part_tests;
+
+#[cfg(test)]
+#[path = "failover_tests.rs"]
+mod failover_tests;

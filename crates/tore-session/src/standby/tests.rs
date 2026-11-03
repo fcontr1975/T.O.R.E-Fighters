@@ -586,6 +586,56 @@ fn a_mismatch_injected_by_hand_asks_for_a_checkpoint() {
     );
 }
 
+/// A checkpoint a warm copy in good standing has no use for (one begun before
+/// the copy stepped past it, whose chunks arrive after): dropped quietly, not
+/// refused as a checkpoint the journal does not continue, so it asks for no
+/// other (the battery's planned handover, 2026-10-24, where each refusal
+/// asked for another and the host sent one every 10 seconds).
+#[test]
+fn a_checkpoint_a_warm_copy_has_stepped_past_is_not_refused() {
+    let mut source = Source::new();
+    let mut standby = Standby::new(builder(&Builds::default()));
+    let appoint = source.appoint(true);
+    let flight = source.flight();
+    feed(&mut standby, &[appoint, flight]);
+    while source.world.tick() < 600 {
+        let records = source.interval();
+        feed(&mut standby, &records);
+        standby.step(Budget::Ticks(usize::MAX));
+    }
+    // Begun at 600; its chunks go out with the intervals while the copy
+    // steps each one, so the copy is past 600 and holds no journal from it
+    // when the last chunk comes.
+    let begin = source.begin_checkpoint();
+    feed(&mut standby, &[begin]);
+    while !source.sending.is_empty() {
+        let records = source.interval();
+        feed(&mut standby, &records);
+        standby.step(Budget::Ticks(usize::MAX));
+    }
+    let notes = standby.take_notes();
+    assert!(
+        !notes.iter().any(|n| matches!(n, Note::Refused(_))),
+        "refused: {notes:?}"
+    );
+    let status = standby.status();
+    assert_eq!(status.state, StandbyState::Warm);
+    assert!(!status.needs_checkpoint, "it asks for no other");
+    // The copy is still the source's.
+    while source.world.tick() < 1_200 {
+        let records = source.interval();
+        feed(&mut standby, &records);
+        standby.step(Budget::Ticks(usize::MAX));
+    }
+    let check = source.check();
+    feed(&mut standby, &[check]);
+    let status = standby.status();
+    assert_eq!(
+        (status.check_tick, status.check, status.needs_checkpoint),
+        (1_200, CheckResult::Equal, false)
+    );
+}
+
 #[test]
 fn appointed_in_flight_a_standby_builds_the_flight_it_holds_from_the_checkpoint() {
     let builds = Builds::default();

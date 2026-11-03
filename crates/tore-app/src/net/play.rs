@@ -211,6 +211,7 @@ impl App {
         if self.net.is_none() {
             return false;
         }
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Network);
         let flying = self.net_flight.is_some() && self.screen == Screen::Flight;
         let sensors = self.instruments.controls();
         let mut controls = if flying && !self.flight_ui.frozen() && self.focused {
@@ -232,7 +233,20 @@ impl App {
             controls.commands = std::mem::take(&mut self.seat_commands);
         }
         let session = self.net.as_mut().expect("a session");
+        let before_tick = if crate::frame_log::enabled() {
+            session.client.prediction().map(|p| p.tick())
+        } else {
+            None
+        };
         session.pump(&controls);
+        if let Some(before) = before_tick
+            && let Some(after) = session.client.prediction()
+        {
+            crate::frame_log::count(
+                crate::frame_log::Count::NetworkTicks,
+                after.tick().saturating_sub(before) as usize,
+            );
+        }
         if let Some(failure) = session.take_host_failure() {
             self.net_ending = Some(failure);
             self.end_session(event_loop);

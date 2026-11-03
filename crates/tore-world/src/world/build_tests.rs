@@ -294,6 +294,7 @@ fn the_callers_hooks_supply_the_types_and_the_weapon_labels() {
             load: Some(&mut load),
             weapon_label: Some(&label),
             ground_variation: None,
+            inspect_invalid_placement: false,
         },
     )
     .unwrap();
@@ -507,4 +508,83 @@ fn an_enemy_ground_start_parks_enemy_wing_one_at_a_redfor_field() {
     // As a single-player ground start begins: on NAV, the field selected.
     assert!(cockpit.airport_nav_mode);
     assert!(cockpit.airport_service.selected().is_some());
+}
+
+#[test]
+fn creator_distance_audit_matches_launch_and_never_silently_shortens() {
+    let data = resources();
+    let mut mission = spec();
+    let choices = crate::mission_layout::availability::audit(&data, &mission).unwrap();
+    assert!(choices.separations[1], "two nm fits the synthetic map");
+    assert!(!choices.separations[10], "300 nm cannot fit");
+    for (index, nm) in crate::mission_layout::SEPARATION_NM.into_iter().enumerate() {
+        mission.separation_nm = nm as u32;
+        match World::build(
+            &mission,
+            &data,
+            Seating::SinglePlayer,
+            &mut Hooks::default(),
+        ) {
+            Ok(built) => {
+                assert!(
+                    choices.separations[index],
+                    "{nm} nm launched but was hidden"
+                );
+                assert!(!built.restarted.layout.as_ref().unwrap().enemy.shortened());
+            }
+            Err(e) => {
+                assert!(
+                    !choices.separations[index],
+                    "{nm} nm offered but refused: {e}"
+                );
+                assert!(e.to_string().starts_with("Separation "), "{e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn ground_starts_offer_every_distance_and_target_launches_accept_them() {
+    use crate::test_support::surface::{spec_with_target, surface_resources, target};
+    let mut data = surface_resources();
+    data.extend(crate::test_support::resources::airport_resources());
+    let mut mission = spec_with_target(&target("QUCITY", 0, 0, 7));
+    mission.start = Start::GroundAuto { altitude_ft: 5000 };
+    let first = World::new(&mission, &data, Seating::SinglePlayer).unwrap();
+    let runway = first.setup.ground_start.unwrap();
+    for start in [
+        Start::GroundAuto { altitude_ft: 5000 },
+        Start::Ground {
+            runway,
+            altitude_ft: 5000,
+        },
+    ] {
+        mission.start = start;
+        let choices = crate::mission_layout::availability::audit(&data, &mission).unwrap();
+        assert!(choices.separations.into_iter().all(|fits| fits));
+        for nm in crate::mission_layout::SEPARATION_NM {
+            mission.separation_nm = nm as u32;
+            World::new(&mission, &data, Seating::SinglePlayer).unwrap();
+        }
+    }
+    mission.start = Start::Airborne { altitude_ft: 5000 };
+    assert!(
+        !crate::mission_layout::availability::audit(&data, &mission)
+            .unwrap()
+            .separations[10]
+    );
+}
+
+#[test]
+fn ground_start_without_target_still_requires_the_requested_distance_to_fit() {
+    let data = crate::test_support::resources::airport_resources();
+    let mut mission = spec();
+    mission.start = Start::GroundAuto { altitude_ft: 5000 };
+    mission.separation_nm = 300;
+    let choices = crate::mission_layout::availability::audit(&data, &mission).unwrap();
+    assert!(!choices.separations[10]);
+    let error = World::new(&mission, &data, Seating::SinglePlayer)
+        .err()
+        .unwrap();
+    assert!(error.to_string().starts_with("Separation "));
 }

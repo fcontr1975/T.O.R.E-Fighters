@@ -13,8 +13,8 @@ Pilot1."; the pictures the script writes show the HUD for a person to look at. I
 
 `net-window-migrate-smoke`: the lead's smoke test of slice K10, the shape of John's three-machine check. The game hosts in
 the window, listed on a `tore-master` on this machine; two pilots that stand by join it directly, a bot joins through the
-master's relay and Viper keeps its rejoin token in a file. The hosting game is killed in the fight (SIGKILL); a pilot
-takes the game over, the relayed bot keeps its channel, and Viper, killed after the migration and started again
+master's relay and Viper keeps its rejoin token in a file. AI weapons are held so Viper survives the retained-aircraft
+check. The hosting game is killed in flight (SIGKILL); a pilot takes the game over, the relayed bot keeps its channel, and Viper, killed after the migration and started again
 through the master with its token, is welcomed back into the aircraft the new host kept for it.
 """
 from __future__ import annotations
@@ -197,7 +197,7 @@ def drive_migrate_window(d: Drive) -> None:
         d.problem(f"the script wrote {len(pictures)} pictures, expected 14")
 
 
-# The hosting game flies until the driver kills it; pictures of its fight every two seconds once it flies.
+# The hosting game flies until the driver kills it; pictures every two seconds once it flies.
 SMOKE_SCRIPT = (
     "wait 1\nwaittick 600 120\n"
     + "".join(f"shot SHOTS/host-{i:02d}.ppm\nwait 2\n" for i in range(1, 31))
@@ -206,13 +206,13 @@ SMOKE_SCRIPT = (
 
 
 def drive_migrate_smoke(d: Drive) -> None:
-    """The lead's smoke test (slice K10): the hosting game killed in a fight, one player relayed, one rejoin."""
+    """The hosting game killed in flight, one player relayed, one retained-aircraft rejoin."""
     fresh_data(d)
     master, mport = start_master(d)
     port = d.port()
     name = "Migrate smoke"
     mission = d.work / "mission.txt"
-    mission.write_text(guide_mission(5))
+    mission.write_text(weapons_hold(guide_mission(5)))
     shots = d.work / "shots"
     shots.mkdir(exist_ok=True)
     script = d.work / "smoke.txt"
@@ -251,7 +251,8 @@ def drive_migrate_smoke(d: Drive) -> None:
             raise DriveError(f"{who} was never seated")
     if not pilots.wait_for(r"^Pilot\d: standby: checkpoint \{ tick: \d+, restored: true \}$", 90):
         raise DriveError("no pilot's standby became ready")
-    # The fight: the enemy is 5 nm away, so missiles fly within seconds.
+    # Keep the close formation, but hold AI weapons so combat cannot kill
+    # Viper before the token rejoin checks its retained aircraft.
     d.sleep(15)
     d.log("killing the hosting game (SIGKILL)")
     kill_game(d, game)
@@ -303,7 +304,7 @@ def drive_migrate_smoke(d: Drive) -> None:
     master.expect(r"^relay moved listing=[0-9a-f]{16} from=127\.0\.0\.1:\d+ to=127\.0\.0\.1:\d+ channels=\d+$",
                   "the relay channel moved with the listing")
     if len(sorted(shots.glob("host-*.ppm"))) < 3:
-        d.problem("the hosting game wrote fewer than 3 pictures of its fight")
+        d.problem("the hosting game wrote fewer than 3 pictures of its flight")
 
 
 
@@ -408,8 +409,9 @@ def scenarios() -> list[Scenario]:
         Scenario(
             name="net-window-migrate-smoke", lane="net", args=[], driver=drive_migrate_smoke, uses=("bot",),
             window=True, timeout=600,
-            notes="the lead's smoke test (slice K10): the game hosts, listed on a local master; it is killed in the "
-            "fight; a standby pilot takes over, a relayed bot keeps its channel, and a bot killed after the migration "
+            notes="the lead's smoke test (slice K10): the game hosts, listed on a local master; it is killed in "
+            "flight with AI weapons held; a standby pilot takes over, a relayed bot keeps its channel, and a bot "
+            "killed after the migration "
             "rejoins its kept aircraft through the master with its token",
         ),
     ]

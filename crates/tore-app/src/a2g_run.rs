@@ -127,7 +127,7 @@ pub(crate) struct Options {
     ai: ai::Config,
 }
 
-const USAGE: &str = "--a2g-run THEATER STEM --aircraft ID --load REC --attack KIND [--from NM] [--altitude FT] [--speed KT] [--dive DEG] [--heading DEG] [--seconds S] [--target N] [--station N] [--count N] [--hold S] [--repeat N] [--gap S] [--defenses AAA SAM] [--surface-seed N] [--unit ID] [--designate ag|ir|harm|visual|none] [--break-at S] [--skill N] [--render OUT.png] [--record PATH [--verify-render]] [--laser-off S] [--buddy ID [--buddy-ai]] [--turn-away S] [--condition clear|cloudy|foggy|night] [--orbit-sight pin|track|free] [--orbit-slew S] [--orbit-close S] | --a2g-run THEATER STEM --pilot ai [--aircraft ID] [--load REC] [--target N] [--skill 0..3] [--profile straight|popup|fasthigh|dive|level|orbit|standoff|laydown|strafe] [--handback S [--mode ccip|lvl] [--trigger] [--laser] [--take-back S]] [--order KIND [--order-at S] [--order-class vehicles|tanks|structures|aaa|sams|ships] [--order-wingmen N] [--record PATH]] [--quick-wing [--clear-air-at S]] [--choose-store] [--buddy ID] [--render OUT.png --render-at S] [--mission-altitude FT] [--render-scene DIR] [--console-scene DIR --console-at S,...] [--condition clear|cloudy|foggy|night] [--offset FT] [--sead-at S]; player kinds also take [--render-scene DIR --scene-at S,...] [--condition clear|cloudy|foggy|night] [--from NM] [--altitude FT] [--speed KT] [--heading DEG] [--dive DEG] [--seconds S]";
+const USAGE: &str = "--a2g-run THEATER STEM --aircraft ID --load REC --attack KIND [--from NM] [--altitude FT] [--speed KT] [--dive DEG] [--heading DEG] [--seconds S] [--target N] [--station N] [--count N] [--hold S] [--repeat N] [--gap S] [--defenses AAA SAM] [--surface-seed N] [--unit ID] [--designate ag|ir|harm|visual|none] [--break-at S] [--skill N] [--render OUT.png] [--record PATH [--verify-render]] [--laser-off S] [--buddy ID [--buddy-ai]] [--turn-away S] [--condition clear|cloudy|foggy|night] [--orbit-sight pin|track|free] [--orbit-slew S] [--orbit-close S] | --a2g-run THEATER STEM --pilot ai [--aircraft ID] [--load REC] [--target N] [--skill 0..3] [--profile straight|popup|fasthigh|dive|level|orbit|standoff|laydown|strafe] [--handback S [--mode ccip|lvl] [--trigger] [--laser] [--take-back S]] [--order KIND [--order-at S] [--order-class vehicles|tanks|structures|aaa|sams|ships] [--order-wingmen N] [--record PATH]] [--quick-wing [--clear-air-at S]] [--choose-store] [--buddy ID] [--render OUT.png --render-at S] [--mission-altitude FT] [--render-scene DIR] [--console-scene DIR --console-at S,...] [--condition clear|cloudy|foggy|night] [--offset FT] [--sead-at S [--sead-site ID]...]; player kinds also take [--render-scene DIR --scene-at S,...] [--condition clear|cloudy|foggy|night] [--from NM] [--altitude FT] [--speed KT] [--heading DEG] [--dive DEG] [--seconds S]";
 
 fn options() -> AppResult<Options> {
     let args: Vec<String> = std::env::args().skip(2).collect();
@@ -255,6 +255,16 @@ fn options() -> AppResult<Options> {
             }
             "--offset" => o.ai.offset_ft = next()?.parse()?,
             "--sead-at" => o.ai.sead_at = Some(next()?.parse()?),
+            "--sead-after-shot" => o.ai.sead_after_shot = Some(next()?.parse()?),
+            "--sead-site" => {
+                let usage = "--sead-site needs a site id (as 0x50000010 or decimal)";
+                let text = next()?;
+                let id = match text.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).map_err(|_| usage)?,
+                    None => text.parse().map_err(|_| usage)?,
+                };
+                o.ai.sead_sites.push(id);
+            }
             "--follow-threat" => o.ai.follow_threat = true,
             "--follow-egress" => o.ai.follow_egress = true,
             "--place-site" => {
@@ -276,7 +286,45 @@ fn options() -> AppResult<Options> {
                 if !(bearing.is_finite() && range.is_finite() && range >= 0.) {
                     return Err(usage.into());
                 }
-                o.ai.place_site = Some((id, bearing, range));
+                o.ai.place_sites.push((id, bearing, range));
+            }
+            "--site-sight" => {
+                let usage = "--site-sight needs ID,FEET (the id as 0x50000010 or decimal; feet of at least 256)";
+                let text = next()?;
+                let Some((id, feet)) = text.split_once(',') else {
+                    return Err(usage.into());
+                };
+                let id = match id.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).map_err(|_| usage)?,
+                    None => id.parse().map_err(|_| usage)?,
+                };
+                let feet: f64 = feet.parse().map_err(|_| usage)?;
+                if !(feet.is_finite() && feet >= 256.) {
+                    return Err(usage.into());
+                }
+                o.ai.site_sights.push((id, feet));
+            }
+            "--terrain-nodes" => {
+                let radius: f64 = next()?.parse()?;
+                if !(radius.is_finite() && radius > 0.) {
+                    return Err("--terrain-nodes needs RADIUS_FT above zero".into());
+                }
+                o.ai.terrain_nodes = Some(radius);
+            }
+            "--terrain-map" => {
+                let usage = "--terrain-map needs RADIUS_FT,STEP_FT (a step of at least 100 ft)";
+                let text = next()?;
+                let Some((radius, step)) = text.split_once(',') else {
+                    return Err(usage.into());
+                };
+                let (radius, step): (f64, f64) = (
+                    radius.parse().map_err(|_| usage)?,
+                    step.parse().map_err(|_| usage)?,
+                );
+                if !(radius.is_finite() && step.is_finite() && radius > 0. && step >= 100.) {
+                    return Err(usage.into());
+                }
+                o.ai.terrain_map = Some((radius, step));
             }
             other if other.starts_with("--") => return Err(format!("unknown {other}").into()),
             other => positional.push(other.to_owned()),

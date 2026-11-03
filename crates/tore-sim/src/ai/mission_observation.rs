@@ -4,7 +4,7 @@ use super::{WorldObject, distance};
 use crate::ai::Experience;
 use crate::ai::awareness::ground::{
     Channels, FIGHTER_THREAT_RANGE_FT, FighterThreat, GroundPicture, GroundScene, GroundTrack,
-    Refresh, Subjects, off_nose_deg,
+    Refresh, Subjects, off_nose_deg, team_spot_ft,
 };
 use crate::ai::awareness::{self, Memory, Observation, ObservationSource, SourceTimestamps};
 use crate::ai::controller::TargetView;
@@ -620,6 +620,15 @@ impl super::AiMission {
             .filter(|s| s.side != crate::combat::live::NO_SIDE)
             .map(|s| s.object.clone())
             .collect();
+        // A hidden shoulder-fired team is never on the A-G radar or FLIR
+        // list: only the eye spots it, and only near (T.O.R.E opinionated,
+        // John 2026-10-29).
+        let hidden = |id: u32| subjects.get(id).is_some_and(|s| s.hidden);
+        let pages: Vec<GroundObject> = if objects.iter().any(|o| hidden(o.id)) {
+            objects.iter().filter(|o| !hidden(o.id)).cloned().collect()
+        } else {
+            objects.clone()
+        };
         let ceiling = self.ground_ceiling.as_deref();
         let obscured = |from: Vector, to: Vector| {
             !ceiling.is_some_and(|ceiling| ceiling.clear_above(from, to))
@@ -639,10 +648,11 @@ impl super::AiMission {
             let context = actor.observation_context();
             let observer = context.observer;
             let eye = |object: &GroundObject| {
-                actor
-                    .sensors
-                    .as_ref()
-                    .is_some_and(|s| eye_sees(s, &observer, object, &environment))
+                actor.sensors.as_ref().is_some_and(|s| {
+                    eye_sees(s, &observer, object, &environment)
+                        && (!hidden(object.id)
+                            || spots_team(&observer, object, context.experience, scene.weather))
+                })
             };
             match due {
                 Refresh::Rebuild => {
@@ -650,10 +660,11 @@ impl super::AiMission {
                         ground_tracks(
                             s,
                             &observer,
-                            &objects,
+                            (&pages, &objects),
                             &subjects,
                             &environment,
                             scene.weather,
+                            &eye,
                         )
                     });
                     let fighters = fighters(&actor.awareness, context.side, observer.position);
@@ -684,8 +695,51 @@ impl super::AiMission {
                     picture.reveal(tick, &painted, &subjects);
                 }
             }
+            // A hidden site that launches at this aircraft, or at a friendly
+            // in its air picture while the site is within its own listing
+            // distance, gives itself away (T.O.R.E opinionated, John
+            // 2026-10-29).
+            let id = actor.id();
+            let unmasked: Vec<u32> = scene
+                .launched
+                .iter()
+                .filter(|(plane, unit)| {
+                    *plane == id
+                        || actor.awareness.current_observations().any(|seen| {
+                            seen.target.id == *plane && seen.target.side == context.side
+                        }) && subjects.get(*unit).is_some_and(|site| {
+                            site.object.max_visible == 0
+                                || distance(observer.position, site.object.position)
+                                    <= f64::from(site.object.max_visible)
+                                        * track::VISIBILITY_UNIT_FT
+                        })
+                })
+                .map(|(_, unit)| *unit)
+                .collect();
+            if !unmasked.is_empty()
+                && let Some(picture) = actor.ground.as_mut()
+            {
+                picture.unmask(tick, &unmasked, &subjects);
+            }
         }
     }
+}
+
+/// Whether a pilot of `experience` at `observer` is near enough to spot a
+/// hidden shoulder-fired team: within [`team_spot_ft`] of it, scaled by the
+/// weather's visual effect between them.
+fn spots_team(
+    observer: &Observer,
+    object: &GroundObject,
+    experience: crate::ai::Experience,
+    weather: &sensors::Weather,
+) -> bool {
+    let visual = weather.percent(
+        track::selector::VISUAL,
+        observer.position[1],
+        object.position[1],
+    );
+    distance(observer.position, object.position) <= team_spot_ft(experience, visual)
 }
 
 /// The eye's rule for a ground object (fitted, from the player's): a
@@ -711,17 +765,20 @@ fn eye_sees(
 }
 
 /// One rebuild of a striker's lists: the A-G radar list (radar powered and
-/// working), the FLIR list (infrared working) and the eye, by the player's
-/// list rules, merged by object, nearest first (equal ranges by id). The
-/// AI reads all three at once without switching its scope (opinionated,
-/// agent).
+/// working) and the FLIR list (infrared working) of `pages_objects`, and the
+/// `eye` over `objects`, by the player's list rules, merged by object,
+/// nearest first (equal ranges by id). The AI reads all three at once
+/// without switching its scope (opinionated, agent). The pages' objects
+/// leave the hidden teams out; the eye spots them near.
+#[allow(clippy::too_many_arguments)]
 fn ground_tracks(
     sensors: &Sensors,
     observer: &Observer,
-    objects: &[GroundObject],
+    (pages_objects, objects): (&[GroundObject], &[GroundObject]),
     subjects: &Subjects<'_>,
     environment: &sensors::Environment<'_>,
     weather: &sensors::Weather,
+    eye: &dyn Fn(&GroundObject) -> bool,
 ) -> Vec<GroundTrack> {
     let mut tracks: std::collections::BTreeMap<u32, GroundTrack> = Default::default();
     let mut add = |id: u32, distance_ft: f64, channel: sensors::Channel| {
@@ -758,7 +815,7 @@ fn ground_tracks(
         if !working {
             continue;
         }
-        for listed in sensors.ground_list(page, observer, objects, environment, weather) {
+        for listed in sensors.ground_list(page, observer, pages_objects, environment, weather) {
             add(
                 listed.id(),
                 listed.contact.distance_ft,
@@ -768,7 +825,7 @@ fn ground_tracks(
     }
     let mut seen: Vec<(f64, u32)> = objects
         .iter()
-        .filter(|o| eye_sees(sensors, observer, o, environment))
+        .filter(|o| eye(o))
         .map(|o| (distance(observer.position, o.position), o.id))
         .collect();
     seen.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));

@@ -51,6 +51,8 @@ pub struct PauseMenu {
     pub(crate) path: Vec<usize>,
     pub(crate) focus: usize,
     pub(crate) pressed: Option<usize>,
+    /// The control a right press went down on.
+    pub(crate) right_pressed: Option<usize>,
     pub(crate) help_page: usize,
     /// Row labels drawn dim: rows that cannot be chosen now, with their
     /// reason beside them (the away player's Spawn in Aircraft). They still
@@ -84,6 +86,7 @@ impl PauseMenu {
     /// Forgets a mouse press, when the window loses the pointer.
     pub fn cancel_press(&mut self) {
         self.pressed = None;
+        self.right_pressed = None;
     }
 
     /// Focuses row `index` and returns it, or `None` past the last row.
@@ -198,6 +201,42 @@ impl PauseMenu {
         out
     }
 
+    /// The control at `point` in the 640x480 layer.
+    fn hit(&self, tree: &[MenuNode], look: &Look, point: Option<(f64, f64)>) -> Option<usize> {
+        let (x, y) = point?;
+        self.controls(tree, look.buttons, &|_| None)
+            .into_iter()
+            .find_map(|(id, (rx, ry, w, h), _)| {
+                ((rx as f64..(rx + w) as f64).contains(&x)
+                    && (ry as f64..(ry + h) as f64).contains(&y))
+                .then_some(id)
+            })
+    }
+
+    /// The right button went down or up at `point`. A row acts when the
+    /// press and the release are both on it; the caller turns the row's value
+    /// back (the left button turns it forward, see [`Event::Select`]). Only a
+    /// row answers: `None` for a tab, a bottom button or empty ground.
+    pub fn right_pointer(
+        &mut self,
+        tree: &[MenuNode],
+        look: &Look,
+        point: Option<(f64, f64)>,
+        down: bool,
+    ) -> Option<usize> {
+        let hit = self.hit(tree, look, point);
+        if down {
+            self.pressed = None;
+            self.right_pressed = hit.filter(|id| *id < 100);
+            return None;
+        }
+        let pressed = self.right_pressed.take();
+        if self.help {
+            return None;
+        }
+        pressed.filter(|id| Some(*id) == hit)
+    }
+
     /// The left button went down or up at `point` in the 640x480 layer. A
     /// control acts when the press and the release are both on it.
     pub fn pointer(
@@ -207,15 +246,7 @@ impl PauseMenu {
         point: Option<(f64, f64)>,
         down: bool,
     ) -> Event {
-        let hit = point.and_then(|(x, y)| {
-            self.controls(tree, look.buttons, &|_| None)
-                .into_iter()
-                .find_map(|(id, (rx, ry, w, h), _)| {
-                    ((rx as f64..(rx + w) as f64).contains(&x)
-                        && (ry as f64..(ry + h) as f64).contains(&y))
-                    .then_some(id)
-                })
-        });
+        let hit = self.hit(tree, look, point);
         if down {
             self.pressed = hit;
             return Event::None;
@@ -413,6 +444,33 @@ mod tests {
         }
         m.pointer(&t, &LOOK, Some((160., 75.)), true);
         assert_eq!(m.pointer(&t, &LOOK, Some((160., 55.)), false), Event::None);
+    }
+
+    #[test]
+    fn a_right_click_answers_only_for_a_row_pressed_and_released_on_it() {
+        let t = tree();
+        let mut m = PauseMenu::default();
+        // Row 1 of the first tab: press and release on it.
+        let row = Some((160., 75.));
+        assert_eq!(m.right_pointer(&t, &LOOK, row, true), None);
+        assert_eq!(m.right_pointer(&t, &LOOK, row, false), Some(1));
+        // Released on another row, or off the menu, it does not.
+        m.right_pointer(&t, &LOOK, row, true);
+        assert_eq!(m.right_pointer(&t, &LOOK, Some((160., 55.)), false), None);
+        m.right_pointer(&t, &LOOK, row, true);
+        assert_eq!(m.right_pointer(&t, &LOOK, None, false), None);
+        // A tab and a bottom button take no right click.
+        for point in [(30., 10.), (230., 455.)] {
+            m.right_pointer(&t, &LOOK, Some(point), true);
+            assert_eq!(m.right_pointer(&t, &LOOK, Some(point), false), None);
+        }
+        // A left press is forgotten when the right one goes down, and the
+        // right press when the window loses the pointer.
+        m.pointer(&t, &LOOK, row, true);
+        m.right_pointer(&t, &LOOK, row, true);
+        assert_eq!(m.pressed, None);
+        m.cancel_press();
+        assert_eq!(m.right_pointer(&t, &LOOK, row, false), None);
     }
 
     #[test]

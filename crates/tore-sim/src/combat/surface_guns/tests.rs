@@ -429,6 +429,34 @@ fn every_armed_surface_gun_has_a_row() {
 }
 
 #[test]
+fn the_tank_guns_are_the_main_battle_tanks_rows_only() {
+    let tanks: Vec<&str> = TABLE
+        .iter()
+        .filter(|row| is_tank_gun(row.record))
+        .flat_map(|row| row.units.iter().copied())
+        .collect();
+    assert_eq!(tanks, ["M1", "T72", "T80", "T90"]);
+    assert!(is_tank_gun("t72.jt"));
+    // The IFVs, APCs and everything else keep their rules.
+    for record in [
+        "BMP2.JT",
+        "BTR80.JT",
+        "M113.JT",
+        "M2.JT",
+        "SMLARMS.JT",
+        "ZSU57.JT",
+    ] {
+        assert!(!is_tank_gun(record), "{record}");
+    }
+    assert!(
+        TABLE
+            .iter()
+            .filter(|row| is_tank_gun(row.record))
+            .all(|row| row.mount == Mount::Vehicle)
+    );
+}
+
+#[test]
 fn flak_and_every_other_shell_reaches_its_fire_zone_before_it_expires() {
     for row in TABLE {
         let w = applied(row);

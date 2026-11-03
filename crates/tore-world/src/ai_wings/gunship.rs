@@ -146,6 +146,7 @@ pub(super) fn gun_stores(
                 fuze_arm_s: 0.,
                 frag_radius_ft: 0.,
                 falls_free: false,
+                flight: None,
             })
         })
         .collect()

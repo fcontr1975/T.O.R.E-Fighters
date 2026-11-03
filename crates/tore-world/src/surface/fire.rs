@@ -186,15 +186,20 @@ impl MountArc {
     /// The launch pitch of a missile from this rail for a line at
     /// `elevation_deg`.
     fn launch_pitch(&self, elevation_deg: f64) -> f64 {
-        let (low, high) = if self.limit[1] > 0. {
-            (
+        let [low, high] = self.launch_pitches();
+        elevation_deg.clamp(low, high.max(low))
+    }
+    /// The lowest and highest launch pitch of a missile from this rail,
+    /// degrees.
+    pub(crate) fn launch_pitches(&self) -> [f64; 2] {
+        if self.limit[1] > 0. {
+            [
                 (self.rest[1] - self.limit[1]).max(MIN_LAUNCH_PITCH_DEG),
                 (self.rest[1] + self.limit[1]).min(90.),
-            )
+            ]
         } else {
-            (MIN_LAUNCH_PITCH_DEG, 90.)
-        };
-        elevation_deg.clamp(low, high.max(low))
+            [MIN_LAUNCH_PITCH_DEG, 90.]
+        }
     }
 }
 
@@ -257,6 +262,11 @@ pub struct Arms {
     /// The NT's search, unready, attack and retarget times (quarter
     /// seconds), for a battery's controller.
     pub npc: [i32; 4],
+    /// A shoulder-fired SAM team (MANPADS, the record's
+    /// [`is_shoulder_fired_team`](tore_formats::surface_unit::SurfaceUnit::is_shoulder_fired_team)):
+    /// off the AI's threat picture until an aircraft spots it
+    /// (docs/spec/ai-strike.md, "Hidden shoulder-fired teams").
+    pub team: bool,
 }
 
 impl Arms {
@@ -432,11 +442,13 @@ impl Arsenal {
                 battery,
                 loads: Vec::new(),
                 npc: [0; 4],
+                team: false,
             };
             let in_battery_launcher =
                 battery.is_some_and(|b| surface.batteries[b].radar != unit.id);
             let mut sensor_range = None;
             if let Some(nt) = &record {
+                arms.team = nt.is_shoulder_fired_team();
                 arms.npc = [
                     nt.npc.search_frequency,
                     nt.npc.unready_attack,
@@ -617,6 +629,19 @@ impl WeaponArms {
     /// flag ([`live::engages_aircraft`], retail).
     pub fn aims_at_aircraft(&self) -> bool {
         live::engages_aircraft(&self.record)
+    }
+    /// The highest a target aircraft may stand above the hull's horizontal
+    /// plane for the weapon to engage it, degrees: a tank gun's
+    /// [`surface_guns::TANK_MAX_ELEVATION_DEG`] (opinionated, John,
+    /// 2026-10-24). `None` for every other weapon, whose mount arcs alone
+    /// limit it.
+    pub fn air_ceiling_deg(&self) -> Option<f64> {
+        self.tank_gun()
+            .then_some(surface_guns::TANK_MAX_ELEVATION_DEG)
+    }
+    /// A main battle tank's gun ([`surface_guns::is_tank_gun`]).
+    pub fn tank_gun(&self) -> bool {
+        matches!(self.kind, Kind::Gun { .. }) && surface_guns::is_tank_gun(&self.record.source)
     }
     /// Whether the weapon may be aimed at some ground unit or ship: its
     /// record's surface target flag ([`live::engages_surface`], retail) or
@@ -1055,6 +1080,28 @@ fn bearing_elevation(d: Vector) -> (f64, f64) {
     (d[0].atan2(d[2]), d[1].atan2(d[0].hypot(d[2])).to_degrees())
 }
 
+/// The elevation of `d` above the horizontal plane of a hull with `basis`,
+/// degrees: the vehicle's own frame, so a tank on a slope elevates its gun
+/// from its own deck.
+pub fn hull_elevation_deg(basis: &Basis, d: Vector) -> f64 {
+    let up = attitude::dot(d, basis.up);
+    let flat = attitude::dot(d, basis.right).hypot(attitude::dot(d, basis.forward));
+    up.atan2(flat).to_degrees()
+}
+
+/// The angular rate of a target at `offset` from a gun moving at
+/// `own_velocity`, the target moving at `velocity`, degrees a second: how fast
+/// the line of sight turns.
+pub fn angular_rate_deg_s(offset: Vector, velocity: Vector, own_velocity: Vector) -> f64 {
+    let range2 = attitude::dot(offset, offset);
+    if range2 < 1. {
+        return 0.;
+    }
+    let relative = sub(velocity, own_velocity);
+    let turn = attitude::cross(offset, relative);
+    (length(turn) / range2).to_degrees()
+}
+
 /// No terrain between `from` and `to`.
 pub fn line_of_sight(from: Vector, to: Vector, ground: &dyn Fn(f64, f64) -> f64) -> bool {
     let d = sub(to, from);
@@ -1129,6 +1176,10 @@ struct Look<'a> {
     /// It engages ground units and ships before aircraft.
     prefer_surface: bool,
     line_of_sight_needed: bool,
+    /// A tank gun's hull and elevation ceiling: an aircraft higher above
+    /// the hull's horizontal plane is not eligible
+    /// ([`WeaponArms::air_ceiling_deg`]).
+    ceiling: Option<(Basis, f64)>,
 }
 
 impl Look<'_> {
@@ -1161,6 +1212,10 @@ impl Look<'_> {
             in_range = true;
             if !self.band.contains(distance, d[1])
                 || self.search_limit.is_some_and(|limit| distance > limit)
+                || (!contact.surface
+                    && self
+                        .ceiling
+                        .is_some_and(|(basis, ceiling)| hull_elevation_deg(&basis, d) > ceiling))
                 || (self.line_of_sight_needed && !scene.line_of_sight(self.from, contact.position))
             {
                 continue;
@@ -1213,7 +1268,7 @@ fn deflect(direction: Vector, right: f64, up: f64) -> Vector {
 }
 
 /// A direction at `heading` (radians) and `pitch` (degrees).
-fn direction_at(heading: f64, pitch_deg: f64) -> Vector {
+pub(crate) fn direction_at(heading: f64, pitch_deg: f64) -> Vector {
     let pitch = pitch_deg.to_radians();
     [
         heading.sin() * pitch.cos(),
@@ -1394,6 +1449,7 @@ pub fn step(
                     search_limit: None,
                     prefer_surface: false,
                     line_of_sight_needed: true,
+                    ceiling: None,
                 }
                 .sees(contacts, scene)
             }
@@ -1420,8 +1476,17 @@ pub fn step(
                     let from = state.place(arms).eye;
                     let d = sub(aircraft.position, from);
                     let distance = length(d);
-                    (launch.contains(distance, d[1])
-                        && scene.line_of_sight(from, aircraft.position))
+                    let band = if live.weapon_rules == missiles::Rules::Energy {
+                        Band {
+                            max_range: f64::INFINITY,
+                            ..launch
+                        }
+                    } else {
+                        launch
+                    };
+                    (band.contains(distance, d[1])
+                        && scene.line_of_sight(from, aircraft.position)
+                        && energy_gate(live, state, arms, weapon, rail, aircraft, scene))
                     .then_some((distance, arms.unit, rail))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
@@ -1443,6 +1508,7 @@ pub fn step(
                 blind,
                 slow: optical,
                 hold: false,
+                lay: 0,
             },
         );
         let phase = slot.controller.phase();
@@ -1635,6 +1701,7 @@ fn step_weapon(
             search_limit: None,
             prefer_surface: false,
             line_of_sight_needed: false,
+            ceiling: None,
         }
         .sees(seen.contacts, scene),
         None => match seen.team {
@@ -1654,6 +1721,7 @@ fn step_weapon(
                 search_limit: arms.search_limit,
                 prefer_surface: seen.prefer_surface,
                 line_of_sight_needed: true,
+                ceiling: weapon.air_ceiling_deg().map(|c| (place.basis, c)),
             }
             .sees(seen.contacts, scene),
         },
@@ -1672,9 +1740,18 @@ fn step_weapon(
         (Some(aircraft), Kind::Missile) => {
             let d = sub(aircraft.position, muzzle);
             rail = state.rail_for(arms, weapon, aircraft.position);
+            let band = if live.weapon_rules == missiles::Rules::Energy {
+                Band {
+                    max_range: f64::INFINITY,
+                    ..weapon.launch
+                }
+            } else {
+                weapon.launch
+            };
             rail.is_some()
-                && weapon.launch.contains(length(d), d[1])
+                && band.contains(length(d), d[1])
                 && scene.line_of_sight(muzzle, aircraft.position)
+                && energy_gate(live, state, arms, weapon, rail.unwrap(), aircraft, scene)
         }
         (Some(aircraft), Kind::Gun { .. }) => {
             let d = sub(aircraft.position, muzzle);
@@ -1683,8 +1760,19 @@ fn step_weapon(
             weapon.launch.contains(length(d), d[1])
                 && arc.covers_heading((bearing - place.heading).to_degrees())
                 && arc.covers_elevation(elevation)
+                && (aircraft.surface
+                    || weapon
+                        .air_ceiling_deg()
+                        .is_none_or(|ceiling| hull_elevation_deg(&place.basis, d) <= ceiling))
                 && scene.line_of_sight(muzzle, aircraft.position)
         }
+    };
+    // A tank gun lays on an aircraft before its first round at it.
+    let lay = match target {
+        Some(target) if weapon.tank_gun() && !is_surface_id(target) => {
+            (control::TANK_AIR_LAY_S * 120.).round() as u64
+        }
+        _ => 0,
     };
     // A flak team holds its fire until it engages the target's group.
     let hold = match (seen.team, target) {
@@ -1724,6 +1812,7 @@ fn step_weapon(
             blind: false,
             slow: false,
             hold,
+            lay,
         },
     );
     let after = (engager.controller.phase(), engager.controller.target());
@@ -1856,8 +1945,99 @@ fn step_weapon(
     }
 }
 
-/// Launches the rounds of `fire` from `arms`' rail `rail` (a hardpoint
-/// index) and its siblings.
+/// The skill's share of a missile's reach under the energy rules: its
+/// experience-scaled launch range over the record's zone-1 range. The
+/// energy gate demands reach to a point this much nearer than the target
+/// is farther out ([`super::rotor_reach`] bounds the gate with it).
+pub(crate) fn energy_share(weapon: &WeaponArms) -> f64 {
+    (weapon.launch.max_range / f64::from(weapon.record.seeker.zones[1].maximum_range.max(1)))
+        .clamp(0.05, 1.)
+}
+
+/// The question the energy gate asks for a round of `weapon` from `arc` at
+/// `place` against an aircraft `id` at `position` moving at `velocity`: the
+/// launcher on the rail, pitched as it launches, and the aircraft as seen
+/// with its horizontal distance pushed out by the skill's share
+/// ([`energy_share`]), at its own height and velocity. The energy gate and
+/// the helicopter's threat rings ([`super::rotor_reach`]) ask the same.
+pub(crate) fn gate_question(
+    weapon: &WeaponArms,
+    place: &Place,
+    arc: &MountArc,
+    id: u32,
+    position: Vector,
+    velocity: Vector,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> (live::Launcher, seeker::Observation) {
+    let from = place.mount(arc, ground);
+    let (bearing, elevation) = bearing_elevation(sub(position, from));
+    let direction = direction_at(bearing, arc.launch_pitch(elevation));
+    let launcher = live::Launcher {
+        radar_power: true,
+        position: from,
+        basis: tore_sim::combat::guided::nose(direction),
+        speed_fps: length(place.velocity),
+        velocity: place.velocity,
+        bay_ready: true,
+        radar: true,
+        jammer: false,
+        alive: true,
+        body_present: true,
+        controls: Default::default(),
+    };
+    // The existing skill fraction is applied by demanding reach to the
+    // correspondingly farther observed bearing, at the same target altitude.
+    let fraction = energy_share(weapon);
+    let mut point = position;
+    for i in [0, 2] {
+        point[i] = from[i] + (point[i] - from[i]) / fraction;
+    }
+    let observation = seeker::Observation {
+        id,
+        position: point,
+        velocity,
+        quality: 1.,
+        range: length(sub(point, from)),
+        off_axis: 0.,
+    };
+    (launcher, observation)
+}
+
+/// Under the energy rules, whether the energy model says a round from
+/// `rail` reaches `target` (pushed out by the skill's share).
+#[allow(clippy::too_many_arguments)]
+fn energy_gate(
+    live: &mut live::State,
+    state: &SurfaceState,
+    arms: &Arms,
+    weapon: &WeaponArms,
+    rail: usize,
+    target: &Contact,
+    scene: &Scene<'_>,
+) -> bool {
+    if live.weapon_rules != missiles::Rules::Energy {
+        return true;
+    }
+    let place = state.place(arms);
+    let arc = weapon
+        .mounts
+        .iter()
+        .find(|m| m.index == rail)
+        .unwrap_or(&weapon.mounts[0]);
+    let (launcher, observation) = gate_question(
+        weapon,
+        &place,
+        arc,
+        target.id,
+        target.position,
+        target.velocity,
+        scene.ground,
+    );
+    live.request_energy_solution(arms.unit.0, rail, &weapon.record, launcher, observation);
+    live.energy_solution(arms.unit.0, rail, &weapon.record, launcher, observation)
+        .is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fire_missiles(
     state: &mut SurfaceState,
@@ -2089,6 +2269,15 @@ fn fire_gun(
         // or ship); a jammer widens a radar gun's.
         let mut error = if aircraft.surface {
             control::surface_aim_error_deg(arms.skill, radar)
+        } else if weapon.tank_gun() {
+            // A tank gun's error at an aircraft grows with how fast the
+            // gunner must track it.
+            let rate = angular_rate_deg_s(
+                sub(observed.position, muzzle),
+                observed.velocity,
+                place.velocity,
+            );
+            control::tank_air_aim_error_deg(arms.skill, rate)
         } else if surface_guns::is_small_arms(&weapon.record.source) {
             control::small_arms_aim_error_deg(arms.skill)
         } else {
@@ -2125,6 +2314,14 @@ fn fire_gun(
     let aim = gun_aim_point(weapon, &place, muzzle, observed);
     let distance = length(sub(aim, muzzle));
     let mut direction = deflect(sub(aim, muzzle), offset[0], offset[1]);
+    // A tank gun cannot elevate past its ceiling: a round laid higher (the
+    // lead on a climbing line, or the aim error above it) is not fired, and
+    // stays in the magazine.
+    let holding = holding
+        || (!aircraft.surface
+            && weapon
+                .air_ceiling_deg()
+                .is_some_and(|ceiling| hull_elevation_deg(&place.basis, direction) > ceiling));
     let mut end_tick = if flak {
         live::ticks_to_range(&weapon.record, distance)
     } else {

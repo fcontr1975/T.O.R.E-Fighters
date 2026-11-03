@@ -352,7 +352,9 @@ pub struct Estimates {
     pub can_lock: bool,
     /// What the HUD shows of the target or the boresight return.
     pub observation: Option<seeker::Observation>,
-    /// Maximum range of the shot, feet.
+    /// Start of the advised contiguous region, feet. None while unknown.
+    pub min_range: Option<f64>,
+    /// End of the advised contiguous region, feet.
     pub max_range: Option<f64>,
     /// The favourable firing band, feet.
     pub band: Option<FiringBand>,
@@ -958,6 +960,7 @@ pub fn build_with_terrain_kept(
         guidance_available: view.guidance_available(launcher),
         can_lock: at.can_lock(),
         observation: at.weapon_observation(),
+        min_range: at.estimated_min_range(),
         max_range: at.estimated_max_range(),
         band: at.favorable_firing_band(),
         in_range: at.in_estimated_range(),
@@ -1041,7 +1044,7 @@ pub fn build_with_terrain_kept(
     let mut inbound: Vec<InboundMissile> = state
         .projectiles
         .iter()
-        .filter(|p| p.incoming.is_some() && p.target == Some(plane))
+        .filter(|p| p.incoming.is_some() && p.target == Some(plane) && p.threatening())
         .map(|p| {
             let weapon = state.weapon(p);
             InboundMissile {

@@ -3545,6 +3545,7 @@ impl Viewer {
         audio: Option<&crate::audio::Audio>,
         screen: Option<&[u8]>,
     ) -> AppResult<Timing> {
+        crate::frame_log::replay_context(self.view, &self.world.theater.name, self.clock.speed());
         self.enter(renderer);
         let now = Instant::now();
         let seconds = self
@@ -3819,6 +3820,7 @@ impl Viewer {
         size: [u32; 2],
         canvas: &mut FlightCanvas,
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Ui);
         let labels = if self.ui.labels && !self.ui.hidden {
             self.labels(picture, camera, size)
         } else {

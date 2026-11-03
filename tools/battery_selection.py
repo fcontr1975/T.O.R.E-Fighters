@@ -83,9 +83,10 @@ FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
         "guns, missiles, F-22A/F-22N bays and live fire, jettison, countermeasures, combat smoke and evidence",
         (
             "flight-fight-*", "flight-attack-*", "flight-livefire-*", "flight-combatevidence-*",
-            "flight-combatsmoke-*", "flight-missileacceptance-*", "flight-missile-sag", "flight-jettison-*", "flight-bay-*",
+            "flight-combatsmoke-*", "flight-missileacceptance-*", "flight-missile-sag", "flight-missile-energy", "flight-missile-defeat", "flight-jettison-*", "flight-bay-*",
             "flight-wreckcontact-*", "flight-ac130-*",
-            "flight-countermeasures-*", "replay-combat-smoke-*", "menus-combat-smoke-*",
+            "flight-countermeasures-*",  # Includes the fixed-tick AI cadence regression.
+            "replay-combat-smoke-*", "menus-combat-smoke-*",
         ),
     ),
     "flight-damage": (
@@ -111,7 +112,7 @@ FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
         "AI against AI, one against one up to fifteen against fifteen, guns, skills, threats",
         (
             "ai-fight-*", "ai-pair-*", "ai-big-*", "ai-guns-*", "ai-separation-*", "ai-skill-*",
-            "ai-threat-*", "ai-long-1v1", "ai-long-5v5", "ai-long-15v15*", "ai-long-guns-*", "ai-long-hold-*",
+            "ai-threat-*", "ai-missile-launch-regression", "ai-missile-envelope-gaps", "ai-missile-player-cue", "ai-missile-turning-cue", "ai-long-1v1", "ai-long-5v5", "ai-long-15v15*", "ai-long-guns-*", "ai-long-hold-*",
         ),
     ),
     "ai-damage": ("AI with faults and damage", ("ai-damaged-*", "ai-fault-*", "ai-record-fault")),
@@ -152,7 +153,7 @@ FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "replay-feedback": ("dedicated feedback form, recording lifecycle and writer recovery", ("net-replay-feedback-*",)),
     "menus-screens": ("menu screens captured on the CPU", ("menus-snap-*", "menus-flight-map-*", "replay-snapshot-*", "menus-replays-bar-*", "menus-updates-bar-*")),
     "menus-creator": (
-        "the Quick Mission creator, start-up runs and loadout pages",
+        "the Quick Mission creator, start-up runs and loadout pages, including even store-pair maxima and saved-load migration",
         ("qmc-wing-loadout", "menus-start-*", "menus-loadout-*", "menus-tanks-*", "menus-ordnance-*", "menus-derived-stations", "menus-validate-creator", "menus-snap-quick-*"),
     ),
     "menus-validate": (
@@ -168,8 +169,8 @@ FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "surface": (
-        "surface units: ground target templates resolved, base-layout air defenses and their sides",
-        ("surface-*",),
+        "surface units: ground target templates resolved, base-layout air defenses and their sides, final-front audit cache",
+        ("surface-*", "bridge-audit", "bridge-end-ruins", "a2g-bridge-destruction"),
     ),
     "a2g": (
         "air-to-ground: the A-G, IR and HARM pages and designation (--a2g-radar), and the weapons flown through the real trigger by --a2g-run",
@@ -179,7 +180,7 @@ FAMILIES: dict[str, tuple[str, tuple[str, ...]]] = {
         "the AI strike driver (--a2g-run --pilot ai) and the AI's air-to-ground behaviour (slice ST-D onward)",
         ("ai-strike-*", "ai-sead-*", "ai-wing-*", "qmc-strike-*", "ai-jettison"),
     ),
-    "windowed-menus": ("captured windows: launches, terrain, previews, sizes", ("menus-window-*",)),
+    "windowed-menus": ("captured windows: launches, terrain, previews, sizes", ("menus-window-*", "menus-window-frame-log")),
     "flight-views": ("camera views and their rendering", ("replay-view-*", "render-*", "flight-target-camera-*", "flight-f12-hold")),
     # Replay lane.
     "replay-recording": (
@@ -331,6 +332,7 @@ MENU_FAMILIES = ("menus-screens", "menus-creator", "menus-validate")
 # The first matching rule wins. Patterns are fnmatch on the repository-relative path, where "*" also
 # crosses "/".
 RULES: tuple[Rule, ...] = (
+    _r("crates/vendor/naga/*", RENDER_FAMILIES, "patched shader translator", windowed=True),
     _r("crates/tore-app/src/terrain_seams*", ("vegetation", "flight-views"), "terrain seam masks, colours and vegetation belts", windowed=True),
     _r("crates/tore-app/src/terrain_audit.rs", ("terrain-colors",), "CPU retail tile import audit"),
     _r("crates/tore-app/src/vegetation*", ("vegetation", "flight-views"), "vegetation placement and atlas rendering", windowed=True),
@@ -406,6 +408,9 @@ RULES: tuple[Rule, ...] = (
     _r("crates/tore-sim/src/combat/live/delivery*", ("a2g", "flight-combat"), "the bomb and rocket sights in the live adapter"),
     _r("crates/tore-sim/src/combat/laser*", ("a2g", "flight-combat", "ai-strike"), "the laser designator, its spot and states"),
     _r("crates/tore-sim/src/combat/live/sighting*", ("a2g", "flight-combat", "ai-strike"), "the targeting sight and laser step, and the spots every aircraft's laser weapons home on"),
+    _r("crates/tore-sim/src/combat/missiles/*", ("flight-combat", "ai-fights", "surface", "a2g", "ai-strike"), "shared energy flight, seekers and bounded predictions"),
+    _r("crates/tore-formats/src/missile_data.rs", ("flight-combat", "surface", "a2g"), "authored physical weapon data"),
+    _r("crates/tore-formats/src/missile_motors.rs", ("flight-combat", "surface", "a2g"), "motor fits, class control budgets and post-burn defeat policy"),
     _r("crates/tore-sim/src/combat/missiles.rs", ("flight-combat", "flight-damage", "ai-fights", "ai-damage", "surface", "a2g", "ai-strike"), "missile motion and prediction, and the terrain line a command launch and a laser spot need"),
     _r("crates/tore-sim/src/combat/*", ("flight-combat", "flight-damage", "ai-fights", "ai-damage"), "combat"),
     _r("crates/tore-sim/src/aircraft_systems/*", ("flight-damage", "flight-combat", "ai-damage", "instruments"), "aircraft systems"),
@@ -451,6 +456,7 @@ RULES: tuple[Rule, ...] = (
     _r("crates/tore-world/src/frame.rs", ("flight-views", "instruments", "replay-recording", "link-cues"), "the flight frame"),
     _r("crates/tore-world/src/readout.rs", ("instruments", "flight-combat", "replay-live", "link-cues"), "the cockpit readout"),
     _r("crates/tore-world/src/snapshot.rs", ("replay-recording", "ai-fights"), "snapshots"),
+    _r("crates/tore-world/src/mission_layout/*", ("surface", "ai-missions", "menus-creator"), "runtime placement availability"),
     _r("crates/tore-world/src/mission_layout.rs", ("ai-missions", "menus-creator"), "mission layout"),
     _r(
         "crates/tore-world/src/mission.rs", ("ai-missions", "menus-creator", "net-fly", "ai-strike"),
@@ -731,6 +737,9 @@ RULES: tuple[Rule, ...] = (
     _r("crates/tore-app/src/navigation.rs", ("flight-landing", "airports", "ai-airfield", "menus-creator"), "navigation and airport lists"),
     _r("crates/tore-app/src/airfield_audit.rs", ("airports", "ai-airfield"), "airfield audit"),
     _r("crates/tore-app/src/ils_survey.rs", ("airports", "flight-landing", "ai-airfield"), "ILS survey"),
+    _r("crates/tore-app/src/bridge_audit.rs", ("surface",), "bridge placement, imported damage assets and captures"),
+    _r("crates/tore-app/src/surface_dump/*", ("surface",), "objective placement and mission start audits"),
+    _r("tools/objectives_audit.py", ("surface",), "objective audit runner"),
     _r("crates/tore-app/src/surface_dump.rs", ("surface",), "the surface dump and template sheets"),
     _r("crates/tore-app/src/surface_trace.rs", ("surface",), "the surface trace"),
     _r("crates/tore-app/src/flak_pass.rs", ("surface",), "the flak team probe (--flak-pass)"),
@@ -836,6 +845,8 @@ RULES: tuple[Rule, ...] = (
     _r("tools/test_battery_ai.py", (), "AI scenario tests", unit_tests=("test_battery_ai",)),
     _r("tools/battery_scenarios/menus.py", LANE_SMOKE["menus"], "menu scenarios", unit_tests=("test_battery_menus",)),
     _r("tools/test_battery_menus.py", (), "menu scenario tests", unit_tests=("test_battery_menus",)),
+    _r("tools/battery_scenarios/ai_defense.py", ("ai-regression",), "AI missile defensive flying", unit_tests=("test_battery_ai_defense",)),
+    _r("tools/test_battery_ai_defense.py", (), "AI missile defense regression checks", unit_tests=("test_battery_ai_defense",)),
     _r("tools/battery_scenarios/ai_strike.py", ("ai-strike",), "AI strike driver scenarios", unit_tests=("test_battery_ai_strike",)),
     _r("tools/test_battery_ai_strike.py", (), "AI strike scenario tests", unit_tests=("test_battery_ai_strike",)),
     _r("tools/test_battery_a2g.py", (), "air-to-ground scenario tests", unit_tests=("test_battery_a2g",)),

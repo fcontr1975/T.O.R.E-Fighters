@@ -3260,6 +3260,52 @@ again with an observer; the capture format did not change for it.
   score identity, and stable original member numbers on revival (2026-10-23),
   on top of the protocol 72 target-selection and protocol 71 handshake layout.
   The compatibility simulation version is 2 for these rules and checkpoint changes.
+  74 changes no bytes (2026-10-24, 0.2.2-rc1): tanks fire at aircraft only up to
+  20 degrees, after a lay and with wider aim, and the host migration resume keeps
+  a late Backlog, asks one checkpoint per resync and counts its drop timeout from
+  the first update. The compatibility simulation version is 3.
+  75 (2026-10-27, 0.2.2-rc1): guided ordnance flies on the energy model (new
+  projectile, decoy and prediction checkpoint state; inert stores clear target
+  and incoming flags), two-sided store points load in pairs, the AI missile
+  defense keeps new checkpointed state, bridges and Quick Mission surface
+  placement change world geometry, and hosts may publish a retried surface
+  seed. The compatibility simulation version is 4.
+  76 (2026-10-27, 0.2.2-rc1): the HUD readout carries an optional range-cue
+  minimum (estimates grow from 12 to 14 values), the prediction checkpoint
+  keeps up to four reachable range regions and advises the one for the present
+  range, the AI spaces countermeasure pairs at least 240 ticks apart, chaff
+  against radar stores is 1.30 times as effective, and three stores have new
+  motor fits. The compatibility simulation version is 5.
+  77 changes no message layout (2026-10-28, 0.2.2-rc1): chaff against radar
+  stores is 2.60 times as effective instead of 1.30, so decoy rolls differ.
+  The compatibility simulation version is 6.
+  78 (2026-10-28, 0.2.2-rc1): the mission text can carry a Quick Mission
+  `situation advantage|disadvantage` line that older games reject, and the
+  offered enemy distances come from a fixed table (a server moves an
+  unoffered `separation-nm` to the table's choice). A non-neutral situation
+  builds a different start. The compatibility simulation version is 7.
+  79 (2026-10-28, 0.2.2-rc1): an AI striker whose target dies before its
+  pass retargets at once, and the last 5 seconds before a release are not
+  broken off by a defense trigger; the strike checkpoint gains the release
+  estimate, commitment and retarget state. The compatibility simulation
+  version is 8.
+  80 changes no message layout (2026-10-28, 0.2.2-rc1): an AI helicopter
+  gives up a pass into a known threat ring seen before release and takes a
+  clear stand-off, and a line out of a ring must lead straight out. The
+  compatibility simulation version is 9.
+  81 (2026-10-29, 0.2.2-rc1): an AI helicopter's threat rings come from each
+  site's real launch reach at a helicopter, its stand-off advance from the
+  store's flight time, and only a shot from a site it did not know is an
+  ambush; helicopters search farther firing ranges and fixed-wing strikers
+  release stand-off stores outside known rings and turn away. Checkpoints
+  gain the site's helicopter reach and the strike's stand-off plan. The
+  compatibility simulation version is 10.
+  82 (2026-10-29, 0.2.2-rc1): shoulder-fired SAM teams stay off the AI's and
+  the player's sensors until spotted close in or given away by a launch, and
+  an AI helicopter ambushes a moving target from ahead of its path.
+  Checkpoints gain each pilot's spotted teams, the listing's team flag, the
+  AI picture's unmasked teams and the helicopter's move-ahead plan. The
+  compatibility simulation version is 11.
   Any change to the bytes raises it. A test
   (`wire_golden`) encodes a fixed set of sections and messages and compares
   them with a committed copy, `crates/tore-session/wire-golden.txt` (since

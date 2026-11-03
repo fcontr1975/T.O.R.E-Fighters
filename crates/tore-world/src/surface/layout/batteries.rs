@@ -210,7 +210,10 @@ pub(super) fn form(
                     continue;
                 };
                 next_radar += 1;
-                let pose = radar_pose(surface, inputs, &draft, obstacles, &entry);
+                let (pose, valid) = radar_pose(surface, inputs, &draft, obstacles, &entry, added);
+                if !valid {
+                    notes.push(format!("support fallback {:#010x} {kind}: no valid spot for the {:?} battery of {:#010x}; retained for final footprint placement", id.0, draft.system, draft.launchers[0].id.0));
+                }
                 let mut unit = added_unit(id, &entry, pose, lead);
                 unit.skill = draft
                     .launchers
@@ -239,16 +242,17 @@ pub(super) fn form(
     batteries
 }
 
-/// Where an added radar stands: up to [`JITTER_CANDIDATES`] seeded spots
+/// Where an added radar stands: up to [`SUPPORT_CANDIDATES`] seeded spots
 /// in the ring around the launchers' placed centroid, clear of them; the
-/// first that stands wins, else the first drawn.
+/// first valid, unoccupied spot wins. The fallback is explicitly reported.
 fn radar_pose(
     surface: &Surface,
     inputs: &mut Inputs<'_, '_>,
     draft: &Draft,
     obstacles: &Obstacles<'_>,
     entry: &catalog::Entry,
-) -> Pose {
+    added: &[Added],
+) -> (Pose, bool) {
     let placed: Vec<([i64; 2], i64)> = draft
         .launchers
         .iter()
@@ -275,8 +279,12 @@ fn radar_pose(
     } else {
         BATTERY_RADAR_FT
     };
+    let occupied = super::occupied(
+        surface.units.iter().chain(added.iter().map(|a| &a.unit)),
+        inputs.types,
+    );
     let mut first = None;
-    for _ in 0..JITTER_CANDIDATES {
+    for _ in 0..SUPPORT_CANDIDATES {
         let (offset, bearing) = ring(&mut draws, band);
         let pose = Pose {
             at: [centre[0] + offset[0], centre[1] + offset[1]],
@@ -287,9 +295,12 @@ fn radar_pose(
         let clear = placed
             .iter()
             .all(|(at, r)| distance2(*at, pose.at) >= (r + size).pow(2));
-        if clear && stands(inputs.ground, obstacles, pose.at, size, false) {
-            return pose;
+        if clear
+            && clear_of_units(pose.at, size, &occupied)
+            && stands(inputs.ground, obstacles, pose.at, size, false)
+        {
+            return (pose, true);
         }
     }
-    first.expect("at least one candidate")
+    (first.expect("a nonempty support search"), false)
 }

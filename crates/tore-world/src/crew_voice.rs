@@ -1143,7 +1143,7 @@ impl CrewVoice {
         let incoming = state
             .projectiles
             .iter()
-            .filter(|p| p.incoming == Some(host.aircraft))
+            .filter(|p| p.incoming == Some(host.aircraft) && p.threatening())
             .filter_map(|p| {
                 let w = state.weapon(p);
                 (w.seeker.signature != 0 && !is_gun(w)).then_some(Incoming {

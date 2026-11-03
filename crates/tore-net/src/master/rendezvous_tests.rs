@@ -520,10 +520,11 @@ fn a_silent_master_is_asked_with_back_off_never_more_than_once_a_second() {
         .collect();
     let gaps: Vec<f64> = sends.windows(2).map(|p| p[1] - p[0]).collect();
     assert!(gaps.iter().all(|gap| *gap >= 1.0), "{gaps:?}");
-    // Every 3 s for the first 10 s, then 2, 4, 8, 16, 32 and 60 s.
+    // Every 3 s for the first 10 s, then 2, 4, 8 and 15 s (0.2.2; 16, 32
+    // and 60 s before).
     let rounded: Vec<u64> = gaps.iter().map(|g| g.round() as u64).collect();
-    assert_eq!(&rounded[..9], &[3, 3, 3, 3, 2, 4, 8, 16, 32], "{gaps:?}");
-    assert!(rounded[9..].iter().all(|g| *g == 60), "{gaps:?}");
+    assert_eq!(&rounded[..7], &[3, 3, 3, 3, 2, 4, 8], "{gaps:?}");
+    assert!(rounded[7..].iter().all(|g| *g == 15), "{gaps:?}");
     let silent: Vec<_> = rig
         .events
         .iter()
@@ -533,7 +534,7 @@ fn a_silent_master_is_asked_with_back_off_never_more_than_once_a_second() {
     assert_eq!(rig.rendezvous.state(), ListingState::Silent);
     // When it comes back the next try lists the game.
     rig.master.up = true;
-    rig.run_until(61.0, |rig| !rig.master.browse().is_empty())
+    rig.run_until(16.0, |rig| !rig.master.browse().is_empty())
         .expect("listed once the master answers");
     rig.run(0.1);
     assert!(matches!(
@@ -800,7 +801,10 @@ fn a_master_with_two_addresses_is_tried_in_turn_when_silent() {
     rig.rendezvous
         .set_masters(vec![address(MASTER), other], Vec::new(), now);
     rig.rendezvous.set_listed(true, now);
+    // Silent at 10 s; the next request, 2 s on, goes to the next address.
     rig.run(10.5);
+    assert_eq!(rig.rendezvous.master(), Some(address(MASTER)));
+    rig.run(2.0);
     assert_eq!(rig.rendezvous.master(), Some(other));
     assert!(rig.rendezvous.is_master(address("[2001:db8::1]:26902")));
 }

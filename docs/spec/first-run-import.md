@@ -28,6 +28,9 @@ format is in [SETUP.ESA notes](../formats/esa-installer.md).
    - a list of detected sources, each labelled by kind (see below);
    - **Import** and **Quit**. Alt+F4 (Command-Q on macOS) also quits, as on every
      other screen.
+   - on Windows, the [graphics API choice](graphics-options.md#graphics-api) on the
+     title line, Vulkan or DirectX 12. Tab reaches it, and Left, Right, Enter or Space
+     change it. It applies when the game starts, with no restart.
 
    The screen is drawn on a flat panel with the larger of the two bundled
    menu fonts, because on a first run there is no retail art on disk to draw

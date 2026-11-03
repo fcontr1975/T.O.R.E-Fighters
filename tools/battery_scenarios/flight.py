@@ -7,10 +7,12 @@ Every scenario is one `tore-app` run. The headless ones use the flight probe
 See docs/testing/lane-flight.md.
 """
 import os
+import csv
 import re
 import time
+from pathlib import Path
 
-from battery import Scenario
+from battery import Scenario, Step
 from battery_scenarios._debrief import kill_hit_problems
 from battery_scenarios._powered import powered_scenarios
 from battery_scenarios._strips import ground_airport
@@ -780,10 +782,123 @@ def check_missile_sag(output: str) -> list[str]:
     return problems
 
 
+def check_missile_energy(work, _output):
+    """Actual episode logs must not compound; scripted worker counts must agree."""
+    problems = []
+    try:
+        runs = work / "energy" / "runs.csv"
+        if runs.read_bytes() != (work / "energy-serial" / "runs.csv").read_bytes():
+            problems.append("energy study differs between serial and parallel workers")
+        with runs.open() as stream:
+            rows = list(csv.DictReader(stream))
+        if len(rows) != 240:
+            problems.append(f"expected 240 energy shots, got {len(rows)}")
+        for row in rows:
+            devices, rolls = int(row["devices"]), int(row["rolls"])
+            limit = (devices + 7) // 8 if row["profile"] == "cm-hammer" else devices
+            if rolls > limit:
+                problems.append(f"repeated episode rolls: {row['missile']} {rolls} from {devices} devices")
+                break
+        outcomes = {row["outcome"] for row in rows}
+        if "hit" not in outcomes or not outcomes.intersection({"ground", "energy", "seeker-lost", "expired"}):
+            problems.append("energy study lacks both an intercept and a physical/seeker miss")
+        if not any(row["range"] == "long" and row["hit"] == "0" and row["control_loss_s"] for row in rows):
+            problems.append("long energy shots never lost physical control")
+        if not any(int(row["rolls"]) for row in rows):
+            problems.append("energy study did not exercise a decoy roll")
+        with (work / "spec-compat" / "runs.csv").open() as stream:
+            legacy = list(csv.DictReader(stream))
+        if len(legacy) != 8 or not any(int(row["rolls"]) for row in legacy):
+            problems.append("historical high-susceptibility study did not finish eight decoy trials")
+    except (OSError, ValueError, KeyError) as error:
+        problems.append(f"unreadable energy study: {error}")
+    return problems
+
+
+
+def check_missile_defeat(work: Path, _output: str) -> list[str]:
+    """Post-burn defeat must be observed and never followed by a scored hit."""
+    import csv
+    try:
+        first = (work / "defeat" / "runs.csv").read_bytes()
+        second = (work / "defeat-serial" / "runs.csv").read_bytes()
+        rows = list(csv.DictReader(first.decode().splitlines()))
+        near = (work / "defeat-near" / "runs.csv").read_bytes()
+        near_serial = (work / "defeat-near-serial" / "runs.csv").read_bytes()
+        rows += list(csv.DictReader(near.decode().splitlines()))
+        defeated = [row for row in rows if row["defeat_s"]]
+        problems = []
+        if near != near_serial:
+            problems.append("inert near-pass differs between serial and parallel workers")
+        if not any(row["closest_inert_ft"] and
+                   float(row["closest_inert_ft"]) <= float(row["inert_radius_ft"])
+                   for row in defeated):
+            problems.append("no inert body passed within its target's fuze/contact radius")
+        if any(int(row["inert_damage"]) for row in defeated):
+            problems.append("an inert body damaged its target")
+        if first != second:
+            problems.append("defeat study differs between serial and parallel workers")
+        if not defeated:
+            problems.append("defeat study never reached the post-burn Mach threshold")
+        if any(row["hit"] != "0" for row in defeated):
+            problems.append("a defeated store scored a hit")
+        return problems
+    except (OSError, KeyError, ValueError) as error:
+        return [f"unreadable defeat study: {error}"]
+
+
+def check_countermeasure_cadence(output):
+    """One deterministic AI flight, actual fixed-tick cartridge release times."""
+    ticks = [int(t) for t in re.findall(r"missile-study: device AIM9M\.JT seed 0 .*?release_tick=(\d+) kind=Flare", output)]
+    if len(ticks) < 4:
+        return [f"cadence fixture produced fewer than two pairs: {ticks}"]
+    problems = []
+    if any(b - a != 30 for a, b in zip(ticks[::2], ticks[1::2])):
+        problems.append(f"second cartridge is not 30 ticks after its pair start: {ticks}")
+    if any(b - a < 240 for a, b in zip(ticks[::2], ticks[2::2])):
+        problems.append(f"AI pair starts are less than 240 ticks apart: {ticks}")
+    if len(ticks) > 6:
+        problems.append(f"single-threat device budget exceeded: {ticks}")
+    return problems
+
+
 def combat_scenarios() -> list[Scenario]:
     out = [Scenario(name="flight-wreckcontact-f18", lane="flight",
                     args=["--combat-smoke", "--aircraft", "f18", "--no-audio"],
                     check=check_wreck_contacts, timeout=300)]
+    out.append(Scenario(name="flight-countermeasures-cadence", lane="flight",
+                        args=["--missile-study", "{work}/cadence", "--missiles", "AIM9M",
+                              "--profiles", "ai", "--ranges", "short", "--aspects", "head",
+                              "--altitudes", "co", "--seeds", "1", "--threads", "1", "--ai",
+                              "--skill", "ace", "--trace", "--missile-model", "energy"],
+                        outputs=["cadence/runs.csv"], check=check_countermeasure_cadence,
+                        timeout=180, notes="AI pairs span decoy episodes and retain the device budget"))
+    study = ["--missiles", "AIM9M,AIM120", "--profiles", "straight,break,beam+cm-ai@off,dive,cm-hammer",
+             "--ranges", "short,medium,long", "--aspects", "head,tail", "--altitudes", "low,high",
+             "--seeds", "2", "--missile-model", "energy"]
+    out.append(Scenario(name="flight-missile-energy", lane="flight",
+                        args=["--missile-study", "{work}/energy", "--threads", "4"] + study,
+                        then=[Step(args=["--missile-study", "{work}/energy-serial", "--threads", "1"] + study),
+                              Step(args=["--missile-study", "{work}/spec-compat", "--threads", "1",
+                                         "--missile-model", "spec", "--missiles", "AIM9B", "--profiles", "cm-hammer",
+                                         "--ranges", "short", "--aspects", "tail", "--altitudes", "co", "--seeds", "8"])],
+                        outputs=["energy/runs.csv", "energy-serial/runs.csv", "spec-compat/runs.csv"], check_work=check_missile_energy,
+                        timeout=180, notes="Shared energy flight, physical decoy episodes and worker determinism"))
+    defeat = ["--missiles", "AIM120,AA8", "--profiles", "straight,dive", "--ranges", "long",
+              "--aspects", "head,tail", "--altitudes", "low,high", "--seeds", "2",
+              "--missile-model", "energy"]
+    out.append(Scenario(name="flight-missile-defeat", lane="flight",
+                        args=["--missile-study", "{work}/defeat", "--threads", "4"] + defeat,
+                        then=[Step(args=["--missile-study", "{work}/defeat-serial", "--threads", "1"] + defeat),
+                              Step(args=["--missile-study", "{work}/defeat-near", "--threads", "4",
+                                         "--missiles", "AIM120", "--profiles", "straight", "--ranges", "defeat-edge",
+                                         "--aspects", "head", "--altitudes", "low", "--seeds", "2", "--missile-model", "energy"]),
+                              Step(args=["--missile-study", "{work}/defeat-near-serial", "--threads", "1",
+                                         "--missiles", "AIM120", "--profiles", "straight", "--ranges", "defeat-edge",
+                                         "--aspects", "head", "--altitudes", "low", "--seeds", "2", "--missile-model", "energy"])],
+                        outputs=["defeat/runs.csv", "defeat-serial/runs.csv", "defeat-near/runs.csv", "defeat-near-serial/runs.csv"],
+                        check_work=check_missile_defeat, timeout=180,
+                        notes="Post-burn inert defeat and serial/parallel equality"))
     out.append(Scenario(name="flight-missile-sag", lane="flight",
                         args=["--missile-sag", "--no-audio"],
                         check=check_missile_sag, timeout=120))

@@ -29,7 +29,8 @@ pub mod kind {
     /// A guided weapon followed a decoy. Subject: shooter. Object: the
     /// aircraft that released the decoy. Fields: `projectile`, `decoy`
     /// (Text: chaff or flare), `roll` and `threshold` (Int: the decoy roll
-    /// passed when roll < threshold), `susceptibility` and `effectiveness`
+    /// passed when roll < threshold), `roll_bound` (Int: 100 or 10000; absent
+    /// older entries use 100), `susceptibility` and `effectiveness`
     /// (Int, percent), `number` (Int: the chaff cartridge or flare that fooled
     /// it, the `number` of its `combat.countermeasure`; absent in recordings
     /// made before it was kept), `reason`.
@@ -421,7 +422,8 @@ pub mod kind {
     /// `weapon` (Text: the source name), `rounds`, `launch` (Text: cued or
     /// bore), `seeker` (Text: the status label), `delivery` (Text, empty or
     /// CCIP or LVL), `readiness` (Text), `guidance`, `in_range`, `hit` (Int,
-    /// percent), `max_ft`, `band_min`, `band_max` (`band_max` 0 means no
+    /// percent), `min_ft` (absent older entries use the decoded minimum),
+    /// `max_ft`, `band_min`, `band_max` (`band_max` 0 means no
     /// band), `radar`, and `mount_x`, `mount_y`, `mount_z` when the station
     /// is not at the reference point. A recording made before this event
     /// still plays: the HUD camera keeps the derived picture. Version 4
@@ -609,6 +611,7 @@ pub mod field {
     pub const ROLL: &str = "roll";
     pub const ROLLS: &str = "rolls";
     pub const THRESHOLD: &str = "threshold";
+    pub const ROLL_BOUND: &str = "roll_bound";
     pub const SUSCEPTIBILITY: &str = "susceptibility";
     pub const EFFECTIVENESS: &str = "effectiveness";
     pub const LAUNCH_RANGE_FT: &str = "launch_range_ft";
@@ -668,6 +671,7 @@ pub mod field {
     /// The shot is inside the weapon's range.
     pub const IN_RANGE: &str = "in_range";
     /// Maximum range of the shot, feet. Zero means none was estimated.
+    pub const MIN_FT: &str = "min_ft";
     pub const MAX_FT: &str = "max_ft";
     /// Near edge of the firing band, feet.
     pub const BAND_MIN: &str = "band_min";

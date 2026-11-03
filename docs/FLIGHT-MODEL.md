@@ -8,6 +8,12 @@
 > the original's internals, it is out of date.
 > <!-- tore-header v2 -->
 
+Loaded aircraft weight uses the public/class masses of powered guided stores,
+as requested by John on 2026-10-25. The per-store differences are listed in
+[missile energy data](formats/missile-energy-data.md#loaded-aircraft-mass-changes).
+This changes payload, takeoff weight and weight-dependent flight response;
+it does not change which aircraft flight adapter is selected.
+
 The [F/A-XX concept](spec/fa-xx.md) shares the F-22 flight response in all
 three adapters. Its split flap rudder animation represents the existing yaw
 authority; separate differential drag and fin removal effects are not simulated.
@@ -24,6 +30,11 @@ clock, device and fuel boundaries are explicitly authored and the flight stops a
 unsupported contact; ordinary free flight has working authored ground contact.
 This is separate from legacy and hybrid.
 [Acceptance and limits](baselines/native-live-flight.md).
+
+Store loading follows the [even-paired-load contract](spec/stores-on-pylons.md#even-paired-loads).
+Its rounded quantities feed the existing total payload mass and load-dependent
+drag. There is no per-wing store drag torque or lateral store-CG model; paired
+loads start with equal masses at mirrored positions.
 
 ## Next scheduled work
 

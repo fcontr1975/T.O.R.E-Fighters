@@ -116,11 +116,23 @@ impl Mesh {
     /// Existing level airport support takes precedence over a new foundation's
     /// centre sample. Buildings and vehicles then agree with runway contact.
     pub fn build_with_support(
+        pads: Vec<Pad>,
+        cols: usize,
+        rows: usize,
+        raw: impl Fn(f32, f32) -> f32,
+        support: impl Fn(&Pad) -> Option<f64>,
+    ) -> Self {
+        Self::build_with_banks(pads, cols, rows, raw, support, &[])
+    }
+
+    /// Bridge bank earthworks share the exact mesh used for terrain contact.
+    pub fn build_with_banks(
         mut pads: Vec<Pad>,
         cols: usize,
         rows: usize,
         raw: impl Fn(f32, f32) -> f32,
         support: impl Fn(&Pad) -> Option<f64>,
+        banks: &[super::bridges::Bank],
     ) -> Self {
         // Snap support boundaries to the same coordinates stored in the mesh.
         // Otherwise rounding a core edge into its skirt can tilt the plateau
@@ -162,7 +174,11 @@ impl Mesh {
         }
         let cell = f64::from(CELL_FEET);
         let mut affected: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-        for (id, pad) in pads.iter().enumerate() {
+        for (id, pad) in pads
+            .iter()
+            .chain(banks.iter().map(|b| &b.bounds))
+            .enumerate()
+        {
             let low = pad
                 .min
                 .map(|v| ((v - SKIRT_FT) / cell).floor().max(0.) as usize);
@@ -186,7 +202,24 @@ impl Mesh {
             for axis in 0..2 {
                 let mut cuts = Vec::new();
                 for id in &ids {
-                    let p = &pads[*id];
+                    let Some(p) = pads.get(*id) else {
+                        let b = &banks[*id - pads.len()];
+                        cuts.extend([
+                            b.bounds.min[axis],
+                            b.core.min[axis],
+                            b.core.max[axis],
+                            b.bounds.max[axis],
+                        ]);
+                        let lo = b.bounds.min[axis].max(if axis == 0 { x0 } else { z0 });
+                        let hi =
+                            b.bounds.max[axis].min(if axis == 0 { x0 + cell } else { z0 + cell });
+                        let mut at = (lo / 64.).ceil() * 64.;
+                        while at < hi {
+                            cuts.push(at);
+                            at += 64.;
+                        }
+                        continue;
+                    };
                     cuts.extend([
                         p.min[axis] - SKIRT_FT,
                         p.min[axis],
@@ -223,14 +256,21 @@ impl Mesh {
                 let mut weight = 0.;
                 let mut top = 0.;
                 for id in &ids {
-                    let pad = &pads[*id];
+                    let Some(pad) = pads.get(*id) else {
+                        continue;
+                    };
                     let w = pad.weight(f64::from(x), f64::from(z));
                     if w > weight {
                         weight = w;
                         top = pad.height;
                     }
                 }
-                let h = f64::from(raw(x, z));
+                let mut h = f64::from(raw(x, z));
+                for id in &ids {
+                    if let Some(b) = id.checked_sub(pads.len()).and_then(|i| banks.get(i)) {
+                        h = b.height(f64::from(x), f64::from(z), h);
+                    }
+                }
                 [x, (h + (top - h) * weight) as f32, z]
             };
             let mut triangles = Vec::new();

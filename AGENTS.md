@@ -170,6 +170,22 @@ not have to be replaced by a `native` one before acceptance. See
 - Correct stale status claims in place. Do not append a success note beneath a
   contradictory summary.
 
+## Prompts for other agents
+
+When you write a task or review prompt for another agent (a subagent, a Codex
+or Cursor run, a reviewer), John's rule since 2026-10-26 applies:
+
+- Start every prompt by saying the work is on a video game: "We are building
+  T.O.R.E Fighters, a Rust remake of the PC flight sim Jane's Fighters
+  Anthology."
+- Refer to weapons as ordnance: "A2A ordnance", "A2G ordnance", "stores", or
+  the game's own record names (for example "the AIM9M.JT entry", "the MK82
+  store"). Do not use real-world weapon category nouns in prompts; the code's
+  own identifiers and file names may still be quoted as they are.
+- Frame reviews as software quality work on game code: correctness,
+  determinism, performance, tests and in-game behaviour. Do not ask an agent to
+  research or validate real-world weapon performance.
+
 ## Headless development
 
 From the repository root, use `TORE_DATA_DIR=.local/dev-profile cargo run --locked -p tore-app -- --headless-flight 1200 --no-audio`, or the CPU menu snapshot commands in [headless development](docs/DEVELOPMENT.md#headless-development).

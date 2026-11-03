@@ -72,6 +72,8 @@ impl Worker {
             condition: world.condition,
             environment: Default::default(),
             airport_scene: world.airport_scene.clone(),
+            placement_objects: Vec::new(),
+            placement_runways: Vec::new(),
             airfield_anchors: BTreeMap::new(),
             static_manifest: Vec::new(),
             catalog: Vec::new(),

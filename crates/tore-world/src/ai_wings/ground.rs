@@ -9,18 +9,21 @@
 //!   aboard) the objective's air defences;
 //! - describes the ground objects to the mission when a picture is due: what
 //!   the ground lists read of each combat row, its side and, for an armed
-//!   unit or a radar, its reach and whether it can guide.
+//!   unit or a radar, its reach and whether it can guide; whether it is a
+//!   hidden shoulder-fired SAM team, and which of those have a round in the
+//!   air at an aircraft (a launch gives a team away).
 //!
 //! It holds no state. With no striker it costs one scan of the actors and
 //! changes nothing, so air-to-air missions are untouched.
 use super::AiWings;
+use crate::surface::rotor_reach::RotorReach;
 use crate::surface::{Surface, UnitId, fire};
 use crate::terrain::Terrain;
 use tore_sim::ai::awareness::ground::{DefenseFacts, GroundScene, GroundSubject};
 use tore_sim::ai::engagement::{SEAD_BRIEFING_RADIUS_FT, StrikeObjective, StrikeRole};
 use tore_sim::ai::targeting::Side;
 use tore_sim::combat::live;
-use tore_sim::combat::missiles::TargetRole;
+use tore_sim::combat::missiles::{Rules, TargetRole};
 
 /// The anti-radiation seeker signature (docs/formats/radar.md, "HARM page").
 const ANTI_RADIATION: u8 = 4;
@@ -37,16 +40,35 @@ pub(super) fn step(
     if !wings.mission.ground_due() {
         return;
     }
-    let subjects = subjects(state, &world.surface);
+    let subjects = subjects(state, &world.surface, &mut wings.rotor_reach);
     let painted = revealed(&wings.painting, &world.surface.arsenal);
+    let launched = launched(state);
     wings.mission.observe_ground(
         GroundScene {
             subjects: &subjects,
             weather: state.sensor_weather(),
             painted: &painted,
+            launched: &launched,
         },
         ground,
     );
+}
+
+/// The hidden shoulder-fired teams' rounds in the air, as (aircraft aimed
+/// at, team) pairs, ascending (T.O.R.E opinionated, John 2026-10-29: a
+/// launch gives the team away). A round lives for seconds, so the
+/// quarter-second refresh never misses one.
+fn launched(state: &live::State) -> Vec<(u32, u32)> {
+    let mut pairs: Vec<(u32, u32)> = state
+        .projectiles
+        .iter()
+        .filter(|p| p.gun_round.is_none())
+        .filter_map(|p| Some((p.target?, p.owner)))
+        .filter(|(_, owner)| state.ground_listing(*owner).is_some_and(|l| l.team))
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
 }
 
 /// What a radar painting an aircraft gives away (slice H4): the radar, and
@@ -94,7 +116,8 @@ fn brief(wings: &mut AiWings, state: &live::State, surface: &Surface) {
 /// The objective a striker of `side` is briefed on: the mission's destroy
 /// targets that belong to another side (none for Redfor in Quick Mission,
 /// whose targets are its own), their centre, and for a SEAD striker the
-/// hostile armed units and radars within 5 nm of that centre.
+/// hostile armed units and radars within 5 nm of that centre, the hidden
+/// shoulder-fired teams aside.
 pub(super) fn objective(
     state: &live::State,
     surface: &Surface,
@@ -123,6 +146,9 @@ pub(super) fn objective(
             .units
             .iter()
             .filter(|arms| !arms.weapons.is_empty() || arms.radar.is_some())
+            // No briefing knows where a shoulder-fired team hides (T.O.R.E
+            // opinionated, John 2026-10-29).
+            .filter(|arms| !arms.team)
             .map(|arms| arms.unit.0)
             .filter(|id| !targets.contains(id) && hostile(*id))
             .filter(|id| {
@@ -144,31 +170,40 @@ pub(super) fn objective(
 /// Every object a ground list may hold, as the mission reads it: the
 /// surface rows and the aircraft on the ground or in an airfield sequence,
 /// in row order. Flying aircraft are the air picture's.
-pub(super) fn subjects(state: &live::State, surface: &Surface) -> Vec<GroundSubject> {
+pub(super) fn subjects(
+    state: &live::State,
+    surface: &Surface,
+    rotor: &mut RotorReach,
+) -> Vec<GroundSubject> {
     state
         .targets
         .iter()
         .filter(|t| t.role == TargetRole::Surface || !t.airborne || state.airfield_attached(t.id))
-        .map(|t| GroundSubject {
-            object: state.ground_object(t),
-            side: t.side,
-            defense: surface
-                .arsenal
-                .arms(UnitId(t.id))
-                .filter(|arms| !arms.weapons.is_empty() || arms.radar.is_some())
-                .map(|arms| defense(arms, t, state, &surface.arsenal)),
+        .map(|t| {
+            let arms = surface.arsenal.arms(UnitId(t.id));
+            GroundSubject {
+                object: state.ground_object(t),
+                side: t.side,
+                defense: arms
+                    .filter(|arms| !arms.weapons.is_empty() || arms.radar.is_some())
+                    .map(|arms| defense(arms, t, state, &surface.arsenal, rotor)),
+                // The host marks the teams that are no mission target.
+                hidden: state.ground_listing(t.id).is_some_and(|l| l.team),
+            }
         })
         .collect()
 }
 
 /// An armed unit's or radar's defence facts: the farthest launch zone of its
-/// missiles and of its guns, whether it can guide (its battery's radar
+/// missiles and of its guns, how far its missiles may be launched at a
+/// helicopter ([`rotor_reach`]), whether it can guide (its battery's radar
 /// stands, or it guides by itself), and its heading.
 fn defense(
     arms: &fire::Arms,
     row: &live::Target,
     state: &live::State,
     arsenal: &fire::Arsenal,
+    rotor: &mut RotorReach,
 ) -> DefenseFacts {
     let reach = |missile: bool| {
         arms.weapons
@@ -189,12 +224,44 @@ fn defense(
     let forward = row.basis.forward;
     DefenseFacts {
         missile_reach_ft: reach(true),
+        rotor_reach_ft: rotor_reach(arms, state, arsenal, rotor),
         gun_reach_ft: reach(false),
         radar: arms.radar.is_some(),
         working,
         ship: arms.ship,
         heading_deg: forward[0].atan2(forward[2]).to_degrees().rem_euclid(360.),
     }
+}
+
+/// How far an armed unit's missiles may be launched at a helicopter, feet
+/// (a helicopter's threat ring, docs/spec/ai-strike.md, "Helicopter threat
+/// awareness"; John, 2026-10-29): under the energy rules the bound of
+/// [`RotorReach`] on each missile it fires, its own and, for a battery's
+/// launcher, the battery's (at the battery's best skill), else its launch
+/// zone; under the other rules the launch zone, which is where those rules
+/// stop it. 0 with no missiles.
+fn rotor_reach(
+    arms: &fire::Arms,
+    state: &live::State,
+    arsenal: &fire::Arsenal,
+    rotor: &mut RotorReach,
+) -> f64 {
+    let battery = arms
+        .battery
+        .and_then(|index| arsenal.batteries.iter().find(|b| b.index == index))
+        .filter(|battery| battery.launchers.contains(&arms.unit))
+        .map(|battery| &battery.weapon);
+    arms.weapons
+        .iter()
+        .filter(|w| matches!(w.kind, fire::Kind::Missile))
+        .chain(battery)
+        .map(|w| {
+            let energy = (state.weapon_rules == Rules::Energy)
+                .then(|| rotor.reach_ft(w, arms.position[1], state.devices.wind))
+                .flatten();
+            energy.unwrap_or(w.launch.max_range)
+        })
+        .fold(0., f64::max)
 }
 
 impl AiWings {

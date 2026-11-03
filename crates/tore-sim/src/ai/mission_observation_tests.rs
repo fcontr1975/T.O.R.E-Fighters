@@ -392,6 +392,13 @@ fn prepared_observations_keep_complete_seeded_mission_state_and_output() {
     for workers in executors() {
         for seed in [7, 12345] {
             let mut reference = fixture(30, seed);
+            // This sixteen-tick fixture needs an immediate defensive release;
+            // novice reaction delay is tested in the mission defense tests.
+            let controller = &mut reference.actor_mut(1).unwrap().controller;
+            controller.set_experience(super::super::experience::ResolvedExperience {
+                level: Experience::Ace,
+                ..controller.experience()
+            });
             let mut actual = reference.clone();
             let (mut reference_human, mut actual_human) = (None, None);
             let mut saw_devices = false;

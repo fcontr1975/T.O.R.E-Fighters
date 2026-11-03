@@ -210,8 +210,8 @@ Preserve the existing weapon classifications.
 | --- | --- | --- |
 | A: active radar | No automatic launch warning during silent midcourse. Warn when its active seeker acquires this aircraft and enters PITBULL. | Chaff |
 | S: supported radar | Warn immediately on a valid supported launch against this aircraft; the launcher must maintain the required track for guided flight. | Chaff |
-| I: infrared | No automatic launch or seeker warning. Respond only after visually detecting the incoming missile. | Flares if its class is known; otherwise the mixed visual-threat burst below |
-| E: passive emitter / other passive guidance | No automatic launch or seeker warning. Respond only after visually detecting the incoming missile. | Mixed visual-threat burst unless its susceptibility is independently known |
+| I: infrared | No automatic launch or seeker warning. Respond only after visually detecting the incoming missile. | Flares, including the documented precaution for unclassified visual threats |
+| E: passive emitter / other passive guidance | No automatic launch or seeker warning. Respond only after visually detecting the incoming missile. | Precautionary flares unless independent classification identifies a radar threat |
 
 Immediate means the next fixed simulation tick, at most 1/120 second. Do not add
 the old B47 launch-distance, flight-state or experience delays to these warning
@@ -256,121 +256,29 @@ expiry retire the missile's threat record. These bounded lifecycle shortcuts
 convey no surviving aircraft positions. Aircraft memory timers above are
 unchanged.
 
-### Jink, notch, dive and countermeasures
+### Maneuvers, countermeasures and skill
 
-Once the response assessment calls for defense, select a notch for an
-electronically reported radar threat and a jink for a visual-only incoming
-threat. Combine a dive with either only when terrain and speed safety checks
-permit it. All skills can use these responses. Existing experience-dependent
-flying limits still apply. Immediate warning receipt means immediate awareness,
-not mandatory immediate maneuvering or dispensing.
+The current fitted [missile defense policy](ai.md#missile-defense-flown-by-ai)
+defines the drag, beam/notch and last-ditch sequence, positive-G steering,
+terrain guard, side commitment, skill timing and finite device schedule.
+It supersedes the initial two-second alternating jink and steep pitch-target
+dive. Visual detection alone does not identify guidance: an unclassified
+visual missile prompts precautionary flares rather than a mixed burst.
 
-- **Jink:** alternating lateral break requests around the heading at detection.
-  Initial pattern: +45 degrees for 2 seconds, then -45 degrees
-  for 2 seconds, with initial side selected deterministically. Reassess after
-  each leg; use existing flight limits rather than instantaneous attitude changes.
-- **Notch:** request a heading 90 degrees left or right of the known radar-source
-  bearing, choosing the smaller turn and a deterministic tie break. For S use
-  the supporting radar's bearing; for A after pitbull use the missile radar's
-  bearing. Refresh only from received evidence. No known radar bearing means
-  jink instead. A notch command is an attempt, not automatic missile defeat.
-- **Dive:** combine the break with a -20-degree pitch request only when
-  the predicted path over the next 5 seconds remains at least 1,000 feet above
-  queried terrain and inside the aircraft speed envelope. Existing terrain
-  avoidance can override it earlier. Otherwise remain level or climb as needed.
-- **Devices:** request a burst when the time-based response assessment calls
-  for it, while maneuvering.
-  Release two chaff for known radar; two flares for known IR; two of
-  each available type for an unclassified visual missile. Visual detection does not identify passive guidance or establish device
-  effectiveness.
-  Reuse the quarter-second device scheduler; for a mixed burst alternate chaff
-  and flare. Debit actual inventory and continue with the available type if
-  the other is empty. Repeat no sooner than 2 seconds after burst start, and
-  only while a current sighting or electronic warning supports the threat.
+Awareness, maneuver commitment and device release remain separate decisions.
+A defensive maneuver does not automatically trigger devices. Empty dispensers
+do not prevent maneuvering. Weapons-hold orders prohibit offensive fire, not
+defense. Prioritize the smallest positive time to closest approach from current
+observed motion, with bearing-only warnings ahead of ranged threats whose
+approach time is unknown, and keep the current threat on a tie. Changing the
+selected threat retains the aircraft's device cooldown and routine budget.
 
-The time-based release decision replaces the old 35/50/75/90 percent release
-gate in the M1 AI path, not the established probability that a device
-actually decoys a missile. Entering the release window requests a burst if the
-matching inventory is available. Never equate dispensing with a guaranteed
-escape. Device absence or exhaustion cannot prevent maneuvering. Neither an
-existing attack on the launcher nor a same-side missile may suppress
-self-preservation once an incoming threat is perceived. Weapons-hold orders
-prohibit offensive fire, not defensive maneuvering or countermeasures.
-
-Aggregate simultaneous threats rather than starting conflicting maneuvers or one
-burst per missile every tick. Prioritize the smallest positive time to closest
-approach from current observed motion; bearing-only radar warnings precede
-visual threats whose approach time is unknown. Keep the current threat on a tie.
-A new higher-priority threat may change the maneuver, but the per-aircraft burst
-interval still applies. Represent activity as DEFENDING/EVADING, with the chosen
-maneuver available for debugging. After the last perceived threat clears,
-reassess mission duty and current aircraft contacts.
-
-### Skill, time available and returning to the fight
-
-Assess whether enough time remains to maneuver and deploy countermeasures.
-Novice can maneuver at long range without dispensing. Ace uses its estimated
-margin to defeat the missile and continue or resume attacking an eligible
-target. This changes decision quality and commitment, not sensor hardware,
-access to hidden missile state or physical turn performance. No skill guarantees
-survival or a counter-kill.
-
-Awareness, maneuver commitment and device release are separate decisions. A
-defensive maneuver does not automatically trigger a countermeasure burst.
-
-At each new observation, estimate time to closest approach from measured
-relative position and motion. This is an imperfect threat-time estimate, not
-knowledge of the missile's future guided trajectory. Estimate the time required
-to reach the chosen defensive heading/pitch using current speed, bank, usable
-turn rate, roll-in time, altitude and the selected flight model's limits. Add an
-uncertainty margin. Do not assume an instantaneous 90-degree turn or use the
-unseen missile's remaining energy. A stale observation increases uncertainty; a
-bearing-only radar warning supplies no precise range or approach time.
-
-Initial defensive timing parameters:
-
-| Skill | Extra time reserved beyond estimated maneuver time | Long-range behavior with reliable observed motion |
-| --- | --- | --- |
-| Novice | 8 seconds | Start a simple defensive maneuver on detection even when there is ample time; withhold devices until the release window |
-| Average | 5 seconds | Continue mission until estimated threat time reaches maneuver time plus margin, then defend |
-| Experienced | 3 seconds | Same threshold rule, with less conservative commitment and continuous reassessment |
-| Ace | 1.5 seconds | Preserve the attack while comfortably outside the threshold; use the available margin, defend, then reassess attack opportunity |
-
-The fitted response estimate uses half the load-limited coordinated-turn rate
-at current speed, bounded by the aircraft's maximum bank. Pitch authority uses
-half the available normal acceleration above 1 G divided by current speed.
-Roll-in allowance is the requested bank plus the magnitude of current bank,
-divided by the loaded roll-rate limit, plus 0.7 seconds of control settling.
-Gravity is 32.174 feet per second squared. These agent-authored conservative
-estimates use loaded aircraft limits; they are not exact trajectory predictions.
-A dive is speed-safe only when current speed plus five seconds of gravitational
-acceleration at 20 degrees remains within the current maximum-speed envelope.
-
-Maneuver-time estimation must be bounded against measured flight-model turns
-before acceptance. If estimated available time is already too short at any
-skill, act immediately with the fastest feasible safe break and available
-countermeasures; do not refuse defense because the preferred notch is
-unreachable. Aircraft capability can make a dive or jink preferable to a late
-notch.
-
-Device release window: start a burst when estimated approach time is at most 6
-seconds, or immediately when the assessment says there is insufficient time for
-the chosen maneuver. A distant threat can therefore prompt a Novice turn without
-a burst. Retain the 2-second per-aircraft burst interval while a current
-observation supports the threat; do not reset it when switching missiles. The
-6-second window is fitted and must be checked against actual device and seeker
-effects. A radar warning without usable motion/range instead triggers immediate
-conservative defense and one available radar-countermeasure burst; never claim
-that Ace can safely wait on a precise countdown it cannot observe. Further
-bursts still follow the current-warning and cooldown rules.
-
-Ace's smaller margin is deliberate tactical risk, not intentionally slower
-warning delivery. Reassess every simulation tick using only latest permitted
-measurements; terrain, low energy, several threats or lost observations can
-force earlier defense. With uncertain motion, use the conservative fallback
-rather than applying the optimistic Ace margin. Debug output must expose
-estimated threat time, maneuver time, margin and the chosen response so the
-reason can be inspected without altering Target-view gameplay.
+The diagnostic maneuver-time estimate uses half the load-limited coordinated
+turn rate at current speed, bounded by aircraft bank, and half the available
+pitch acceleration above 1 G. Roll-in allowance is requested bank plus current
+bank magnitude divided by loaded roll rate, plus 0.7 seconds. These fitted
+estimates are not trajectory predictions and do not expose missile energy.
+The defense policy uses observed closest approach and its documented thresholds.
 
 After the perceived threat clears, resume the mission's priority selection. Ace must preserve a valid offensive solution through a defensive maneuver when
 feasible, and promptly re-engage when defense permits. Own missile support is a
@@ -732,14 +640,14 @@ Use synthetic fixtures and fixed 120 Hz headless simulation. Required cases:
   failure and stale/removal behavior. Hidden I/E and pre-pitbull A never leak
   through the RWR feed. Confirm actual live display with a rendering smoke test.
 - Jink legs, correct S/A notch-source bearings, unsafe-dive rejection, empty
-  dispensers, mixed bursts, cooldown and simultaneous threats. Measure actual
+  dispensers, class-appropriate bursts, cooldown and simultaneous threats. Measure actual
   support/seeker loss and decoy outcomes separately from maneuver requests.
   Warning receipt and memory alone must never authorize offensive firing.
 - Escort chooses a known threat to its charge over a nearer unrelated hostile,
   recognizes explicitly assigned hostile escorts only when observed, handles
   warning-only bearings, respects hold orders and returns at its leash.
-- Reliable distant-threat fixtures show Novice maneuvering without devices,
-  while Ace can preserve offense until its fitted margin is reached. Verify
+- Reliable distant-threat fixtures show skill-dependent reaction and drag without devices,
+  then beam and break at the fitted thresholds. Verify
   threshold equality, too-late fallback, bearing-only warnings, uncertain/lost
   observations, low-energy turns and safe re-engagement. Compare decisions and
   feasible trajectories, not a requirement that Ace always survives or wins.

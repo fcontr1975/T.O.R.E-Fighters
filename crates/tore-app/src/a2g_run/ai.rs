@@ -16,8 +16,11 @@
 //!     [--order KIND [--order-at S]] [--quick-wing] [--render OUT.png --render-at S]
 //!     [--choose-store] [--buddy ID]
 //!     [--from NM] [--altitude FT] [--speed KT] [--heading DEG] [--dive DEG]
-//!     [--defenses AAA SAM] [--surface-seed N] [--seconds S] [--sead-at S]
-//!     [--follow-threat] [--follow-egress] [--place-site ID,BEARING,RANGE_FT]
+//!     [--defenses AAA SAM] [--surface-seed N] [--seconds S]
+//!     [--sead-at S | --sead-after-shot S] [--sead-site ID]...
+//!     [--follow-threat] [--follow-egress]
+//!     [--place-site ID,BEARING,RANGE_FT]... [--site-sight ID,FEET]...
+//!     [--terrain-map RADIUS_FT,STEP_FT] [--terrain-nodes RADIUS_FT]
 //! ```
 //!
 //! - `--aircraft`, `--load`, `--station`, `--count`: the striker and its store,
@@ -98,8 +101,20 @@
 //!   records it as an `ai.strike` event. `HOLDOFF` every ten seconds of a
 //!   hold-off: seconds held, distance from the hold point, height above
 //!   the ground and range to the target. `SEAD t= killed=N`: `--sead-at`
-//!   destroyed the hostile sites. `RINGS` with each `THREAT`: the rings it
-//!   knew (id, radius, distance from the target, feet).
+//!   (or `--sead-after-shot`, a set time after a site first fired)
+//!   destroyed the hostile sites (only the `--sead-site` ones when named).
+//!   `SHOT t= site=ID range_ft=R known=yes|no`: a ground site launched a
+//!   round (not a gun's) at the striker, R feet from it, and whether the
+//!   striker knew the site then (its ring was in its ground picture). `RINGS` with each `THREAT`: the rings it
+//!   knew (id, radius, distance from the target, feet). `AHEAD t=
+//!   range_ft=R fire_in_s=S point=X,Z aim_moves_ft=D from_ft=F` each time a
+//!   helicopter plans a move-ahead ambush on a moving target (John,
+//!   2026-10-29): the firing range, the seconds to the planned shot, the
+//!   firing point, how far the target drives to the predicted aim point and
+//!   how far the helicopter is from the firing point; `RINGS` follows.
+//!   The summary's `reach_margin_ft` is the least margin the striker kept,
+//!   sampled every quarter second, to the reach of any defence it knew at
+//!   the time (its ring less the ring's margin); negative inside one.
 //! - `LASER plane=P state=S mask=M`: the laser of the striker, and of the
 //!   buddy when there is one, each time its state or mask changes (slice
 //!   ST-L). The summary counts the seconds a laser weapon of the run was in
@@ -307,6 +322,17 @@ pub(crate) struct Config {
     /// destroyed `S` seconds into the run, a stand-in for a SEAD flight
     /// (slice H4: a helicopter holding off resumes once the ring is gone).
     pub sead_at: Option<f64>,
+    /// `--sead-site ID` (repeatable): the SEAD stand-in destroys only these
+    /// sites, so a site the helicopter has not met yet stays for an ambush
+    /// (2026-10-28).
+    pub sead_sites: Vec<u32>,
+    /// `--sead-after-shot S`: the SEAD stand-in goes in off the clock: S
+    /// seconds after the first round one of the `--sead-site` sites (any
+    /// site when none is named) launches at the striker, those sites are
+    /// destroyed. For an ambush by a site whose second round would bring
+    /// the helicopter down: the layout does not hang on when the first
+    /// launch comes (Mi-24 ambush layout, 2026-10-29).
+    pub sead_after_shot: Option<f64>,
     /// `--follow-threat`: after the last impact the run goes on (within
     /// `--seconds`) while a helicopter keeps out of a ring it means to come
     /// back from, to see whether it resumes (slice H2).
@@ -319,8 +345,28 @@ pub(crate) struct Config {
     /// `ID` is moved, before the first tick, to that compass bearing and
     /// range from the target, so a test can lay out the threats a
     /// helicopter meets, an ambush among them (slice HF1, John
-    /// 2026-10-13).
-    pub place_site: Option<(u32, f64, f64)>,
+    /// 2026-10-13). Repeatable: each site moves in the order given.
+    pub place_sites: Vec<(u32, f64, f64)>,
+    /// `--terrain-map RADIUS_FT,STEP_FT`: before the first tick, prints the
+    /// ground height on a grid round the target (`TERRAIN` lines, north
+    /// first), for finding the relief a layout can hide a site behind.
+    pub terrain_map: Option<(f64, f64)>,
+    /// `--terrain-nodes RADIUS_FT`: before the first tick, prints the ground
+    /// height at every terrain grid node (the imported grid's 8,192 ft
+    /// lattice, which the ground between nodes is interpolated from) within
+    /// that radius of the target (`TERRAINNODES` and `NODE` lines), so a
+    /// test can work out sight lines exactly.
+    pub terrain_nodes: Option<f64>,
+    /// `--site-sight ID,FEET` (repeatable): the hostile site `ID` can only be
+    /// listed by an eye within FEET of it, in place of the type's 19,968 ft
+    /// (`maxVisDist`, 78 units of 256 ft). A site dug in and hidden well: the
+    /// helicopter does not know it, and so does not keep out of it, until it
+    /// is near; the site shoots as it always does. For laying out an ambush
+    /// by a site the helicopter did not know (Mi-24 ambush layout,
+    /// 2026-10-29): in this simulation the terrain cannot hide a site from
+    /// the eye and leave it a line to the helicopter, and a rebuild every 6 s
+    /// lists it long before its 15 s of preparation are over.
+    pub site_sights: Vec<(u32, f64)>,
 }
 
 impl Config {
@@ -414,6 +460,18 @@ impl Config {
         }
         if records && self.order.is_none() {
             return Err("AI --record currently needs --order and its human lead".into());
+        }
+        if self.sead_at.is_some() && self.sead_after_shot.is_some() {
+            return Err(
+                "--sead-at and --sead-after-shot are two ways to time the SEAD stand-in: pick one"
+                    .into(),
+            );
+        }
+        if self
+            .sead_after_shot
+            .is_some_and(|s| !s.is_finite() || s < 0.)
+        {
+            return Err("--sead-after-shot needs a finite nonnegative number of seconds".into());
         }
         if let Some(skill) = skill
             && !(0..=3).contains(&skill)
@@ -690,10 +748,18 @@ struct Watch {
     gunship_bursts: usize,
     /// The strike phase last reported.
     phase: Option<tore_sim::ai::strike::Phase>,
+    /// The strike target last reported, and whether the committed-to-release
+    /// window was open and when it first held a defence back (T.O.R.E,
+    /// 2026-10-28).
+    strike_target: Option<u32>,
+    committed: bool,
+    commit_held: Option<f64>,
     /// The no-laze decision last reported (slice ST-G).
     no_laze: Option<tore_sim::ai::strike::NoLaze>,
     /// A helicopter's threat decision last reported (slice H4).
     threat_call: Option<(tore_sim::ai::helicopter_threat::Decision, u64)>,
+    /// A helicopter's move-ahead plan last reported (its planning tick).
+    ahead: Option<u64>,
     /// The planes whose lasers are reported, and what each last showed.
     lasers: Vec<(u32, Option<LaserShown>)>,
     /// Ticks a laser weapon of the run flew guiding, and ticks of those its
@@ -709,9 +775,24 @@ struct Watch {
     /// The lowest height above the ground the striker flew at, feet, and the
     /// seconds a helicopter break was flown (slice ST-H).
     min_agl_ft: f64,
+    /// The least margin the striker kept to the reach of any defence it
+    /// knew then (its ring less the ring's margin), feet; negative inside.
+    reach_margin_ft: f64,
     break_ticks: u64,
     /// The striker's hit points last reported (`HURT` lines, slice ST-H).
     hp: Option<i32>,
+    /// Rounds a ground site launched at the striker, already reported
+    /// (`SHOT` lines).
+    shots_seen: BTreeSet<u32>,
+    /// Hostile sites the striker's ground picture has held (`SEEN` lines),
+    /// and the last terrain line to each within 30,000 ft (`SIGHT` lines).
+    sites_seen: BTreeSet<u32>,
+    sight: BTreeMap<u32, bool>,
+    /// How many ground contacts the picture last held (`PICTURE` lines).
+    contacts: Option<usize>,
+    /// When a site first launched at the striker (`SHOT` lines): the time
+    /// and the site. `--sead-after-shot` counts from it.
+    first_shot: Option<(f64, u32)>,
 }
 
 /// One gun burst of a strafing run: its release number, the rounds fired,
@@ -763,8 +844,12 @@ impl Watch {
             gunship_burst: None,
             gunship_bursts: 0,
             phase: None,
+            strike_target: None,
+            committed: false,
+            commit_held: None,
             no_laze: None,
             threat_call: None,
+            ahead: None,
             lasers: vec![(plane.0, None)],
             fall_ticks: 0,
             blind_ticks: 0,
@@ -772,8 +857,14 @@ impl Watch {
             bursts: BTreeMap::new(),
             hits_tick: 0,
             min_agl_ft: f64::INFINITY,
+            reach_margin_ft: f64::INFINITY,
             break_ticks: 0,
             hp: None,
+            shots_seen: BTreeSet::new(),
+            sites_seen: BTreeSet::new(),
+            sight: BTreeMap::new(),
+            contacts: None,
+            first_shot: None,
         }
     }
 
@@ -832,6 +923,54 @@ impl Scene {
             .find(|c| c.plane == plane)?
             .flight;
         Some((f.position, f.speed))
+    }
+}
+
+/// The strike target whenever it changes (an early retarget picks the next
+/// one inside a pass), and the committed-to-release window as it opens and
+/// closes, with whether it held a defence back (T.O.R.E, John, 2026-10-28).
+fn report_strike_flow(scene: &Scene, w: &mut Watch, t: f64) {
+    let Some(wings) = scene.world.ai_wings.as_ref() else {
+        return;
+    };
+    let Some(actor) = wings.mission().actor(w.plane.0) else {
+        return;
+    };
+    let Some(strike) = actor.strike() else {
+        return;
+    };
+    if strike.target() != w.strike_target {
+        w.strike_target = strike.target();
+        if let Some(target) = strike.target() {
+            println!(
+                "ai-strike: TARGET t={t:.3} target={target:#010x} phase={:?}",
+                strike.phase()
+            );
+        }
+    }
+    let open = strike.holds_run(wings.mission().tick());
+    if open
+        && w.commit_held.is_none()
+        && (actor.defense_decision().is_some_and(|d| d.motion.is_some())
+            || actor.incoming_fire_cue().is_some())
+    {
+        w.commit_held = Some(t);
+    }
+    if open != w.committed {
+        w.committed = open;
+        println!(
+            "ai-strike: COMMIT t={t:.3} open={} release_s={} held_defence={} held_at={}",
+            if open { "yes" } else { "no" },
+            strike
+                .release_in_s()
+                .filter(|s| s.is_finite())
+                .map_or("none".into(), |s| format!("{s:.2}")),
+            if w.commit_held.is_some() { "yes" } else { "no" },
+            w.commit_held.map_or("none".into(), |at| format!("{at:.3}"))
+        );
+        if !open {
+            w.commit_held = None;
+        }
     }
 }
 
@@ -908,6 +1047,19 @@ fn observe(scene: &mut Scene, w: &mut Watch) {
         w.min_agl_ft = w
             .min_agl_ft
             .min(f.position[1] - scene.ground(f.position[0], f.position[2]));
+        // How near it came to the reach of a defence it knew (the move-ahead
+        // check, John 2026-10-29), a quarter-second sample.
+        if tick.is_multiple_of(30)
+            && let Some(picture) = actor.ground_picture()
+        {
+            for ring in tore_sim::ai::helicopter_threat::known_rings(picture, actor.identity().side)
+            {
+                let reach = ring.radius_ft - tore_sim::ai::helicopter_threat::RING_MARGIN_FT;
+                w.reach_margin_ft = w
+                    .reach_margin_ft
+                    .min(horizontal(f.position, ring.centre) - reach);
+            }
+        }
         if let Some((b, bearing)) = actor.trace().rotor_break {
             w.break_ticks += 1;
             if tick.is_multiple_of(120) {
@@ -994,6 +1146,7 @@ fn observe(scene: &mut Scene, w: &mut Watch) {
             print_rings(scene, w, t, target_at);
         }
     }
+    report_strike_flow(scene, w, t);
     let no_laze = scene
         .actor(w.plane)
         .and_then(|a| a.strike())
@@ -1044,6 +1197,29 @@ fn observe(scene: &mut Scene, w: &mut Watch) {
             call.decision.words(),
         );
         print_rings(scene, w, t, target_at);
+    }
+    // A helicopter's move-ahead ambush, each time it is planned.
+    let ahead = scene
+        .actor(w.plane)
+        .and_then(|a| a.strike())
+        .and_then(|s| s.move_ahead())
+        .copied();
+    if ahead.map(|a| a.planned_tick) != w.ahead {
+        w.ahead = ahead.map(|a| a.planned_tick);
+        if let Some(plan) = ahead {
+            let from = scene
+                .striker_at(w.plane)
+                .map_or(-1., |(p, _)| horizontal(p, plan.point));
+            println!(
+                "ai-strike: AHEAD t={t:.3} range_ft={:.0} fire_in_s={:.1} point={:.0},{:.0} aim_moves_ft={:.0} from_ft={from:.0}",
+                plan.range_ft,
+                plan.fire_tick.saturating_sub(tick) as f64 / 120.,
+                plan.point[0],
+                plan.point[2],
+                target_at.map_or(-1., |tp| horizontal(tp, plan.aim)),
+            );
+            print_rings(scene, w, t, target_at);
+        }
     }
     if w.phase == Some(tore_sim::ai::strike::Phase::HoldOff)
         && tick.is_multiple_of(1200)
@@ -1243,6 +1419,8 @@ fn observe(scene: &mut Scene, w: &mut Watch) {
         }
     }
     observe_guns(scene, w, t, target_at);
+    observe_shots(scene, w, t);
+    observe_sites(scene, w, t, tick);
     trace(scene, w, tick, target_at);
     let state = &scene.world.combat.state;
     // Kills credited to the striker.
@@ -1373,6 +1551,94 @@ fn place_site(
     Ok(())
 }
 
+/// `--site-sight`: limits how far an eye lists the hostile site `id` from
+/// (its `maxVisDist`, in units of 256 ft, at least 1: 0 means no limit).
+/// Prints a `SIGHTLIMIT` line.
+fn site_sight(scene: &mut Scene, id: u32, feet: f64) -> AppResult<()> {
+    let state = &mut scene.world.combat.state;
+    if !state
+        .targets
+        .iter()
+        .any(|row| row.id == id && row.aircraft.is_none() && row.category & 0x1800 != 0)
+    {
+        return Err(format!("--site-sight: {id:#x} is not a SAM or gun site").into());
+    }
+    let listing = state
+        .ground_listing(id)
+        .ok_or_else(|| format!("--site-sight: {id:#x} has no listing"))?;
+    let units = (feet / 256.).round().clamp(1., f64::from(u16::MAX)) as u16;
+    state.set_ground_listing(
+        id,
+        live::GroundListing {
+            max_visible: units,
+            ..listing
+        },
+    );
+    println!(
+        "ai-strike: SIGHTLIMIT id={id:#010x} sight_ft={:.0} was_ft={:.0}",
+        f64::from(units) * 256.,
+        f64::from(listing.max_visible) * 256.
+    );
+    Ok(())
+}
+
+/// `--terrain-map`: the ground height (feet, rounded) on a grid round the
+/// target, one `TERRAIN` line per row from the north down, columns from the
+/// west. The header gives the grid: the target's place and the step.
+fn print_terrain_map(scene: &Scene, target_at: Vector, radius: f64, step: f64) {
+    let n = (radius / step).floor() as i32;
+    println!(
+        "ai-strike: TERRAINMAP radius_ft={radius:.0} step_ft={step:.0} cells={} target_ground_ft={:.0}",
+        2 * n + 1,
+        scene.ground(target_at[0], target_at[2])
+    );
+    for row in (-n..=n).rev() {
+        let heights: Vec<String> = (-n..=n)
+            .map(|col| {
+                let x = target_at[0] + f64::from(col) * step;
+                let z = target_at[2] + f64::from(row) * step;
+                format!("{:.0}", scene.ground(x, z))
+            })
+            .collect();
+        println!(
+            "ai-strike: TERRAIN north_ft={:.0} heights={}",
+            f64::from(row) * step,
+            heights.join(",")
+        );
+    }
+}
+
+/// `--terrain-nodes`: the ground height at each node of the terrain lattice
+/// within `radius` feet of the target. The header gives the lattice spacing,
+/// the node numbers of the first (south-west) node and the grid size; each
+/// `NODE` line is one row of east-going heights from the south.
+fn print_terrain_nodes(scene: &Scene, target_at: Vector, radius: f64) {
+    let cell = f64::from(tore_formats::theater::CELL_FEET);
+    let first = |centre: f64| ((centre - radius) / cell).floor().max(0.) as i32;
+    let last = |centre: f64| ((centre + radius) / cell).ceil() as i32;
+    let (i0, i1) = (first(target_at[0]), last(target_at[0]));
+    let (j0, j1) = (first(target_at[2]), last(target_at[2]));
+    println!(
+        "ai-strike: TERRAINNODES cell_ft={cell:.0} i0={i0} j0={j0} cols={} rows={}",
+        i1 - i0 + 1,
+        j1 - j0 + 1
+    );
+    for j in j0..=j1 {
+        let heights: Vec<String> = (i0..=i1)
+            .map(|i| {
+                format!(
+                    "{:.0}",
+                    scene
+                        .world
+                        .terrain
+                        .raw_height((f64::from(i) * cell) as f32, (f64::from(j) * cell) as f32)
+                )
+            })
+            .collect();
+        println!("ai-strike: NODE j={j} heights={}", heights.join(","));
+    }
+}
+
 /// `RINGS`: the rings a helicopter striker knows now (slice H4): id,
 /// radius and distance from the target, feet.
 fn print_rings(scene: &Scene, w: &Watch, t: f64, target_at: Option<Vector>) {
@@ -1443,6 +1709,123 @@ fn trace(scene: &Scene, w: &Watch, tick: u64, target_at: Option<Vector>) {
             .rem_euclid(360.),
         f.pitch.to_degrees(),
     );
+}
+
+/// `PICTURE`, `SEEN` and `SIGHT`: how many ground contacts the striker's
+/// picture holds each time that changes (it holds the 50 nearest the eye
+/// sees), when a hostile SAM or gun site first enters the
+/// striker's ground picture (`SEEN`: the site, the range, and the ring it
+/// gives), and each time the terrain line between the striker and a site
+/// within 30,000 ft opens or closes (`SIGHT`, the sight line the eye uses),
+/// for reading why a site was or was not known when it fired. Looked at
+/// every quarter second, the cadence the picture follows its contacts at.
+fn observe_sites(scene: &Scene, w: &mut Watch, t: f64, tick: u64) {
+    if !tick.is_multiple_of(30) {
+        return;
+    }
+    let state = &scene.world.combat.state;
+    let Some((own, _)) = scene.striker_at(w.plane) else {
+        return;
+    };
+    let known: Option<Vec<u32>> = scene.actor(w.plane).and_then(|actor| {
+        let picture = actor.ground_picture()?;
+        let rings = tore_sim::ai::helicopter_threat::known_rings(picture, actor.identity().side);
+        Some(rings.iter().map(|r| r.id).collect())
+    });
+    let held = scene
+        .actor(w.plane)
+        .and_then(|actor| actor.ground_picture())
+        .map(|picture| picture.contacts().len());
+    if held.is_some() && w.contacts != held {
+        w.contacts = held;
+        println!(
+            "ai-strike: PICTURE t={t:.3} contacts={}",
+            held.unwrap_or_default()
+        );
+    }
+    let ground = |x: f64, z: f64| scene.ground(x, z);
+    for site in state
+        .targets
+        .iter()
+        .filter(|row| row.aircraft.is_none() && row.category & 0x1800 != 0 && row.hp > 0)
+    {
+        let range = horizontal(site.position, own);
+        if range <= 30_000. {
+            let eye = [site.position[0], site.position[1] + 10., site.position[2]];
+            let clear = tore_sim::combat::live::terrain_hit(own, eye, &ground).is_none();
+            if w.sight.insert(site.id, clear) != Some(clear) {
+                println!(
+                    "ai-strike: SIGHT t={t:.3} site={:#x} range_ft={range:.0} clear={}",
+                    site.id,
+                    if clear { "yes" } else { "no" }
+                );
+            }
+        }
+        if known.as_ref().is_some_and(|ids| ids.contains(&site.id)) && w.sites_seen.insert(site.id)
+        {
+            println!(
+                "ai-strike: SEEN t={t:.3} site={:#x} range_ft={range:.0}",
+                site.id
+            );
+        }
+    }
+}
+
+/// `SHOT`: a round (not a gun's) a ground site launched at the striker, on
+/// the tick it is first seen: the site, its range to the striker, and
+/// whether the striker knew the site then (it is among the rings of its
+/// ground picture, and not only because this launch gave a hidden team
+/// away; slice H4). An ambush is a shot from a site it did not know (Mi-24
+/// ambush layout, 2026-10-28).
+fn observe_shots(scene: &Scene, w: &mut Watch, t: f64) {
+    let state = &scene.world.combat.state;
+    let Some((own, _)) = scene.striker_at(w.plane) else {
+        return;
+    };
+    for p in &state.projectiles {
+        if p.gun_round.is_some() || p.target != Some(w.plane.0) || w.shots_seen.contains(&p.id) {
+            continue;
+        }
+        let Some(site) = state
+            .targets
+            .iter()
+            .find(|row| row.id == p.owner && row.aircraft.is_none() && row.category & 0x1800 != 0)
+        else {
+            continue;
+        };
+        w.shots_seen.insert(p.id);
+        if w.first_shot.is_none() {
+            w.first_shot = Some((t, site.id));
+        }
+        // A hidden team that this very launch gave away (the picture's
+        // unmasked tick is at or after the launch, on the AI's clock) was not
+        // known when it fired.
+        let launch = scene
+            .world
+            .ai_wings
+            .as_ref()
+            .map_or(0, |wings| wings.mission().tick())
+            .saturating_sub(p.age + 1);
+        let known = scene.actor(w.plane).and_then(|actor| {
+            let picture = actor.ground_picture()?;
+            let rings =
+                tore_sim::ai::helicopter_threat::known_rings(picture, actor.identity().side);
+            Some(
+                rings.iter().any(|r| r.id == site.id)
+                    && picture.unmasked_at(site.id).is_none_or(|at| at < launch),
+            )
+        });
+        println!(
+            "ai-strike: SHOT t={t:.3} site={:#x} range_ft={:.0} known={}",
+            site.id,
+            horizontal(site.position, own),
+            match known {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "none",
+            }
+        );
+    }
 }
 
 /// A gun run's bursts (slice ST-T2): each burst is one `RELEASE` (its first
@@ -1822,8 +2205,17 @@ pub(super) fn run(o: &Options, resources: &BTreeMap<String, Vec<u8>>) -> AppResu
             cfg.order.map_or("none", |(name, _)| name),
             cfg.mode.map_or("none", DeliveryMode::label),
         );
-        if let Some((id, bearing, range)) = cfg.place_site {
+        for &(id, bearing, range) in &cfg.place_sites {
             place_site(&mut scene, id, bearing, range, target_at)?;
+        }
+        for &(id, feet) in &cfg.site_sights {
+            site_sight(&mut scene, id, feet)?;
+        }
+        if let Some((radius, step)) = cfg.terrain_map {
+            print_terrain_map(&scene, target_at, radius, step);
+        }
+        if let Some(radius) = cfg.terrain_nodes {
+            print_terrain_nodes(&scene, target_at, radius);
         }
         // The mission's hostile SAM and gun sites, once (slice ST-H): where
         // they stand against the target and the start, for reading a
@@ -2206,8 +2598,15 @@ pub(super) fn run(o: &Options, resources: &BTreeMap<String, Vec<u8>>) -> AppResu
                 }
             }
         }
-        // `--sead-at S`: the stand-in for a SEAD flight (slice H4).
-        if let Some(at) = cfg.sead_at
+        // `--sead-at S`: the stand-in for a SEAD flight (slice H4); or
+        // `--sead-after-shot S`, S seconds after a named site first fires.
+        let after_shot = cfg.sead_after_shot.and_then(|after| {
+            watch
+                .first_shot
+                .filter(|(_, site)| cfg.sead_sites.is_empty() || cfg.sead_sites.contains(site))
+                .map(|(at, _)| at + after)
+        });
+        if let Some(at) = cfg.sead_at.or(after_shot)
             && !sead_done
             && scene.seconds() >= at
         {
@@ -2219,6 +2618,7 @@ pub(super) fn run(o: &Options, resources: &BTreeMap<String, Vec<u8>>) -> AppResu
                     && row.aircraft.is_none()
                     && row.hp > 0
                     && row.id != target
+                    && (cfg.sead_sites.is_empty() || cfg.sead_sites.contains(&row.id))
             }) {
                 row.hp = 0;
                 killed += 1;
@@ -2306,7 +2706,7 @@ pub(super) fn run(o: &Options, resources: &BTreeMap<String, Vec<u8>>) -> AppResu
     let t = scene.seconds();
     let hp_end = scene.target_row().map(|r| r.hp);
     println!(
-        "ai-strike: summary t={t:.3} ran_s={:.1} profile={} releases={} impacts={} kills={} egress={} lost={} activity={} target_hp={}/{} closest_ft={} store_rounds_left={} gun_rounds={} bursts={} fall_s={:.1} blind_s={:.1} min_agl_ft={} break_s={:.1}",
+        "ai-strike: summary t={t:.3} ran_s={:.1} profile={} releases={} impacts={} kills={} egress={} lost={} activity={} target_hp={}/{} closest_ft={} store_rounds_left={} gun_rounds={} bursts={} fall_s={:.1} blind_s={:.1} min_agl_ft={} break_s={:.1} reach_margin_ft={}",
         t - started,
         watch.profile.map_or("none", Profile::label),
         watch.releases,
@@ -2337,6 +2737,11 @@ pub(super) fn run(o: &Options, resources: &BTreeMap<String, Vec<u8>>) -> AppResu
             "none".to_owned()
         },
         watch.break_ticks as f64 / 120.,
+        if watch.reach_margin_ft.is_finite() {
+            format!("{:.0}", watch.reach_margin_ft)
+        } else {
+            "none".to_owned()
+        },
     );
     if watch.releases == 0 {
         println!("ai-strike: no release");
@@ -2512,6 +2917,20 @@ mod tests {
         assert!(c.check(Some(3), false).is_ok());
         assert!(c.check(Some(4), false).is_err());
         assert!(c.check(None, true).is_err());
+    }
+
+    #[test]
+    fn the_sead_stand_in_is_timed_one_way() {
+        let mut c = config(&["--pilot", "ai"]).unwrap();
+        c.sead_at = Some(60.);
+        c.sead_after_shot = Some(4.);
+        assert!(c.check(None, false).is_err(), "a clock and a shot together");
+        c.sead_at = None;
+        assert!(c.check(None, false).is_ok());
+        c.sead_after_shot = Some(-1.);
+        assert!(c.check(None, false).is_err(), "before the shot");
+        c.sead_after_shot = Some(f64::NAN);
+        assert!(c.check(None, false).is_err());
     }
 
     #[test]

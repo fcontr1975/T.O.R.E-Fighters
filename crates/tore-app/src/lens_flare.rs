@@ -8,6 +8,7 @@
 //! result per camera slot in a GPU buffer, eases it over a few frames, and the
 //! composition reads it the same frame: no readback and no stall. Points off
 //! the view count by a terrain ray ([`terrain_clear`]).
+use crate::gpu_setup::NamedSteps as _;
 use crate::{camera::Camera, scenery::Scenery, terrain::Terrain};
 use std::time::Instant;
 
@@ -272,13 +273,9 @@ impl LensFlare {
         depth_layout: &wgpu::BindGroupLayout,
         samples: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Original lens-flare fills"),
             source: wgpu::ShaderSource::Wgsl(include_str!("lens_flare.wgsl").into()),
-        });
-        let measure_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sun visibility"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("sun_visibility.wgsl").into()),
         });
         let probe_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sun visibility probe"),
@@ -305,19 +302,7 @@ impl LensFlare {
                 },
             ],
         });
-        let measure_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Sun visibility"),
-            bind_group_layouts: &[depth_layout, &probe_layout],
-            push_constant_ranges: &[],
-        });
-        let measure = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Sun visibility"),
-            layout: Some(&measure_layout),
-            module: &measure_shader,
-            entry_point: Some(if samples > 1 { "measure_ms" } else { "measure" }),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let measure = Self::measure_pipeline(device, depth_layout, &probe_layout, samples);
         let visibility = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sun visibility"),
             size: 4 * SLOTS as u64,
@@ -351,7 +336,7 @@ impl LensFlare {
                 (buffer, bind)
             })
             .collect();
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Source lens-flare composition"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -408,6 +393,48 @@ impl LensFlare {
             snapped: [false; SLOTS],
         }
     }
+    fn measure_pipeline(
+        device: &wgpu::Device,
+        depth_layout: &wgpu::BindGroupLayout,
+        probe_layout: &wgpu::BindGroupLayout,
+        samples: u32,
+    ) -> wgpu::ComputePipeline {
+        let measure_shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sun visibility"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("sun_visibility.wgsl").into()),
+        });
+        let measure_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sun visibility"),
+            bind_group_layouts: &[depth_layout, probe_layout],
+            push_constant_ranges: &[],
+        });
+        device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Sun visibility"),
+            layout: Some(&measure_layout),
+            module: &measure_shader,
+            entry_point: Some(if samples > 1 { "measure_ms" } else { "measure" }),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    }
+
+    /// Follow the world's new depth layout without resetting per-camera fades.
+    /// Only the measurement pipeline reads multisampled depth. Composition,
+    /// backing images, probe bindings and their visibility buffer stay valid.
+    pub fn set_samples(
+        &mut self,
+        device: &wgpu::Device,
+        depth_layout: &wgpu::BindGroupLayout,
+        samples: u32,
+    ) {
+        self.measure = Self::measure_pipeline(
+            device,
+            depth_layout,
+            &self.measure.get_bind_group_layout(1),
+            samples,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -614,6 +641,7 @@ impl LensFlare {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

@@ -218,6 +218,7 @@ fn ai_samples(
         guidance: false,
         in_range: false,
         hit: 0,
+        min_ft: 0.,
         max_ft: 0.,
         band_min: 0.,
         band_max: 0.,

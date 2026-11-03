@@ -6,8 +6,9 @@
 //! sprites, at the scale it is drawn) on the ground: [`lift_ft`] is how far
 //! its origin stands above the ground for that. Only three kinds keep their
 //! authored rule ([`Footing`]): runways and pavement stand on their pavement
-//! plane, bridges and roads on the map's height at their origin, and ships
-//! on their waterline (their origin). A presentation scale-up (the far-man
+//! plane, roads on the map's height at their origin, and ships
+//! on their waterline (their origin). Bridges share bottom support and a
+//! graded terrain corridor ([`bridges`]). A presentation scale-up (the far-man
 //! boost) scales from the feet, never from the origin ([`scaled_origin`]).
 //!
 //! Every path that places or draws something on the ground goes through this
@@ -24,6 +25,7 @@
 //! 2026-10-13): the lowest point agrees with the shape's F2 ground offset,
 //! the word FA 0x42e0c0 reads to stand an object on the ground, within 3 ft
 //! for every placed type of the retail data.
+pub mod bridges;
 pub mod pads;
 
 use crate::terrain::PlacedSize;
@@ -42,9 +44,12 @@ pub enum Footing {
     /// A runway or strip (`_STRIPProc`): its pavement plane
     /// (`terrain::pavement_height`).
     Pavement,
-    /// A bridge or road ([`PlacedSize::MapTied`]): the map's height at its
+    /// A road ([`PlacedSize::MapTied`]): the map's height at its
     /// origin, so it meets the terrain it was drawn for.
     MapHeight,
+    /// A bridge assembly: its complete shape bottom, with joined pieces on
+    /// a shared terrain support datum. Destroyed geometry keeps that datum.
+    Bridge,
     /// A ship: its origin is its waterline.
     Waterline,
 }
@@ -53,6 +58,8 @@ pub enum Footing {
 pub fn footing(definition: &Definition) -> Footing {
     if definition.callbacks.iter().any(|name| name == "_STRIPProc") {
         Footing::Pavement
+    } else if bridges::is_bridge(&definition.resource_name) {
+        Footing::Bridge
     } else if PlacedSize::of(definition) == PlacedSize::MapTied {
         Footing::MapHeight
     } else if definition
@@ -101,6 +108,35 @@ pub fn solid_points(shape: &Shape) -> impl Iterator<Item = [f32; 3]> + Clone + '
         .iter()
         .flat_map(|f| f.positions.iter().copied())
         .chain(sprite_points(shape))
+}
+
+/// Solid placement bounds. A bridge's reviewed flat colour-6 shadow is a
+/// decal on the river, not a wall filling the space beneath its deck.
+/// Footing still uses every drawn point. Other object types keep their bounds.
+pub fn placement_solid_points<'a>(
+    definition: &Definition,
+    shape: &'a Shape,
+) -> impl Iterator<Item = [f32; 3]> + 'a {
+    let bridge = footing(definition) == Footing::Bridge;
+    let low = bottom(shape).unwrap_or(0.) as f32;
+    shape
+        .faces
+        .iter()
+        .filter(move |face| !(bridge && bridge_shadow(face, low)))
+        .flat_map(|f| f.positions.iter().copied())
+        .chain(sprite_points(shape))
+}
+
+/// Reviewed flat colour-6 bridge shadow, not structural support.
+pub fn bridge_shadow(face: &tore_formats::shape::Face, low: f32) -> bool {
+    face.subtype == 0x41
+        && !face.colors.is_empty()
+        && face.colors.iter().all(|c| *c == 6)
+        && !face.positions.is_empty()
+        && face
+            .positions
+            .iter()
+            .all(|p| p[2] <= low + 1.5 && (p[2] - face.positions[0][2]).abs() < 0.5)
 }
 
 fn sprite_points(shape: &Shape) -> impl Iterator<Item = [f32; 3]> + Clone + '_ {
@@ -310,11 +346,11 @@ pub fn lift_ft(shape: &Shape, scale: f64) -> f64 {
 
 /// How far the origin of a `definition` placement drawn as `shape` at
 /// `scale` stands above its placement point: [`lift_ft`] for a type that
-/// stands on its [bottom](Footing::Bottom), 0 for a ship or a bridge. A
+/// stands on its [bottom](Footing::Bottom), including bridge footing; 0 for a ship. A
 /// runway's pavement rule is `terrain::Placements::stance`'s.
 pub fn placement_lift_ft(definition: &Definition, shape: &Shape, scale: f64) -> f64 {
     match footing(definition) {
-        Footing::Bottom => lift_ft(shape, scale),
+        Footing::Bottom | Footing::Bridge => lift_ft(shape, scale),
         Footing::Pavement | Footing::MapHeight | Footing::Waterline => 0.,
     }
 }
@@ -437,6 +473,56 @@ mod tests {
     }
 
     #[test]
+    fn bridge_shadow_grounds_the_shape_without_blocking_below_the_deck() {
+        let mut span = upright(10., 10.);
+        let mut shadow = upright(-60., -60.).faces.remove(0);
+        shadow.subtype = 0x41;
+        shadow.colors = vec![6];
+        span.faces.push(shadow);
+        let bridge = definition("BRDMID.OT", "_OBJProc", 0);
+        let points: Vec<_> = placement_solid_points(&bridge, &span).collect();
+        assert!(points.iter().all(|p| p[2] == 10.));
+        assert_eq!(bottom(&span), Some(-60.));
+        // No change to other objects' existing contact policy.
+        let building = definition("TEST.OT", "_OBJProc", 0);
+        assert!(placement_solid_points(&building, &span).any(|p| p[2] == -60.));
+        // A vertical colour-6 face is still solid geometry.
+        span.faces[1].positions[0][2] = 10.;
+        assert!(placement_solid_points(&bridge, &span).any(|p| p[2] == -60.));
+        span.faces[1].positions[0][2] = -60.;
+        let mut placements = crate::terrain::Placements::of_types(
+            &std::collections::BTreeMap::new(),
+            std::iter::empty(),
+        );
+        placements.definitions.insert("BRDMID.OT".into(), bridge);
+        placements.shapes.insert("BRDMID.OT".into(), span);
+        let layout = tore_formats::mission::Layout::parse(
+            "TEST.MM",
+            b"textFormat\nobj\n type BRDMID.OT\n pos 0 0 0\n angle 0 0 0\n .\n",
+        )
+        .unwrap();
+        let stance = placements
+            .stance_on_terrain(&layout.placements[0], |_, _| 0.)
+            .unwrap();
+        let body = tore_sim::airport::OrientedBox {
+            center: stance.center,
+            half: stance.half,
+            heading: stance.heading,
+            pitch: stance.pitch,
+            bank: stance.bank,
+        };
+        assert_eq!(body.center[1], 70.);
+        assert!(
+            body.segment_fraction([-20., 35., 0.], [20., 35., 0.])
+                .is_none()
+        );
+        assert!(
+            body.segment_fraction([-20., 70., 0.], [20., 70., 0.])
+                .is_some()
+        );
+    }
+
+    #[test]
     fn every_ground_object_stands_on_the_bottom_of_its_shape() {
         // A factory hall whose origin is 89 percent of the way up (B13).
         let hall = upright(-128., 16.);
@@ -462,14 +548,15 @@ mod tests {
                 Footing::Bottom
             );
         }
-        // Runways, bridges and roads, and ships keep their authored rule.
+        // Bridges stand on their bottom; runways, roads and ships retain their datums.
         let strip = definition("STRIP.OT", "_STRIPProc", 0);
         assert_eq!(footing(&strip), Footing::Pavement);
         let bridge = definition("BRDMID.OT", "_OBJProc", 0);
-        assert_eq!(footing(&bridge), Footing::MapHeight);
+        assert_eq!(footing(&bridge), Footing::Bridge);
+        assert_eq!(placement_lift_ft(&bridge, &hall, 1.), 128.);
         let ship = definition("KIROV.NT", "_NTProc", class::SHIP);
         assert_eq!(footing(&ship), Footing::Waterline);
-        for fixed in [&strip, &bridge, &ship] {
+        for fixed in [&strip, &ship] {
             assert_eq!(placement_lift_ft(fixed, &hall, 1.), 0.);
         }
         let empty = Shape {

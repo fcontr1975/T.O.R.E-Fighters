@@ -8,6 +8,12 @@
 > the original's internals, it is out of date.
 > <!-- tore-header v2 -->
 
+New worlds use [energy flight](missile-energy.md) for supported SAMs and ship
+missiles. Physical reach comes from the shared bounded prediction service;
+sensor, ownership, minimum-range, altitude, mount and skill gates remain.
+The original game guidance classifications are retained independently from
+public physical variant proxies. AAA and surface decision schedules are unchanged.
+
 Specification, 2026-10-10, for the surface-AI round (John's request of the same
 day, with his answers). It was written ahead of the code so each
 implementation slice had numbers to test against, and it now describes what
@@ -90,7 +96,8 @@ pads, factory floors, open-bottomed buildings, revetments, bunkers, compound
 sites and broad rocks without naming individual types. Fixed NT units whose
 recorded maximum speed is zero, including the SA-2 site, use the same rule.
 Mobile units, ships,
-bridges, roads, runways and tilted or explicitly raised placements retain their own rules.
+roads, runways and tilted or explicitly raised placements retain their own rules.
+Bridges use their [shared bottom support and terrain corridor](bridges.md).
 
 The foundation uses the world-axis rectangle enclosing the complete shape,
 with 2 ft of clearance at each edge. Intersecting rectangles merge into one
@@ -115,9 +122,9 @@ stay at the foundation height. This recess alone is not the slope fix.
 Other small shapes retain the existing fitted slope lift: translate the
 complete shape vertically to meet the terrain, unless its reach exceeds
 400 ft or the resulting downhill gap exceeds 30 ft. Nonqualifying placements
-retain origin support when the slope lift refuses them. Runways, bridges,
-roads and ships retain
-pavement, map-height and waterline support. Driving units tilt and settle
+retain origin support when the slope lift refuses them. Runways, roads and ships
+retain pavement, map-height and waterline support. Bridges follow the separate
+rule linked above. Driving units tilt and settle
 against the finished terrain. Buildings on a foundation therefore stand on
 the same plane as its pad.
 
@@ -205,7 +212,7 @@ engagement preparation / later preparation):
 | HAWK | MIM-23 HAWK | 100 | SA19 x4 | 5 / 15 / 10 | Uses the SA-19 record, not MIM23 |
 | ROLAND | Roland SAM | 100 | SA19 x4 | 5 / 15 / 10 | |
 | ASA5 | Crotale SAM | 100 | R440 x2 | 5 / 15 / 10 | |
-| FIM92, MIS, SA7, SA14, SA16 | Stinger, Mistral, SA-7, SA-14, SA-16 teams | 5 | one record x2 | 5 / 15 / 10 | Infantry teams; SA-16 shares the SA-14 shape |
+| FIM92, MIS, SA7, SA14, SA16 | Stinger, Mistral, SA-7, SA-14, SA-16 teams | 5 | one record x2 | 5 / 15 / 10 | Infantry teams; SA-16 shares the SA-14 shape. Since 0.2.2 neither the AI nor the player's sensors know where a team stands until the pilot spots it near or the team launches ([AI](ai-strike.md#what-the-ai-knows), [player](air-to-ground.md#hidden-shoulder-fired-teams); T.O.R.E opinionated, John 2026-10-29) |
 | SCUD | SCUD launcher | 100 | SA9 x4 | 48 / 44 / 44 | Class SAM in retail |
 
 **Ships** carry guns, missiles or nothing. The armed ones (retail):
@@ -388,8 +395,9 @@ All defined (agent): ids are an implementation contract.
 John's decision: template positions vary, they are not fixed (defined, John).
 The rules below are defined (agent) with fitted numbers.
 
-**Seed.** The creator rolls a 32-bit `surface_seed` when the player presses Fly,
-and the multiplayer lobby when the flight starts. A restart reuses it, so a
+**Seed.** The creator reserves a 32-bit `surface_seed` for the next flight
+(its map shows that layout), and Fly and the multiplayer lobby retain it; a
+launch whose layout is refused tries the next seed, as a host does. A restart reuses it, so a
 restarted mission has the same defenses and positions (retail restarts re-fly
 the same written `quick.M`). A dedicated server's mission file may name a seed;
 without one the host draws it and the mission text sent to clients carries it.
@@ -410,7 +418,10 @@ many others survive.
 **Validity** uses integer data only, so every platform decides the same:
 
 - Land units need a land cell and ships a water cell, checked at the unit's
-  centre and at the four corners of its footprint. A cell is water when its
+  centre and at the four corners of its footprint. All five points must be
+  inside the map, including for ships: the water query outside the map is not
+  a valid placement. A fleet's common move must pass the same footprint and
+  fixed-obstacle checks before it can become an individual ship's fallback. A cell is water when its
   integer class byte is 1 (open water) or when its colour byte is 255 (the
   water cutout) and no ground texture placement covers it. Those colour-255
   cells with a land class are shore cells at sea level (every one in all
@@ -425,10 +436,39 @@ many others survive.
   `surface-class-sweep` battery scenario (`--surface-dump --classes`) checks
   every offered template with 20 seeds and every base layout and fails on any
   moved unit on the wrong class.
-- Land units refuse a cell whose four corner elevations span more than one
-  elevation unit (256 ft).
+- Vehicle footing uses the final airport layout and the oriented shape footprint,
+  with nine terrain samples and pairwise grade checks. Fitted agent limits are
+  30% for tanks and 20% for other vehicles, launchers, guns and added radars.
+  John requested loosening the launcher/gun/radar policy on 2026-10-26; the
+  20% value is the agent-selected fitted limit, matching other vehicles.
+  These are grades, not angles and not recovered retail limits. A preliminary
+  conservative 10% check covers the footprint's enclosing square.
+- John requested per-unit slope placement on 2026-10-25. After airport replacement,
+  a vehicle that fails slope, solid-object clearance, runway clearance, land/water
+  or map bounds moves to the nearest valid point on a 25 ft lattice within one
+  terrain cell (8,192 ft).
+  Units are processed in ascending stable ID order, reserving other units' current
+  positions. Equal distances sort by X then Z. These search constants are fitted
+  agent choices.
+  Added trucks stay within the existing 528 ft supply reach. No equipment is removed
+  on exhaustion: the offline placement audit lists the unresolved limitation,
+  and launch refuses that layout (trying the next seed) instead of flying an
+  invalid placement. Authored vehicles
+  are moved for slope or bounds failures; coarse shoreline and assembly overlaps
+  alone are review findings until rendered-water or solid-geometry evidence exists.
+  Generated support must also pass object and runway clearance. The latter means
+  the drawn runway lanes plus 300 ft, not the entire airport apron or grass box.
+  Authored ships remain subject to rendered-water review before relocation.
 - Footprint clearance from every fixed template object and theater layout
-  object, plus 300 ft from every runway's box.
+  object, plus 300 ft from every runway's box. Jitter also avoids other template
+  units, reserving each later unit's fallback until its position is chosen.
+  Added trucks and radars avoid all solid surface units and earlier additions.
+  This collision prevention is fitted, an agent decision on 2026-10-25. Authored
+  overlaps and invalid authored fallback positions are still reported by the
+  objective audit; jitter does not repair the source assemblies.
+- A fleet's common shift tries up to 128 candidates within the same 6,000 ft
+  and 20 degree limits (fitted agent decision, 2026-10-25). The individual
+  ship still has its 300 ft and 10 degree jitter.
 - Up to 8 candidates per object from the same stream; if none passes, the
   original retail position is used (the relocated one in a relocated
   template). An NT structure (the GCI radar site) stays put like a building.
@@ -474,6 +514,11 @@ templates relocate; the 16 "nothing" templates have no objects. The
 `surface-relocate-sweep` battery scenario pins the list. The per-theater split is
 in [Per-theater notes](#per-theater-notes).
 
+Carriers with parked aircraft and their deck aircraft retain their relative
+positions during a group move and require water. They skip individual jitter.
+Relocation checks the full conservative footprint, including for fixed objects,
+through the same validity query as jitter (spec-derived corrections, 2026-10-25).
+
 **Group transform.** A relocatable template moves as a rigid group: a rotation
 about its targets' centroid by a whole number of degrees (0 to 359) and a
 translation, computed with an integer cosine and sine table (whole degrees,
@@ -490,7 +535,7 @@ the retail spot is the fallback). Radius ranges are default, pending John.
 | Distance from the retail spot | 3 to 30 nm, radius drawn as the square root of a uniform value so area is uniform (default, pending John) |
 | Map edge | every object at least two cells (16,384 ft) inside |
 | Terrain class | land units and structures on land; ships on water (water as defined under Validity, shore cells drawn as the sea included), with the 8 neighbouring cells also water when the retail spot had that (open sea stays open sea; a harbor keeps a coast) |
-| Slope | land objects only on cells whose four corner elevations span at most one unit (256 ft) |
+| Slope | Fixed land structures require cell corners spanning at most one unit (256 ft); vehicles use footprint grades, with the final per-type check under [Jitter](#jitter) |
 | Clearance | 2,000 ft from every theater layout object; 3 nm from every theater runway |
 | Side | the front axis runs from the centroid of the theater's Blue-side layout placements to the centroid of its Red-side ones; the candidate's depth along it must be within 15 nm of the retail spot's depth and on the same side of the midpoint (default, pending John) |
 | Completeness | every target and structure must pass; a defense, vehicle or truck that fails gets 8 local tries within 2,000 ft; if any still fails the candidate is rejected, so the retail rolls and counts never change because of relocation |
@@ -512,8 +557,9 @@ from the seed and is inside the digest.
   the chosen altitude. If the point does not fit the map the bearing is
   searched one degree at a time, as the enemy-placement rule does
   ([Keeping the enemy on the map](quick-mission-menu.md#keeping-the-enemy-on-the-map));
-  if no bearing fits at the full distance, the farthest that does, a mile at
-  a time. Friendly wings 2 and 3 keep their offsets from the player.
+  if no bearing fits, that distance is unavailable in the creator and launch
+  refuses it. The diagnostic solver may calculate a shorter candidate to measure
+  the limit, but a mission never launches with that substitution (John, 2026-10-25). Friendly wings 2 and 3 keep their offsets from the player.
 - **Ground starts.** An explicit runway choice is kept. With none picked, the
   default runway becomes the Blue-side airfield nearest the target that is at
   least 15 nm from it (default, pending John). An airfield's side is its
@@ -534,7 +580,13 @@ from the seed and is inside the digest.
   target, so the enemy distance setting measures Blue's run to the defended
   target, not to Red's airfield. Enemy Wing 1 must have aircraft, and it never
   shares the player's runway.
-- The target point is the targets' placed centroid. A theater with no front
+- The target point is the targets' placed centroid. Compute the starts after
+  airport replacement has moved target buildings and parked aircraft. Rank
+  airfields from their integer placement origins, including template-added strips,
+  then canonicalize merged runway IDs. Rendering trigonometry does not feed this
+  ranking or its digest. The front line is regenerated against the final target
+  and starts before scene grounding. Correcting stale objective and front geometry
+  is spec-derived; the ranking datum is fitted, an agent decision on 2026-10-25. A theater with no front
   (no owned placements on one side) starts Blue toward the middle of the map
   (fitted).
 - No ground target: unchanged (the [area defenses](#area-defenses) add no
@@ -750,7 +802,7 @@ below is fitted (agent).
   surface digest only when set, so every other mission's digest is unchanged;
   the replay header keeps them as `world.area_defense`
   ([Replays](#replays)). Online no wire byte changes: the mission text carries
-  the strengths and the host draws the seed, as for a ground target
+  the strengths and the checked seed, as for a ground target
   ([Multiplayer](#multiplayer)); a build with the area defenses and one
   without disagree on the digest and refuse each other. So do a build with
   the rolled counts and one with the first build's fixed counts: the surface
@@ -1039,14 +1091,16 @@ quarter seconds.
 | --- | --- | --- | --- |
 | Radar guns (flag 0x4000: ZSU-23, 2S6, Phalanx, AAA30) | Observed target, refreshed every tick while tracking | Time of flight and drop from the existing gunsight solution, plus aim error by skill | retail (the flag); error fitted |
 | Flak (KS-12, KS-19, radar directed) | Observed target, refreshed every tick while tracking | The same lead point, then a burst point drawn inside an egg 300 m wide and 100 m tall around it, with no aim error by skill ([flak](#flak)) | retail (the flag); egg opinionated, John, 2026-10-13 |
-| Visual guns (ZSU-57, M1939, AAA30BAD, tank and APC guns) | Observation refreshed every 0.5 s | Lead from that stale velocity, larger aim error by skill | manual pp. 157 to 158; numbers fitted |
+| Visual guns (ZSU-57, M1939, AAA30BAD, IFV and APC guns, tank guns at a ground target) | Observation refreshed every 0.5 s | Lead from that stale velocity, larger aim error by skill | manual pp. 157 to 158; numbers fitted |
+| Tank guns (M1, and the T-72 record of the T-72, T-80 and T-90) at an aircraft | The same stale observation, and only an aircraft within 20 degrees above the hull | The visual guns' lead, the visual guns' error plus 0.4 degrees, plus 0.2 s of the sight line's turn rate; a 3 s lay before the first round ([tanks against aircraft](#tanks-against-aircraft)) | fitted, agent; the 20 degrees John's, 2026-10-24 |
 | Small arms (a squad's SMLARMS) at an aircraft | The same stale observation as a visual gun, carried on at 30 percent of the target's velocity | Lead 30 percent of the gunsight solution and four times the visual guns' aim error by skill ([small arms](#small-arms)) | fitted, agent, 2026-10-12 |
 
 Aim error by skill is a random angular offset per burst plus the existing
 per-round dispersion: radar guns 0.6, 0.4, 0.3 and 0.2 degrees; visual guns 1.5,
 1.0, 0.7 and 0.5 degrees for novice, average, veteran and ace. Fitted. A jammer
 on the target widens a radar-directed gun's aim error two times; visual guns
-are unaffected (defined, John, 2026-10-10: "fine for now").
+are unaffected (defined, John, 2026-10-10: "fine for now"). A tank gun at an
+aircraft aims wider still ([tanks against aircraft](#tanks-against-aircraft)).
 
 #### Small arms
 
@@ -1163,6 +1217,66 @@ unit with no side, or an aircraft that is still on the ground. The unit tests
 `an_airfields_squad_and_gun_fire_at_enemies_target_or_not_and_never_at_their_own_side`
 and `guns_fire_only_at_the_other_sides_airborne_aircraft` hold it for a squad
 and a ZSU-23 with and without the target flag.
+
+#### Tanks against aircraft
+
+John, 2026-10-24: "Tanks accuracy on aircraft need a nerf and max elevation of
+fire set to like 20 degrees up. Whatever the current accuracy is we need to
+make realistic changes to cut it by 66%. Tanks should be a surprise if they
+kill you, not be godlike snipers." Before this, a tank fired its 125 mm or
+120 mm gun at an aircraft as any visual AAA gun does, at any elevation its
+fire zone allowed, and one hit kills a helicopter or a fighter (200 damage),
+so an average T-72 killed a 450 kt jet passing 200 ft over it in two passes
+of three and a helicopter hovering 0.5 km out almost every time.
+
+The rules, for the M1's M256 and the 2A46 the T-72, T-80 and T-90 fire, only
+at an aircraft (a tank's fire at ground units and ships is unchanged):
+
+| Rule | What the player sees | Why | Basis |
+| --- | --- | --- | --- |
+| Elevation ceiling | A tank never takes, tracks, turns to or fires at an aircraft more than 20 degrees above its hull's horizontal plane (the hull's own frame, so a tank on a slope measures from its deck). It stays awake and takes the aircraft once it is lower in the sky; a round whose lead would leave above 20 degrees is not fired and stays in the magazine | The M1's gun elevates to +20 degrees, the T-72's to about +14 | opinionated (John, 2026-10-24) |
+| Lay before the first round | The first round at an aircraft leaves 3 s after the aircraft has been inside the gun's reach and ceiling, on top of the record's 1 s lock; if the aircraft leaves them, the lay starts again when it is back. Later rounds follow the gun's own cycle | The gunner must lay, lase and track for the fire control to settle a lead, and can only do it once the target is in the sight inside the gun's reach | fitted (agent) |
+| Fire control error | The visual guns' error by skill plus 0.4 degrees, the same at every experience: 1.9, 1.4, 1.1 and 0.9 degrees at a hovering helicopter for novice, average, veteran and ace | A tank's ballistic computer has no air target mode, its laser ranges poorly on a small target against the sky, and its round must strike (no proximity fuze); a better crew tracks better but cannot range better | fitted (agent) |
+| Tracking lag | The error grows by 0.2 s of the sight line's turn rate: nothing for a hovering helicopter or a head-on aircraft, 0.6 degrees for a 100 kt helicopter crossing 3,000 ft away, 9 degrees for a 450 kt jet crossing 1,000 ft away | Turret and gun drives and the stabiliser are built to hold a slow ground target; a gunner tracking a crossing aircraft lags it, and the lead taken from that tracking carries the lag | fitted (agent) |
+| Rate of fire | Unchanged: the M1 one round every 9.75 s, the T-72 every 7.25 s ([AAA tuning](#aaa-tuning)) | Already a real loader's and autoloader's pace; a faster rate was not the problem | fitted (unchanged) |
+| Machine guns | None: every tank NT carries its main gun only (survey 2.3 to 2.5), so there is no roof or coaxial machine gun to tune | retail data | retail |
+
+The armoured cars and APCs keep the visual guns' rules (John's scope, 2026-10-24,
+"tanks only"; they are listed for a later decision): the BMP-2's 2A42 30 mm
+(300 rounds a minute, 20-round bursts, a 3 s pause, 3,150 ft/s, 1.5 to 0.5
+degrees by skill), the BTR-80's KPVT 14.5 mm (600, 10-round bursts), the
+M113's M2HB .50 cal (500, 21-round bursts) and the Bradley's (M2) M242 25 mm
+(200, 20-round bursts), all to 3,000 ft and 3,000 ft up with no elevation
+ceiling beyond their records' zones.
+
+Measured on 2026-10-24 with the surface trace (one T-72 of `~QIRRETR` armed,
+an AH-64 or F-16C on a scripted line, 40 to 60 passes a row; the method and
+every row are in the [baseline](../baselines/tank-air-accuracy.md)). Kill a
+pass is the share of passes in which the tank killed the aircraft (one hit
+kills either):
+
+| Pass (average experience unless stated) | Before | After |
+| --- | ---: | ---: |
+| Helicopter hovering 300 ft up, 0.5 km out (60 s) | 98% | 80% |
+| Helicopter hovering 300 ft up, 1 km out | 33% | 18% |
+| Helicopter hovering 1,500 ft up, 1 km out (24 degrees up) | 48% | 0% (not engaged) |
+| Helicopter at 80 kt, 500 ft, 0.5 km to the side | 92% | 32% |
+| Helicopter at 120 kt, 1,000 ft, straight over | 95% | 0% |
+| Jet at 450 kt, 200 ft, straight over | 68% | 3% |
+| Jet at 500 kt, 300 ft, 0.5 km to the side | 18% | 0% |
+| Jet at 400 kt, 2,500 ft, straight over | 15% | 0% (always above 20 degrees in reach) |
+| Mean of the 13 passes in reach, average | 45% | 14% (a 70 percent cut) |
+| The same, ace | 76% | 25% (67 percent) |
+| The same, novice | 28% | 8% (70 percent) |
+
+The ceiling alone takes a little over a third of the cut (average: 45 to 28
+percent); the lay, the ranging error and the lag the rest. The battery
+scenario `surface-tank-aa` holds the rules: no round at a helicopter 24
+degrees up, the first round at a low hovering one 4 s after the lock, every
+round at a jet 200 ft over the tank at 20 degrees or less and none at a jet
+2,500 ft over it. A network client remakes a tank's round from the host's
+burst as before (one round a burst, so its direction is the host's); a round
+the ceiling holds back is never sent, and no wire field changed.
 
 #### Flak
 
@@ -1536,7 +1650,7 @@ radars to the rules above. Where the rules leave a choice, it chose as follows
 | Gun bursts | A burst's rounds leave evenly over its burst time; the first engagement's opening barrage (`startupShots`) spaces its rounds by the burst's round spacing, at least a quarter second apart; the flak's are 0.75 s apart (KS-12 and KS-19: 8 shells in 6 s; John, 2026-10-14) | fitted; flak opinionated |
 | Where rounds leave from | A **missile** leaves its rail: the unit's pose this tick (a moving unit fires from where it is, with its velocity) plus the hardpoint offset at real size (a third of the record's) turned by the unit's attitude, at least 5 ft above the terrain. A **land gun** leaves the end of its drawn barrel ([muzzles](#muzzles)), and a **ship's gun** its hardpoint, which sits at the gun. Radars and sights look from 10 ft above the unit's reference point | fitted |
 | RWR reception of a ground radar | The terrain test ends at least 10 ft above the ground under the radar (its antenna), so a unit whose contact volume sits low on a slope still shows its square | fitted |
-| Mount arcs | A half-arc of 0 is unrestricted on that axis (every land vehicle reads 0 for heading); otherwise the bearing (guns: and elevation) must lie inside the half-arc of the mount's rest direction, relative to the hull. A missile's launch pitch is the line to the target clamped between 10 degrees and the rail's arc | inference, fitted |
+| Mount arcs | A half-arc of 0 is unrestricted on that axis (every land vehicle reads 0 for heading); otherwise the bearing (guns: and elevation) must lie inside the half-arc of the mount's rest direction, relative to the hull. A missile's launch pitch is the line to the target clamped between 10 degrees and the rail's arc. A tank gun takes, and fires at, no aircraft more than 20 degrees above its hull's horizontal plane ([tanks against aircraft](#tanks-against-aircraft)) | inference, fitted; the tank ceiling opinionated (John, 2026-10-24) |
 | Altitude bands | Zone altitudes are the target's height above the unit, as the AI's envelopes take them | spec-derived (B45) |
 | Gun reach and range | A gun's launch range is its fire zone capped by its shells' reach; a round ends 15 percent (at least 500 ft) past the target; a flak shell's time fuze is its time of flight to its own burst point in the egg around the lead point ([flak](#flak)) | fitted |
 | Lead | A radar gun observes its target every tick; a visual gun every 0.5 s and leads from that stale track; both through the shared gunsight time-of-flight solution | spec-derived, fitted refresh |
@@ -1746,8 +1860,14 @@ flowchart TD
 4. **New element.** Otherwise a radar is added: 600 to 1,000 ft from the
    launcher centroid (1,000 to 1,500 ft from an SA2A site's centre, outside the
    six-rail ring), with the jitter validity rules and clear of its launchers,
-   moving with its template's group transform; if no candidate stands, the
-   first drawn. Added radars are never targets. Base layouts draw their
+   moving with its template's group transform. The bounded support search
+   tries 128 candidates and also avoids other solid units and earlier additions.
+   The completed airport layout then applies the nearest valid footprint search
+   under [Jitter](#jitter). If that search also exhausts, the unit remains in the
+   diagnostic scene with its ID and separate failure reasons; normal launch is
+   refused. No equipment count is reduced. The ring search and collision checks
+   are fitted agent choices; the per-unit repair policy is John's 2026-10-25 decision.
+   Added radars are never targets. Base layouts draw their
    radars from seed 0, so a base layout looks the same in every flight. A
    battery whose radar element the import cannot place (its record or shape
    missing) is not formed and its launchers stay self-contained, so a mission
@@ -1805,8 +1925,13 @@ SAM rails and AAA magazines, within 0.1 mile (defined, John).
   serves essentially one slot. A battery's own truck serves its first launcher
   that has no slot truck (a named launcher), else its first launcher. Placed
   200 to 400 ft from the unit it serves (after that unit's jitter), with the
-  same validity rules and clear of it; the first drawn spot when none stands;
-  ownership is the slot's. Ids `0x5800_0000` up, in the order of the units
+  same validity rules and clear of every solid unit and earlier support addition.
+  The search tries 128 seeded candidates. With none valid, retain the existing
+  first-candidate fallback and identify the truck and served unit in the layout
+  notes. The audit still reports every broken rule. Omitting requested support
+  or moving its authored owner needs a placement-policy decision. The longer
+  search and collision checks are fitted agent decisions from the objective
+  audit on 2026-10-25. Ownership is the slot's. Ids `0x5800_0000` up, in the order of the units
   served (a slot's truck before its battery's).
   Trucks are passive units, targetable, Vehicle class (0x0200), and move with the
   defended group's relocation. Never targets. Number and placement: fitted,
@@ -2103,9 +2228,10 @@ John accepted the recommended looks (12.4).
 | Carriers | The `_A` hull, the island's own damage branch (`shape::DAMAGED_WORD`), the deck tractors as they were and the deck crew gone, burning | retail shapes, fitted parts rule |
 | Ground vehicles, SAM launchers, AAA guns (and a layout's vehicles with no unit record, such as parked fuel trucks) | Replace with the DEST.SH wreck ("Destroyed Vehicle", DEST.OT, hp 0) at the unit's pose, standing on its own lowest point like the unit it replaces; about half of them burn with fire and smoke for 15 minutes, the others only smoke ([wreck fires](#wreck-fires)) | retail wreck object; the swap rule is untraced (fitted); the half that burn: John, 2026-10-12 |
 | Buildings with a damaged variant (`~BNK5`, `~BNK6`, `~BNK8`, and in layouts `~COLTWR`) | Swap to the damaged OT's shape; burns | retail look; fire John, 2026-10-12 |
-| Buildings whose shape holds a damage branch (57 types: hangars, towers, fuel tanks, factories, stores, bunkers, masts, bridge spans; [the survey](../formats/objects-and-shapes.md#destroyed-looks-of-buildings-and-bridges-2026-10-12)) | The shape's own damaged copy (`shape::DAMAGED_WORD`), on its own lowest point; burns, except a bridge, whose span breaks or drops | retail shapes (B16, 2026-10-12); the condition the original draws it on is unknown, here destruction |
+| Buildings whose shape holds a damage branch (57 types: hangars, towers, fuel tanks, factories, stores, bunkers, masts, bridge spans; [the survey](../formats/objects-and-shapes.md#destroyed-looks-of-buildings-and-bridges-2026-10-12)) | The shape's own damaged copy (`shape::DAMAGED_WORD`), on its own lowest point; burns, except a bridge, whose span breaks or drops at the intact bridge's datum | retail shapes (B16, 2026-10-12); the condition the original draws it on is unknown, here destruction |
 | Other buildings (city and town blocks, houses, apartments, industry without a branch, sites, tents, crates) | A ruin generated from the intact shape: split, sunk to 6 to 30 percent of its height, its fallen roof partly charred; burns | fitted, agent decision (B16, 2026-10-12) |
-| Runways, roads, lots, crops, bridge ends, rocks | Stay as they stood; a runway keeps the craters of every weapon that hit it | runway B15; the rest agent decision (B16) |
+| Bridge ends (BR1END, BR2END, BR3END, BRDEND) | The same generated ruin as buildings, at the intact bottom; no persistent fire or smoke | John, 2026-10-25; [bridge behavior](bridges.md) |
+| Runways, roads, lots, crops, rocks | Stay as they stood; a runway keeps the craters of every weapon that hit it | runway B15; the rest agent decision (B16) |
 | Parked aircraft | A burnt hulk: its own shape sunk, torn and charred ([parked aircraft](#parked-aircraft)), after the type 30 explosion; a scorch (none on a deck), fire and smoke for 15 minutes; no crater, no crash site and no flying piece | John, 2026-10-13 (hulk); the hulk's numbers and the fire: agent decision |
 | Men whose shape holds a damaged model (TROOPS) | The shape's own damaged copy, the men lying on the ground, on its own lowest point; no fire | retail shape (John, 2026-10-13) |
 | Other men (SOLDIER, RUNNER, EJECT: no damaged model in retail), barrage zones | Removed | retail has no body art for them |
@@ -2488,7 +2614,7 @@ and the player's view in [the multiplayer guide](../MULTIPLAYER.md#ground-target
 
 - **Authority.** The host (or dedicated server) runs all surface AI, movement,
   firing, resupply and damage. Every client builds the same surface world from
-  the mission text and the seed the host draws, and checks the digest
+  the mission text and its accepted seed, and checks the digest
   ([Jitter](#jitter)) at seating and at a resume: placement, relocation,
   batteries, trucks, parked aircraft, both sides' starts and the
   [area defenses](#area-defenses) all come from the seed, so none of it

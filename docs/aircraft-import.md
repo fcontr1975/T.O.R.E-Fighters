@@ -8,6 +8,12 @@
 > the original's internals, it is out of date.
 > <!-- tore-header v2 -->
 
+Powered guided store masses now resolve through the authored public/class
+[missile data table](formats/missile-energy-data.md#loaded-aircraft-mass-changes).
+Decoded retail weight remains available for inspection, compatibility effects
+and radar-signature proxies. Carried mass and loadout totals use the resolved
+mass; importing does not rewrite the user's media or alias aircraft variants.
+
 The opinionated **F/A-XX** concept is also selectable as `--aircraft faxx` or
 from Quick Mission. Since 2026-09-22 it uses the validated F-22N import
 (`--aircraft f22n`, the stock carrier Raptor with its own hook) without extra

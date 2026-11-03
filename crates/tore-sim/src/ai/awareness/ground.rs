@@ -16,7 +16,15 @@
 //! - the **threat inputs**: the known SAM and AAA sites with their reach, the
 //!   hostile fighters within 30 nm, and retail's threat geometry.
 //!
+//! A shoulder-fired SAM team (a MANPADS site) is hidden: no briefing names
+//! it, the A-G radar and FLIR lists leave it out, and the eye lists it only
+//! within a short spotting distance ([`team_spot_ft`]). It is also known from
+//! the moment it launches at the aircraft or at a friendly the aircraft sees
+//! ([`GroundPicture::unmask`]). T.O.R.E opinionated change requested by John
+//! on 2026-10-29: such a team can really ambush an AI aircraft.
+//!
 //! Every value is a deterministic function of the inputs: no draws.
+use crate::ai::Experience;
 use crate::ai::engagement::{OPPORTUNITY_RADIUS_FT, StrikeObjective, StrikeRole};
 use crate::ai::targeting::{ObjectId, Side, StrikeCandidate, StrikeSource};
 use crate::attitude::Vector;
@@ -39,6 +47,20 @@ pub const RETAIL_ALWAYS_FT: f64 = 20_000.;
 /// and one between is evaded only while the aircraft is within 100 degrees of
 /// the threat's nose.
 pub const RETAIL_NOSE_DEG: f64 = 100.;
+/// How near the eye must be to list a hidden shoulder-fired SAM team, feet,
+/// by the pilot's skill (Novice, Average, Experienced, Ace), in clear air
+/// (fitted, agent, 2026-10-29: a few men in cover, against the 19,968 ft at
+/// which the eye lists every other missile or gun site; the driver's
+/// stand-in used 3,000 ft).
+pub const TEAM_SPOT_FT: [f64; 4] = [2_000., 3_000., 3_500., 4_000.];
+
+/// How near the eye of a pilot of `experience` must be to list a hidden
+/// shoulder-fired SAM team, feet: [`TEAM_SPOT_FT`] scaled by the weather's
+/// visual effect along the line (`visual_percent`, 100 in clear air; the
+/// sensors' weather selector 0).
+pub fn team_spot_ft(experience: Experience, visual_percent: f64) -> f64 {
+    TEAM_SPOT_FT[experience as usize] * (visual_percent / 100.).clamp(0., 1.)
+}
 
 /// What the host knows of an armed surface unit or a radar, for the threat
 /// picture. Captured when the striker perceives it (or is briefed on it).
@@ -47,6 +69,12 @@ pub struct DefenseFacts {
     /// The farthest its missiles may be launched (launch zone maximum),
     /// feet; 0 with none.
     pub missile_reach_ft: f64,
+    /// The farthest its missiles may be launched at a helicopter, feet: the
+    /// helicopter's threat ring's reach (docs/spec/ai-strike.md, "Helicopter
+    /// threat awareness"). Under the energy rules a bound on the launch gate
+    /// against a helicopter, which may lie past the launch zone; under the
+    /// other rules the launch zone. 0 with no missiles.
+    pub rotor_reach_ft: f64,
     /// The farthest its guns fire, feet; 0 with none.
     pub gun_reach_ft: f64,
     /// A radar: its own search radar or a battery's.
@@ -69,6 +97,8 @@ pub struct GroundSubject {
     pub object: GroundObject,
     pub side: Side,
     pub defense: Option<DefenseFacts>,
+    /// A shoulder-fired SAM team: hidden until spotted (module comment).
+    pub hidden: bool,
 }
 
 /// Every ground object of one refresh, with the weather's sensor effects.
@@ -81,6 +111,10 @@ pub struct GroundScene<'a> {
     /// pairs: the radar and the launchers it guides for (slice H4). A
     /// helicopter learns where they stand.
     pub painted: &'a [(u32, u32)],
+    /// The hidden sites' rounds in the air, as (aircraft aimed at, unit)
+    /// pairs, ascending: a launch gives a hidden site away
+    /// ([`GroundPicture::unmask`]).
+    pub launched: &'a [(u32, u32)],
 }
 
 /// Which of the AI's lists hold a contact.
@@ -300,6 +334,15 @@ impl ThreatPicture {
     }
 }
 
+/// A hidden site the picture learned of from its launch, with nothing else
+/// having shown it before: the tick of that refresh. The helicopter's ambush
+/// rule reads it ([`crate::ai::helicopter_threat::rings_before_shot`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unmasked {
+    pub id: u32,
+    pub tick: u64,
+}
+
 /// What a refresh must do for one picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refresh {
@@ -329,6 +372,9 @@ pub struct GroundPicture {
     /// Objective targets, then defences, then the order, each ascending id.
     briefed: Vec<BriefedTarget>,
     threats: ThreatPicture,
+    /// The hidden sites first known by their launch, ascending id, while
+    /// they stand.
+    unmasked: Vec<Unmasked>,
 }
 
 impl GroundPicture {
@@ -343,6 +389,7 @@ impl GroundPicture {
             seen: Vec::new(),
             briefed: Vec::new(),
             threats: ThreatPicture::default(),
+            unmasked: Vec::new(),
         }
     }
     pub fn role(&self) -> StrikeRole {
@@ -412,6 +459,14 @@ impl GroundPicture {
     }
     pub fn threats(&self) -> &ThreatPicture {
         &self.threats
+    }
+    /// When a hidden site that nothing else had shown became known by its
+    /// launch (the refresh's tick), while it stands.
+    pub fn unmasked_at(&self, id: u32) -> Option<u64> {
+        self.unmasked
+            .binary_search_by_key(&id, |u| u.id)
+            .ok()
+            .map(|at| self.unmasked[at].tick)
     }
 
     /// What a refresh at `tick` must do: rebuild every 6 s (and when never
@@ -484,41 +539,71 @@ impl GroundPicture {
     /// standing defences are taken.
     pub(crate) fn reveal(&mut self, tick: u64, ids: &[u32], subjects: &Subjects<'_>) {
         for id in ids {
-            let Some(subject) = subjects.get(*id) else {
-                continue;
-            };
-            let Some(facts) = subject.defense else {
-                continue;
-            };
-            if subject.object.destroyed {
-                continue;
-            }
-            let entry = SeenGround {
-                id: *id,
-                side: subject.side,
-                class: subject.object.class,
-                position: subject.object.position,
-                last_seen_tick: tick,
-                emitting: subject.object.emitting,
-                defense: Some(facts),
-            };
-            match self.seen.binary_search_by_key(id, |s| s.id) {
-                Ok(at) => self.seen[at] = entry,
-                Err(at) => self.seen.insert(at, entry),
-            }
-            if let Err(at) = self.threats.defenses.binary_search_by_key(id, |d| d.id) {
-                self.threats.defenses.insert(
-                    at,
-                    KnownDefense {
-                        id: *id,
-                        side: subject.side,
-                        position: subject.object.position,
-                        facts,
-                        briefed: false,
-                    },
-                );
+            self.know(tick, *id, subjects);
+        }
+    }
+
+    /// A hidden site that launched at the aircraft, or at a friendly it
+    /// sees, is known from now on as if seen (T.O.R.E opinionated change
+    /// requested by John, 2026-10-29), so any later shot comes from a known
+    /// site. When nothing had shown it before, the tick is kept
+    /// ([`Self::unmasked_at`]): the shot that gave it away still came from a
+    /// site the aircraft did not know.
+    pub(crate) fn unmask(&mut self, tick: u64, ids: &[u32], subjects: &Subjects<'_>) {
+        for id in ids {
+            let known = self.seen.binary_search_by_key(id, |s| s.id).is_ok()
+                || self
+                    .threats
+                    .defenses
+                    .binary_search_by_key(id, |d| d.id)
+                    .is_ok();
+            if self.know(tick, *id, subjects)
+                && !known
+                && let Err(at) = self.unmasked.binary_search_by_key(id, |u| u.id)
+            {
+                self.unmasked.insert(at, Unmasked { id: *id, tick });
             }
         }
+    }
+
+    /// Puts a standing defence into the memory and the threat inputs at
+    /// once. False when it is no standing defence.
+    fn know(&mut self, tick: u64, id: u32, subjects: &Subjects<'_>) -> bool {
+        let Some(subject) = subjects.get(id) else {
+            return false;
+        };
+        let Some(facts) = subject.defense else {
+            return false;
+        };
+        if subject.object.destroyed {
+            return false;
+        }
+        let entry = SeenGround {
+            id,
+            side: subject.side,
+            class: subject.object.class,
+            position: subject.object.position,
+            last_seen_tick: tick,
+            emitting: subject.object.emitting,
+            defense: Some(facts),
+        };
+        match self.seen.binary_search_by_key(&id, |s| s.id) {
+            Ok(at) => self.seen[at] = entry,
+            Err(at) => self.seen.insert(at, entry),
+        }
+        if let Err(at) = self.threats.defenses.binary_search_by_key(&id, |d| d.id) {
+            self.threats.defenses.insert(
+                at,
+                KnownDefense {
+                    id,
+                    side: subject.side,
+                    position: subject.object.position,
+                    facts,
+                    briefed: false,
+                },
+            );
+        }
+        true
     }
 
     /// Between rebuilds: each listed contact follows its object (a gone one
@@ -556,6 +641,9 @@ impl GroundPicture {
                 .get(seen.id)
                 .is_some_and(|subject| !subject.object.destroyed)
         });
+        let seen = &self.seen;
+        self.unmasked
+            .retain(|u| seen.binary_search_by_key(&u.id, |s| s.id).is_ok());
         for track in self.contacts.iter().filter(|t| !t.destroyed) {
             let defense = subjects.get(track.id).and_then(|s| s.defense);
             let entry = SeenGround {

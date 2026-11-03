@@ -277,7 +277,7 @@ impl<'a> Ground<'a> {
     /// grid's elevation bytes (256 ft each) interpolated over the two
     /// triangles of a cell as the terrain does (`Terrain::height`). A point
     /// off the grid reads the nearest cell.
-    fn height_scaled(&self, point: [i64; 2]) -> i64 {
+    pub fn height_scaled(&self, point: [i64; 2]) -> i64 {
         let extent = self.extent();
         let at = |axis: usize, cells: usize| {
             let p = point[axis].clamp(0, extent[axis]);

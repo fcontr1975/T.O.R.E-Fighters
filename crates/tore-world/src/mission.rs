@@ -222,6 +222,48 @@ impl Defense {
     }
 }
 
+/// The creator's "Your situation is" setting (field 16; manual p.19): the
+/// friendly group holds the advantage (behind the enemy, on its tail), meets
+/// it head-on (neutral, the default) or is at a disadvantage (the enemy
+/// behind, on the friendly group's tail). It shapes an airborne start with no
+/// ground target; see `docs/spec/quick-mission-menu.md#situation`. Text form
+/// `situation advantage` or `situation disadvantage`, absent when neutral.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Situation {
+    Advantage,
+    #[default]
+    Neutral,
+    Disadvantage,
+}
+
+impl Situation {
+    /// In the creator's list order (field 16).
+    pub const ALL: [Situation; 3] = [Self::Advantage, Self::Neutral, Self::Disadvantage];
+
+    /// The text form's word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Advantage => "advantage",
+            Self::Neutral => "neutral",
+            Self::Disadvantage => "disadvantage",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == word)
+    }
+
+    /// The creator's list index (field 16): 0 advantage, 1 neutral, 2
+    /// disadvantage.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+}
+
 /// The template stems the creator offers as ground targets in a theater, in
 /// menu order after the leading "nothing" entry, or none for an unknown
 /// theater. A `~` layout variant offers its base theater's.
@@ -473,7 +515,7 @@ impl LoadoutSpec {
             let pod = tore_sim::combat::sight::DesignatorStore::parse(&name, bytes)?;
             base.load_designator(index, pod)?;
         }
-        base.refresh_equipment()?;
+        base.normalize_saved_store_pairs()?;
         Ok(base)
     }
 }
@@ -544,6 +586,54 @@ impl LoadoutSpec {
                 .ok_or_else(|| std::io::Error::other(format!("missing loadout resource {name}")))
         })?;
         let load = self.apply(standard.clone(), resources, None)?;
+        // Saved local loads migrate in apply; a live lobby request must
+        // already obey the current pair rule, including its layout count.
+        // The refusal names pairing only when an odd count on a two-sided
+        // point is the cause.
+        for (index, (requested, actual)) in self
+            .stations
+            .iter()
+            .zip(&load.configuration.stations)
+            .enumerate()
+        {
+            if requested.count != actual.count {
+                return Err(if load.store_pairs(index).valid(requested.count) {
+                    "Loadout capacity must match the current loadout."
+                } else {
+                    "Paired stores must be loaded in pairs."
+                }
+                .into());
+            }
+        }
+        for (index, requested) in self.stations.iter().enumerate() {
+            if !requested.weapon.ends_with(".SEE") && requested.quantity != load.quantities[index] {
+                return Err(if load.store_pairs(index).valid(requested.quantity) {
+                    "Store quantity must match the current loadout limits."
+                } else {
+                    "Paired stores must be loaded in pairs."
+                }
+                .into());
+            }
+        }
+        if let Some(tanks) = &self.tanks {
+            for requested in tanks {
+                if let Some(t) = load.configuration.tanks.iter().find(|t| {
+                    t.hardpoint == usize::from(requested.hardpoint)
+                        && t.quantity != requested.quantity
+                }) {
+                    return Err(
+                        if tore_sim::combat::loading::StorePairs::of(t.rack, t.mount)
+                            .valid(requested.quantity)
+                        {
+                            "Tank quantity must match the current loadout limits."
+                        } else {
+                            "Paired tanks must be loaded in pairs."
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
         for (index, station) in load.configuration.stations.iter().enumerate() {
             let default = &standard.configuration.stations[index];
             if default.count == 0 && station.count == 0 && load.quantities[index] == 0 {
@@ -612,6 +702,8 @@ pub struct MissionSpec {
     /// The enemy's distance in nautical miles, one of the creator's
     /// [`SEPARATION_NM`].
     pub separation_nm: u32,
+    /// Who is on whose tail at an airborne start; see [`Situation`].
+    pub situation: Situation,
     /// The AI's standing orders for groups that inherit.
     pub preset: Preset,
     /// The creator's air combat setting: guns only.
@@ -701,6 +793,7 @@ impl MissionSpec {
             },
             enemy_start: EnemyStart::Airborne,
             separation_nm: 5,
+            situation: Situation::Neutral,
             preset: Preset::Free,
             guns_only: false,
             wings: [
@@ -1179,6 +1272,11 @@ impl MissionSpec {
             EnemyStart::GroundAuto => line("enemy-start ground auto".to_owned()),
         }
         line(format!("separation-nm {}", self.separation_nm));
+        // Written only when not neutral, so a mission without one reads as
+        // it always did.
+        if self.situation != Situation::Neutral {
+            line(format!("situation {}", self.situation.name()));
+        }
         line(format!("preset {}", self.preset.name()));
         line(format!("guns-only {}", yes_no(self.guns_only)));
         let absent = self.absent_wing();
@@ -1565,6 +1663,7 @@ struct Parser {
     start: Option<Start>,
     enemy_start: Option<EnemyStart>,
     separation: Option<u32>,
+    situation: Option<Situation>,
     preset: Option<Preset>,
     guns_only: Option<bool>,
     wings: [Option<WingSpec>; WINGS],
@@ -1831,6 +1930,18 @@ impl Parser {
                     ));
                 }
                 once(&mut self.separation, "`separation-nm`", nm)
+            }
+            "situation" => {
+                let [word] = arguments(words, 1, "situation NAME")? else {
+                    unreachable!("one argument")
+                };
+                match Situation::parse(word) {
+                    Some(situation) => once(&mut self.situation, "`situation`", situation),
+                    None => refuse(format!(
+                        "`{word}` is not a situation; the choices are {}",
+                        join(Situation::ALL.map(Situation::name))
+                    )),
+                }
             }
             "preset" => {
                 let [name] = arguments(words, 1, "preset NAME")? else {
@@ -2313,6 +2424,7 @@ impl Parser {
         if let Some(nm) = self.separation {
             spec.separation_nm = nm;
         }
+        spec.situation = self.situation.unwrap_or_default();
         if let Some(preset) = self.preset {
             spec.preset = preset;
         }
@@ -2507,6 +2619,7 @@ mod tests {
             altitude_ft: 10_000,
         };
         spec.separation_nm = 300;
+        spec.situation = Situation::Disadvantage;
         spec.preset = Preset::SelfDefense;
         spec.guns_only = true;
         spec.wings = [
@@ -2597,6 +2710,31 @@ mod tests {
     }
 
     #[test]
+    fn the_situation_is_written_only_when_not_neutral() {
+        let mut spec = MissionSpec::new("UKR", AircraftId::F18);
+        assert!(!spec.to_text().contains("situation"));
+        for (index, situation) in Situation::ALL.into_iter().enumerate() {
+            assert_eq!(Situation::from_index(index), Some(situation));
+            assert_eq!(situation.index(), index);
+            spec.situation = situation;
+            let text = spec.to_text();
+            assert_eq!(
+                text.contains(&format!("situation {}", situation.name())),
+                situation != Situation::Neutral
+            );
+            assert_eq!(MissionSpec::from_text(&text).unwrap().situation, situation);
+        }
+        let text = MissionSpec::new("UKR", AircraftId::F18).to_text();
+        let error = MissionSpec::from_text(&format!("{text}situation behind\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a situation"), "{error}");
+        let twice =
+            MissionSpec::from_text(&format!("{text}situation advantage\nsituation advantage\n"));
+        assert!(twice.is_err());
+    }
+
+    #[test]
     fn every_setting_round_trips_through_the_text_form() {
         let spec = busy();
         spec.validate().unwrap();
@@ -2632,6 +2770,11 @@ mod tests {
         for preset in Preset::ALL {
             let mut spec = MissionSpec::new("UKR", AircraftId::F18);
             spec.preset = preset;
+            specs.push(spec);
+        }
+        for situation in Situation::ALL {
+            let mut spec = MissionSpec::new("UKR", AircraftId::F18);
+            spec.situation = situation;
             specs.push(spec);
         }
         for altitude_ft in ALTITUDES_FT {

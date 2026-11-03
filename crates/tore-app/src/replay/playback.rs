@@ -21,6 +21,50 @@ use tore_replay::{
 use tore_sim::combat::smoke::{Kind, Puff, Smoke};
 use tore_sim::vapor::{COMMIT_TICKS, Vapor};
 
+#[derive(Clone, Copy, Debug)]
+struct RecordedMotor {
+    start: u64,
+    boost_end: u64,
+    end: u64,
+    boost: bool,
+    sustain: bool,
+}
+impl RecordedMotor {
+    fn read(e: &tore_replay::Event) -> Option<(u32, Self)> {
+        if e.kind != tore_replay::vocab::kind::WEAPON_LAUNCH
+            || e.get("missile-model")?.as_str()? != "energy-1"
+        {
+            return None;
+        }
+        let read = |key| u64::try_from(e.get(key)?.as_i64()?).ok();
+        let result = Self {
+            start: read("motor-ignition")?,
+            boost_end: read("motor-boost-end")?,
+            end: read("motor-end")?,
+            boost: e.get("motor-boost-powered")?.as_bool()?,
+            sustain: e.get("motor-sustain-powered")?.as_bool()?,
+        };
+        if result.start > result.boost_end || result.boost_end > result.end {
+            return None;
+        }
+        Some((
+            e.get(tore_replay::vocab::field::PROJECTILE)?.as_id()?,
+            result,
+        ))
+    }
+    fn powered(self, age: u64) -> bool {
+        (self.boost && (self.start..self.boost_end).contains(&age))
+            || (self.sustain && (self.boost_end..self.end).contains(&age))
+    }
+}
+fn recorded_motors(recording: &Recording) -> BTreeMap<u32, RecordedMotor> {
+    recording
+        .events()
+        .iter()
+        .filter_map(|t| RecordedMotor::read(&t.event))
+        .collect()
+}
+
 /// Decoded chunks kept around the playhead: enough for the vapor's look
 /// back and a few seconds either way.
 const CHUNK_CACHE: usize = 8;
@@ -136,6 +180,7 @@ pub struct Playback {
     /// the import ([`Playback::add_motors`]): a round draws its flame only
     /// while its motor burns (bug B7). Without them no flame is drawn.
     motors: BTreeMap<String, Option<crate::regen::Motor>>,
+    recorded_motors: BTreeMap<u32, RecordedMotor>,
     /// Rebuilds from the recording that smoke and vapor made, and steps on
     /// from the tick before them (tests only).
     #[cfg(test)]
@@ -168,6 +213,7 @@ impl Playback {
             marks: convert::recorded_marks(&recording),
             city: recording.city().clone(),
             stores: tore_replay::stores::StoreTrack::from_events(recording.events()),
+            recorded_motors: recorded_motors(&recording),
             recording,
             first,
             last,
@@ -214,6 +260,7 @@ impl Playback {
         self.identities = Identities::of(&recording);
         self.stores = tore_replay::stores::StoreTrack::from_events(recording.events());
         self.city = recording.city().clone();
+        self.recorded_motors = recorded_motors(&recording);
         self.recording = recording;
         self.pair = None;
         self.smoke = None;
@@ -279,6 +326,10 @@ impl Playback {
         );
         // The recorded age of each round dates its motor.
         for (pose, state) in snapshot.projectiles.iter_mut().zip(&frame.projectiles) {
+            if let Some(motor) = self.recorded_motors.get(&state.id) {
+                pose.powered = !pose.gun && motor.powered(u64::from(state.age));
+                continue;
+            }
             pose.powered = !pose.gun
                 && self
                     .motors
@@ -654,6 +705,27 @@ mod tests {
     /// A format 2 file the writer before format 3 made (the tore-replay
     /// crate keeps one): it plays, with pictures that hold no surface units
     /// and the draw rules its header gives.
+    #[test]
+    fn recorded_energy_motor_is_independent_of_imported_timers_and_seek_direction() {
+        use tore_replay::{
+            Event, Value,
+            vocab::{field, kind},
+        };
+        let old = Event::new(kind::WEAPON_LAUNCH).with(field::PROJECTILE, Value::Id(7));
+        assert!(RecordedMotor::read(&old).is_none());
+        let event = old
+            .with("missile-model", "energy-1")
+            .with("motor-ignition", 30i64)
+            .with("motor-boost-end", 270i64)
+            .with("motor-end", 510i64)
+            .with("motor-boost-powered", true)
+            .with("motor-sustain-powered", false);
+        let (id, motor) = RecordedMotor::read(&event).unwrap();
+        assert_eq!(id, 7);
+        for age in [0, 29, 30, 269, 270, 509, 510, 269, 30, 29] {
+            assert_eq!(motor.powered(age), (30..270).contains(&age));
+        }
+    }
     #[test]
     fn a_format_2_recording_plays_with_no_surface_content() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

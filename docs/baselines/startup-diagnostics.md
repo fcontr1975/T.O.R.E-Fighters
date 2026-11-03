@@ -70,16 +70,44 @@ This corrects a portability issue that Linux file-lock behavior did not expose.
 The Intel Mac and corrected Windows native runs were still pending when this
 fix was committed.
 
+## Windows results for issue #8
+
+Package 0.2.2-rc.5, commit `c461b4b3`,
+[run 41537628612](https://github.com/john-overton/T.O.R.E-Fighters/actions/runs/41537628612).
+
+**On the CI Windows VM, 2026-11-02.** It has no Vulkan and draws DirectX 12 on the
+Microsoft Basic Render Driver. These passed: MSI install and uninstall; DirectX 12
+chosen by default; the Vulkan failure wording; both native crash self-tests (exit
+codes `-1073741819` and `-1073741571`, each with a fatal report and readable Event
+Viewer entries); a 64 s smoke test; the import screen and Pref > Graphics choice;
+the prompt after a dead launch, including a real kill; no prompt after a clean close
+or in unattended runs; the `--graphics-api` flag; a saved choice on restart; and a
+normal fullscreen launch through the prompt to the menu.
+
+**On AMD, reported by the player in
+[issue #8](https://github.com/john-overton/T.O.R.E-Fighters/issues/8#issuecomment-6602933295).**
+Windows 10 LTSC IoT, RX 7600, Adrenalin 26.10.1. rc.2 crashed in `amdvlk64.dll`
+compiling `City fill surfaces fading in`, the first pipeline to write the sample
+mask. On 2026-11-03 the player reported rc.5 "working perfectly" under Vulkan, with a
+screenshot of a flight showing terrain, trees, the HUD and the panels. The player
+attached no log, and the screenshot shows no city.
+
+Not measured: Vulkan on Windows on other AMD cards or drivers, and DirectX 12 on any
+real graphics card. After the [naga patch](../../crates/vendor/naga/PATCHED.md),
+`spirv-val` still rejects seven entry points, none of them on the sample mask: five
+on atomics semantics (`fill_cull.cull` and `finish`, `simulation.blade_cull`,
+`vegetation_cull.cull` and `finish`) and two on workgroup stride
+(`sun_visibility.measure` and `measure_ms`). They have caused no reported failure.
+
 ## Remaining acceptance
 
-Windows and macOS execution is unavailable on this Linux host. Native Windows
-MessageBox and macOS AppKit alert behavior, MSI installation/upgrade/uninstall,
-readable Event Viewer entries, both macOS DMGs and Finder launches, and Windows
-shortcut/direct launches must be checked on those systems. CI validates native builds and package payloads; follow-up native results
+Native Windows MessageBox and macOS AppKit alert behavior, MSI upgrade, both macOS
+DMGs and Finder launches, and Windows shortcut launches must still be checked on those
+systems. CI validates native builds and package payloads; follow-up native results
 are available through the package run associated with the tested source commit. Linux desktop-menu installation and AppImage mounting on another
 machine are also not proven by extracting and launching the payload here.
 
-OS launch blocking, missing loader dependencies and native driver crashes are
-outside Rust panic reporting. No assertion is made about the cause of John's
+OS launch blocking and missing loader dependencies are outside Rust panic reporting.
+No assertion is made about the cause of John's
 reported Windows startup failure. No retail data was added to source or
 packages, and no automatic report upload or crash-dump policy was enabled.

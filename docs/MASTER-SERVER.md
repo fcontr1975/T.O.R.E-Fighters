@@ -117,14 +117,14 @@ checked not to need a newer C library than that release's 2.35, so it runs on
 any current long-term Ubuntu (22.04 and later) without building anything:
 
 ```sh
-curl -LO https://github.com/john-overton/T.O.R.E-Fighters/releases/download/v0.2.1/tore-master-0.2.1-linux-x86_64.tar.gz
-curl -LO https://github.com/john-overton/T.O.R.E-Fighters/releases/download/v0.2.1/tore-master-0.2.1-linux-x86_64.tar.gz.sha256
-sha256sum -c tore-master-0.2.1-linux-x86_64.tar.gz.sha256
-tar -xzf tore-master-0.2.1-linux-x86_64.tar.gz
-tore-master-0.2.1-linux-x86_64/tore-master --version
+curl -LO https://github.com/john-overton/T.O.R.E-Fighters/releases/download/v0.2.2/tore-master-0.2.2-linux-x86_64.tar.gz
+curl -LO https://github.com/john-overton/T.O.R.E-Fighters/releases/download/v0.2.2/tore-master-0.2.2-linux-x86_64.tar.gz.sha256
+sha256sum -c tore-master-0.2.2-linux-x86_64.tar.gz.sha256
+tar -xzf tore-master-0.2.2-linux-x86_64.tar.gz
+tore-master-0.2.2-linux-x86_64/tore-master --version
 ```
 
-(`v0.2.1` stands for the release you want.) A workflow run that is not a tag
+(`v0.2.2` stands for the release you want.) A workflow run that is not a tag
 (a `release-test/...` branch, or a manual run) builds the same file as the
 `master-ubuntu-22.04` artifact without publishing it. The build is unsigned,
 like the game's. Run `--check-config` ([updating](#updating)) before it takes
@@ -299,8 +299,11 @@ address and an AAAA record for its IPv6 address. With both records, games that h
 it over IPv6 too, which lets them learn their own IPv6 address for direct
 connections. A short time to live (300 seconds) while setting up makes a
 move to another machine quick. Moving the master later means pointing the
-name at the new machine: games ask the name again every 10 minutes and
-whenever the master falls silent.
+name at the new machine: games ask the name again every 10 minutes, and at
+once and then every minute while the master is silent. A host that cannot
+reach one of the addresses (a machine or container without an IPv6 route)
+uses the other and does not stick on the dead one
+([finding the master again](formats/master-protocol.md#finding-the-master-again)).
 
 ## Logs and statistics
 

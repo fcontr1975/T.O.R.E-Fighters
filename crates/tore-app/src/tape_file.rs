@@ -78,6 +78,18 @@ impl Recorder {
             error: None,
         })
     }
+    /// Explicit model marker. Old unmarked tapes retain their historical rules.
+    pub fn model(&mut self, state: &State) -> AppResult<()> {
+        if state.weapon_rules == tore_sim::combat::missiles::Rules::Energy {
+            writeln!(
+                self.out,
+                "missile-energy 1 {:016x} {}",
+                tore_sim::combat::missiles::energy_profile::fingerprint(),
+                state.energy_seed()
+            )?;
+        }
+        Ok(())
+    }
     pub fn record(&mut self, action: &str, l: Launcher) {
         if self.error.is_some() {
             return;
@@ -327,6 +339,7 @@ fn replay_reader(
         }
         Ok(())
     };
+    let mut energy_seed = None;
     let mut last_aircraft = None;
     for count in 0..=432001 {
         buffer.clear();
@@ -383,6 +396,24 @@ fn replay_reader(
             }
             continue;
         }
+        if let Some(marker) = line.strip_prefix("missile-energy ") {
+            let fields: Vec<_> = marker.split_whitespace().collect();
+            if count != 1
+                || initialized
+                || version != VERSION
+                || fields.len() != 3
+                || fields[0] != "1"
+            {
+                return Err("invalid missile model marker".into());
+            }
+            if u64::from_str_radix(fields[1], 16)?
+                != tore_sim::combat::missiles::energy_profile::fingerprint()
+            {
+                return Err("missile model fingerprint mismatch".into());
+            }
+            energy_seed = Some(fields[2].parse::<u64>()?);
+            continue;
+        }
         let (action, launcher) = parse(line, version)?;
         if !initialized && !matches!(action, "reset" | "reset-scene") {
             return Err("combat tape must start with reset".into());
@@ -400,7 +431,10 @@ fn replay_reader(
                 airport_nav = false;
                 airport_gear = false;
                 airport_supported = false;
-                s.weapon_rules = if version < 4 {
+                s.weapon_rules = if let Some(seed) = energy_seed {
+                    s.set_energy_seed(seed);
+                    tore_sim::combat::missiles::Rules::Energy
+                } else if version < 4 {
                     tore_sim::combat::missiles::Rules::Compatibility
                 } else {
                     tore_sim::combat::missiles::Rules::Spec
@@ -551,6 +585,47 @@ mod tests {
             body_present: true,
             controls: Controls::default(),
         }
+    }
+    #[test]
+    fn explicit_energy_tapes_preserve_seed_and_reject_a_different_physical_table() {
+        use tore_sim::combat::missiles::Rules;
+        let dir = std::env::temp_dir().join(format!("tore-tape-energy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = tore_world::test_support::combat_fixture(true)
+            .own()
+            .configuration()
+            .clone();
+        let data = BTreeMap::new();
+        let terrain = tore_world::test_support::terrain();
+        for rules in [Rules::Spec, Rules::Energy] {
+            let path = dir.join(format!("{rules:?}"));
+            let mut state = State::new(config.clone(), true).unwrap();
+            state.weapon_rules = rules;
+            state.set_energy_seed(987654321);
+            let mut recorder = Recorder::new(&path, &data, &config, "UKR").unwrap();
+            recorder.model(&state).unwrap();
+            recorder.record("reset", launcher(0.));
+            recorder.record("tick", launcher(0.));
+            recorder.flush().unwrap();
+            let result =
+                replay_without_airports(&path, &data, config.clone(), "UKR", &terrain).unwrap();
+            assert_eq!(result.weapon_rules, rules);
+            if rules == Rules::Energy {
+                assert_eq!(result.energy_seed(), 987654321);
+                let text = std::fs::read_to_string(&path).unwrap().replace(
+                    &format!(
+                        "{:016x}",
+                        tore_sim::combat::missiles::energy_profile::fingerprint()
+                    ),
+                    "0000000000000000",
+                );
+                std::fs::write(&path, text).unwrap();
+                let error = replay_without_airports(&path, &data, config.clone(), "UKR", &terrain)
+                    .unwrap_err();
+                assert!(error.to_string().contains("model fingerprint mismatch"));
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
     /// Records that combat collects and the app writes are the bytes a
     /// recorder writes when given the same records directly.

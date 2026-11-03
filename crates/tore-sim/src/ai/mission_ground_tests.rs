@@ -7,7 +7,8 @@ use super::super::tests::{flat, object, setup};
 use super::super::{AiActor, AiMission};
 use crate::ai::awareness::ground::{
     DefenseFacts, GROUND_FOLLOW_TICKS, GROUND_REBUILD_TICKS, GroundScene, GroundSubject,
-    RecentWarnings, RetailAttention, ThreatLevel, off_nose_deg, retail_attention,
+    RecentWarnings, RetailAttention, TEAM_SPOT_FT, ThreatLevel, off_nose_deg, retail_attention,
+    team_spot_ft,
 };
 use crate::ai::awareness::{Observation, ObservationSource};
 use crate::ai::controller::TargetView;
@@ -107,6 +108,7 @@ fn tank(id: u32, ahead_nmi: f64, right_ft: f64) -> GroundSubject {
         },
         side: Side(2),
         defense: None,
+        hidden: false,
     }
 }
 
@@ -116,6 +118,7 @@ fn sam(id: u32, ahead_nmi: f64, reach_ft: f64, working: bool) -> GroundSubject {
     subject.object.emitting = true;
     subject.defense = Some(DefenseFacts {
         missile_reach_ft: reach_ft,
+        rotor_reach_ft: reach_ft,
         gun_reach_ft: 0.,
         radar: true,
         working,
@@ -130,6 +133,7 @@ fn aaa(id: u32, ahead_nmi: f64, reach_ft: f64) -> GroundSubject {
     subject.object.class = 0x800;
     subject.defense = Some(DefenseFacts {
         missile_reach_ft: 0.,
+        rotor_reach_ft: 0.,
         gun_reach_ft: reach_ft,
         radar: false,
         working: true,
@@ -149,6 +153,7 @@ fn observe_with(
     mission.observe_ground(
         GroundScene {
             painted: &[],
+            launched: &[],
             subjects,
             weather: &Weather::default(),
         },
@@ -602,6 +607,7 @@ fn cap_actors_have_no_picture_and_fly_exactly_as_before() {
         described.observe_ground(
             GroundScene {
                 painted: &[],
+                launched: &[],
                 subjects: &scene,
                 weather: &Weather::default(),
             },
@@ -829,11 +835,13 @@ fn strike_inputs() -> crate::ai::strike::Inputs {
             fuze_arm_s: 1.,
             frag_radius_ft: 300.,
             falls_free: false,
+            flight: None,
         }],
         designator: false,
         mission_height_ft: None,
         solution: None,
         lase: crate::ai::strike::LaseInputs::default(),
+        shots: Default::default(),
     }
 }
 
@@ -946,4 +954,283 @@ fn a_striker_under_weapons_hold_flies_no_pass_until_the_hold_lifts() {
             .is_some_and(|s| s.phase() == crate::ai::strike::Phase::Attack);
     }
     assert!(attacked, "the strike goes on once the hold lifts");
+}
+
+// -- hidden shoulder-fired teams (T.O.R.E opinionated, John 2026-10-29) --------
+
+/// A side 2 shoulder-fired SAM team `ahead_ft` north on flat ground: class
+/// SAM, listed, `maxVisDist` 78, an infrared missile with no radar, hidden.
+fn team(id: u32, ahead_ft: f64) -> GroundSubject {
+    let mut subject = sam(id, ahead_ft / NMI, 8_100., true);
+    subject.object.emitting = false;
+    subject.defense = subject.defense.map(|facts| DefenseFacts {
+        rotor_reach_ft: 16_300.,
+        radar: false,
+        ..facts
+    });
+    subject.hidden = true;
+    subject
+}
+
+/// A striker 300 ft over the origin (a helicopter's height), so slant and
+/// ground distances nearly agree.
+fn low_striker() -> AiMission {
+    let mut mission = striker(briefed_on(vec![]));
+    mission.actor_mut(STRIKER).unwrap().flight_mut().position = [0., 310., 0.];
+    mission
+}
+
+fn observe_scene(
+    mission: &mut AiMission,
+    tick: u64,
+    subjects: &[GroundSubject],
+    launched: &[(u32, u32)],
+    weather: &Weather,
+) {
+    mission.tick = tick;
+    mission.observe_ground(
+        GroundScene {
+            painted: &[],
+            launched,
+            subjects,
+            weather,
+        },
+        &flat,
+    );
+}
+
+fn known(mission: &AiMission) -> Vec<u32> {
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    picture.threats().defenses.iter().map(|d| d.id).collect()
+}
+
+fn spot_ft(mission: &AiMission) -> f64 {
+    team_spot_ft(mission.actor(STRIKER).unwrap().experience().level, 100.)
+}
+
+#[test]
+fn the_spotting_distance_is_short_and_grows_with_skill() {
+    for pair in TEAM_SPOT_FT.windows(2) {
+        assert!(pair[0] < pair[1]);
+    }
+    // Every level spots far nearer than the 19,968 ft the eye lists every
+    // other site from, and haze shortens it.
+    assert!(TEAM_SPOT_FT.iter().all(|ft| *ft <= 78. * 256. / 4.));
+    assert_eq!(team_spot_ft(crate::ai::Experience::Average, 100.), 3_000.);
+    assert_eq!(team_spot_ft(crate::ai::Experience::Average, 50.), 1_500.);
+}
+
+#[test]
+fn a_hidden_team_is_unlisted_beyond_its_spotting_distance() {
+    let mut mission = low_striker();
+    let spot = spot_ft(&mission);
+    // Just past the spotting distance, well inside every list's reach: the
+    // radar, the FLIR and the eye would all list a vehicle there.
+    let scene = [team(130, spot + 400.), tank(102, (spot + 400.) / NMI, 300.)];
+    for tick in [0, GROUND_FOLLOW_TICKS, GROUND_REBUILD_TICKS] {
+        observe_scene(&mut mission, tick, &scene, &[], &Weather::default());
+    }
+    assert_eq!(contacts(&mission), [102]);
+    assert!(known(&mission).is_empty(), "off the threat picture");
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert!(picture.seen().iter().all(|s| s.id != 130));
+}
+
+#[test]
+fn a_hidden_team_is_listed_within_its_spotting_distance_by_the_eye_alone() {
+    let mut mission = low_striker();
+    let spot = spot_ft(&mission);
+    let scene = [team(130, spot - 400.)];
+    observe_scene(&mut mission, 0, &scene, &[], &Weather::default());
+    assert_eq!(contacts(&mission), [130]);
+    assert_eq!(known(&mission), [130]);
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    let track = picture.contact(130).unwrap();
+    assert!(track.channels.visual && !track.channels.radar && !track.channels.infrared);
+    assert_eq!(picture.unmasked_at(130), None, "spotted, not unmasked");
+    // Once spotted it stays known when the striker flies off.
+    mission.actor_mut(STRIKER).unwrap().flight_mut().position = [0., 310., -2. * NMI];
+    observe_scene(
+        &mut mission,
+        GROUND_REBUILD_TICKS,
+        &scene,
+        &[],
+        &Weather::default(),
+    );
+    assert!(contacts(&mission).is_empty());
+    assert_eq!(known(&mission), [130]);
+
+    // Haze halving the eye's reach hides it at the same place.
+    let mut hazy = low_striker();
+    let weather = Weather {
+        bands: vec![sensors::WeatherBand {
+            low_ft: 0.,
+            high_ft: 10_000.,
+            effects: [50, 100, 100, 100, 100],
+        }],
+    };
+    observe_scene(&mut hazy, 0, &scene, &[], &weather);
+    assert!(contacts(&hazy).is_empty() && known(&hazy).is_empty());
+}
+
+#[test]
+fn a_hidden_team_is_known_right_after_it_launches() {
+    let mut mission = low_striker();
+    let scene = [team(130, 10_900.)];
+    observe_scene(&mut mission, 0, &scene, &[], &Weather::default());
+    assert!(known(&mission).is_empty());
+    // It launches at the striker: known at the next quarter-second refresh,
+    // not at the next rebuild.
+    let at = GROUND_FOLLOW_TICKS;
+    observe_scene(
+        &mut mission,
+        at,
+        &scene,
+        &[(STRIKER, 130)],
+        &Weather::default(),
+    );
+    assert_eq!(known(&mission), [130]);
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert_eq!(picture.unmasked_at(130), Some(at));
+    assert!(picture.contacts().is_empty(), "known, not on a list");
+    // The rings: known at once for planning; for the ambush rule the shot
+    // that gave it away still came from a site it did not know, and a later
+    // one comes from a known site.
+    use crate::ai::helicopter_threat::{UNMASK_SHOT_TICKS, known_rings, rings_before_shot};
+    assert!(known_rings(picture, Side(1)).iter().any(|r| r.id == 130));
+    assert!(rings_before_shot(picture, Side(1), at + 200).is_empty());
+    let later = at + UNMASK_SHOT_TICKS + 1;
+    assert!(
+        rings_before_shot(picture, Side(1), later)
+            .iter()
+            .any(|r| r.id == 130)
+    );
+    // It stays known after the round is gone, and the rebuild keeps it.
+    observe_scene(
+        &mut mission,
+        GROUND_REBUILD_TICKS,
+        &scene,
+        &[],
+        &Weather::default(),
+    );
+    assert_eq!(known(&mission), [130]);
+    // A second launch keeps the first unmasking tick.
+    observe_scene(
+        &mut mission,
+        GROUND_REBUILD_TICKS + GROUND_FOLLOW_TICKS,
+        &scene,
+        &[(STRIKER, 130)],
+        &Weather::default(),
+    );
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert_eq!(picture.unmasked_at(130), Some(at));
+
+    // Destroyed, it leaves the picture and its unmasking with it.
+    let mut wreck = scene.to_vec();
+    wreck[0].object.destroyed = true;
+    observe_scene(
+        &mut mission,
+        2 * GROUND_REBUILD_TICKS,
+        &wreck,
+        &[],
+        &Weather::default(),
+    );
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert!(known(&mission).is_empty() && picture.unmasked_at(130).is_none());
+}
+
+#[test]
+fn a_launch_at_a_friendly_in_its_picture_gives_a_team_away() {
+    let friend = |id: u32| Observation {
+        target: TargetView {
+            infrared_strength: 1.,
+            id,
+            side: Side(1),
+            position: [2_000., 300., 8_000.],
+            heading_deg: 0.,
+            pitch_deg: 0.,
+            speed: ScalarSpeed(200.),
+            maximum_speed: ScalarSpeed(300.),
+            is_aircraft: true,
+            is_fighter: false,
+            human_controlled: false,
+            valid: true,
+            type_allowed: true,
+            seeker_eligible: true,
+            wing_attackers: 0,
+            terrain_blocked: false,
+            sensor_supported: true,
+            link_track: false,
+        },
+        velocity: [0., 0., 200.],
+        source: ObservationSource::Visual,
+    };
+    let scene = [team(130, 10_900.), team(131, 30_000.)];
+    let mut mission = low_striker();
+    mission
+        .actor_mut(STRIKER)
+        .unwrap()
+        .awareness
+        .observe(0, &[friend(7)]);
+    // At a friendly it sees, from within its own listing distance: known.
+    // At an aircraft it does not hold: nothing. From beyond the listing
+    // distance (30,000 ft): nothing.
+    observe_scene(
+        &mut mission,
+        0,
+        &scene,
+        &[(7, 130), (7, 131), (8, 130)],
+        &Weather::default(),
+    );
+    assert_eq!(known(&mission), [130]);
+    let mut mission = low_striker();
+    observe_scene(&mut mission, 0, &scene, &[(8, 130)], &Weather::default());
+    assert!(known(&mission).is_empty());
+}
+
+#[test]
+fn a_vehicle_sam_still_lists_at_the_old_distance() {
+    let mut mission = low_striker();
+    // An SA-9-like vehicle 18,000 ft out, inside its 19,968 ft listing
+    // distance: listed by the eye (and the radar) at the first rebuild. A
+    // launch from it unmasks nothing, as it was known.
+    let mut vehicle = sam(140, 18_000. / NMI, 16_200., true);
+    vehicle.object.emitting = false;
+    observe_scene(
+        &mut mission,
+        0,
+        &[vehicle.clone()],
+        &[],
+        &Weather::default(),
+    );
+    assert_eq!(contacts(&mission), [140]);
+    assert_eq!(known(&mission), [140]);
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert!(picture.contact(140).unwrap().channels.visual);
+    observe_scene(
+        &mut mission,
+        GROUND_FOLLOW_TICKS,
+        &[vehicle],
+        &[(STRIKER, 140)],
+        &Weather::default(),
+    );
+    let picture = mission.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert_eq!(picture.unmasked_at(140), None);
+}
+
+#[test]
+fn an_unmasked_team_round_trips() {
+    let mut mission = low_striker();
+    let scene = [team(130, 10_900.)];
+    observe_scene(
+        &mut mission,
+        0,
+        &scene,
+        &[(STRIKER, 130)],
+        &Weather::default(),
+    );
+    let twin: AiMission = from_bytes(&coded(&mission), &models_of(&mission)).unwrap();
+    assert_eq!(coded(&twin), coded(&mission));
+    let picture = twin.actor(STRIKER).unwrap().ground_picture().unwrap();
+    assert_eq!(picture.unmasked_at(130), Some(0));
 }

@@ -71,12 +71,14 @@ pub(super) fn ground(
         },
         side: Side(2),
         defense,
+        hidden: false,
     }
 }
 
 pub(super) fn site(missile_ft: f64, gun_ft: f64, radar: bool) -> Option<DefenseFacts> {
     Some(DefenseFacts {
         missile_reach_ft: missile_ft,
+        rotor_reach_ft: missile_ft,
         gun_reach_ft: gun_ft,
         radar,
         working: true,
@@ -114,6 +116,7 @@ pub(super) fn bomb(rounds: u32) -> Store {
         fuze_arm_s: 1.,
         frag_radius_ft: 300.,
         falls_free: false,
+        flight: None,
     }
 }
 
@@ -133,6 +136,7 @@ pub(super) fn inputs(stores: Vec<Store>, solution: Option<Solution>) -> Inputs {
         mission_height_ft: None,
         solution,
         lase: LaseInputs::default(),
+        shots: Shots::default(),
     }
 }
 
@@ -149,6 +153,9 @@ pub(super) fn solution(target: Vector, impact: Vector, due: bool) -> Solution {
         warning: false,
         guided_in_flight: false,
         reach_ok: true,
+        release_seconds: None,
+        reaches: false,
+        bar_ft: None,
     }
 }
 
@@ -1471,6 +1478,7 @@ fn a_drag_bomb_lays_down_clear_of_its_fuze_and_its_fragments() {
     let big = Store {
         frag_radius_ft: 600.,
         falls_free: false,
+        flight: None,
         ..bomb(4)
     };
     assert_eq!(laydown_height_ft(&big, 700.), 700.);
@@ -1778,6 +1786,7 @@ fn a_gun_burst_walks_in_from_short_of_the_target_and_is_deterministic() {
 fn glide_store() -> Store {
     Store {
         falls_free: true,
+        flight: None,
         ..laser_store()
     }
 }
@@ -2197,4 +2206,286 @@ fn bomb_cue_steering_uses_ground_track_and_corrects_impact_error() {
         let corrected = strike.line_heading(&cx, aim, [-50., 0., 10_000.], false);
         assert!((0.0..1.).contains(&corrected), "{pass:?}: {corrected}");
     }
+}
+
+// Early retarget and the committed-to-release window (T.O.R.E, John,
+// 2026-10-28).
+
+const OTHER: u32 = 0x5000_0002;
+const OTHER_AT: Vector = [2_000., 0., 26_000.];
+
+/// A striker briefed on two trucks, `TARGET` nearer, nothing around.
+fn two_target_world() -> World {
+    two_target_world_at(OTHER_AT)
+}
+
+fn two_target_world_at(other_at: Vector) -> World {
+    let subjects = [
+        ground(TARGET, TARGET_AT, 0x200, None),
+        ground(OTHER, other_at, 0x200, None),
+    ];
+    let mut briefed = GroundPicture::new(StrikeRole::Strike);
+    briefed.set_objective(StrikeObjective {
+        targets: vec![TARGET, OTHER],
+        defenses: Vec::new(),
+        point: Some(TARGET_AT),
+    });
+    briefed.rebuild(0, Vec::new(), &Subjects::new(&subjects), Vec::new());
+    World {
+        own: own([0., 5_000., 0.], 700.),
+        picture: briefed,
+        inputs: inputs(vec![bomb(4)], None),
+    }
+}
+
+/// [`two_target_world`] once its picture knows `TARGET` has fallen.
+fn two_target_world_dead() -> World {
+    let mut fallen = ground(TARGET, TARGET_AT, 0x200, None);
+    fallen.object.destroyed = true;
+    let subjects = [fallen, ground(OTHER, OTHER_AT, 0x200, None)];
+    let mut world = two_target_world();
+    world
+        .picture
+        .rebuild(0, Vec::new(), &Subjects::new(&subjects), Vec::new());
+    world
+}
+
+/// The host's word that `TARGET` has fallen (the picture may not know yet).
+fn target_dead(world: &mut World) {
+    let mut dead = solution(TARGET_AT, [0., 0., 0.], false);
+    dead.target_alive = false;
+    world.inputs.solution = Some(dead);
+}
+
+#[test]
+fn a_target_killed_before_the_release_is_followed_by_the_next_at_once() {
+    let mut world = two_target_world();
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::Attack, Some(TARGET))
+    );
+    // A wingman kills it 20,000 ft out, the pass not yet released: at its
+    // cruise height the striker attacks the next truck, 22,000 ft ahead, at
+    // once, without flying the exit (the picture still lists the dead truck
+    // standing).
+    world.own.position = [0., 5_000., 4_000.];
+    target_dead(&mut world);
+    let order = strike.step(&world.context(120));
+    assert_eq!(
+        (strike.phase(), strike.target(), strike.pass_number()),
+        (Phase::Attack, Some(OTHER), 1)
+    );
+    assert_eq!(order.activity, Some(Activity::Attacking));
+    assert_eq!(strike.selection().map(|s| s.target), Some(OTHER));
+
+    // Down at 3,500 ft from the old run: it turns toward the next truck now,
+    // climbing back to its cruise height, and chooses there.
+    let mut world = two_target_world();
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    world.own.position = [0., 3_500., 4_000.];
+    world.own.agl_ft = 3_500.;
+    target_dead(&mut world);
+    let order = strike.step(&world.context(120));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::TurnBack, Some(OTHER))
+    );
+    assert!(order.steer.is_some_and(|s| s.pitch_deg > 0.), "it climbs");
+    // By then the picture knows the first truck has fallen.
+    world.picture = two_target_world_dead().picture;
+    world.inputs.solution = None;
+    world.own.position = [0., 4_800., 8_000.];
+    world.own.agl_ft = 4_800.;
+    strike.step(&world.context(1_200));
+    assert_eq!(
+        (strike.phase(), strike.target(), strike.pass_number()),
+        (Phase::Attack, Some(OTHER), 1)
+    );
+
+    // Killed when the next truck is too near to set a pass up: the exit on
+    // the heading, turning back at half the exit distance from it, not the
+    // full 30,000 ft.
+    let mut world = two_target_world();
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    world.own.position = [0., 4_000., 18_000.];
+    target_dead(&mut world);
+    strike.step(&world.context(120));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::Exit, Some(OTHER))
+    );
+    world.inputs.solution = None;
+    world.own.position = [0., 6_000., OTHER_AT[2] + 16_000.];
+    strike.step(&world.context(2_000));
+    assert_eq!(strike.phase(), Phase::TurnBack);
+    world.own.heading_deg = 180.;
+    strike.step(&world.context(2_100));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::Attack, Some(OTHER))
+    );
+
+    // Far enough but behind: it turns back toward it at once.
+    let mut world = two_target_world_at([2_000., 0., -26_000.]);
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    assert_eq!(strike.target(), Some(TARGET));
+    world.own.position = [0., 4_000., 4_000.];
+    target_dead(&mut world);
+    strike.step(&world.context(120));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::TurnBack, Some(OTHER))
+    );
+}
+
+#[test]
+fn a_striker_past_its_release_point_or_with_no_target_left_keeps_the_exit() {
+    // The cue already beyond the aim when the target dies: the normal exit,
+    // on to the full exit distance.
+    let mut world = two_target_world();
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    let aim = strike.aim().0;
+    world.own.position = [0., 4_000., 14_000.];
+    world.inputs.solution = Some(solution(
+        TARGET_AT,
+        [aim[0], 0., TARGET_AT[2] + aim[1] + 500.],
+        false,
+    ));
+    strike.step(&world.context(10));
+    assert!(strike.release_in_s().is_some_and(|t| t < 0.));
+    target_dead(&mut world);
+    strike.step(&world.context(20));
+    assert_eq!(
+        (strike.phase(), strike.target()),
+        (Phase::Exit, Some(TARGET))
+    );
+    world.inputs.solution = None;
+    world.own.position = [0., 6_000., TARGET_AT[2] + 20_000.];
+    strike.step(&world.context(2_000));
+    assert_eq!(strike.phase(), Phase::Exit, "the full exit distance");
+
+    // With no other target the striker exits as before
+    // (`a_dead_target_or_no_store_sends_it_home` follows it home).
+    let mut world = quiet_world();
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    target_dead(&mut world);
+    strike.step(&world.context(10));
+    assert_eq!(strike.phase(), Phase::Exit);
+}
+
+/// A straight Mk 82 run whose cue closes on the aim at the ground speed,
+/// 700 ft/s, from `seconds` short: steps every 0.1 s until the cue is
+/// `until` seconds short, the host saying due only at the aim.
+fn close_cue(
+    strike: &mut Strike,
+    world: &mut World,
+    tick: &mut u64,
+    seconds: f64,
+    until: f64,
+    defending: bool,
+) -> Order {
+    let aim = strike.aim().0;
+    let mut short = seconds;
+    let mut order = None;
+    while short > until - 1e-9 {
+        let along = short * 700.;
+        let impact = [aim[0], 0., TARGET_AT[2] + aim[1] - along];
+        world.inputs.solution = Some(solution(TARGET_AT, impact, along <= 0.));
+        let mut cx = world.context(*tick);
+        cx.defending = defending;
+        order = Some(strike.step(&cx));
+        *tick += 12;
+        short -= 0.1;
+    }
+    order.expect("at least one step")
+}
+
+#[test]
+fn the_last_five_seconds_of_a_run_hold_through_a_defence_and_then_it_defends() {
+    let mut world = quiet_world();
+    world.own.position = [0., 3_000., 8_000.];
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    assert_eq!(strike.pass(), Some(Pass::Straight));
+    let mut tick = 12;
+    // Six seconds out the run is not committed: a defence breaks it.
+    close_cue(&mut strike, &mut world, &mut tick, 8., 6., false);
+    assert!(!strike.holds_run(tick));
+    let mut early = strike.clone();
+    let mut cx = world.context(tick);
+    cx.defending = true;
+    early.step(&cx);
+    assert_eq!(early.phase(), Phase::Defend);
+    // Five seconds out it is.
+    close_cue(&mut strike, &mut world, &mut tick, 5.9, 4.9, false);
+    assert!(strike.holds_run(tick));
+    assert!(
+        strike
+            .release_in_s()
+            .is_some_and(|t| (4.5..=5.).contains(&t))
+    );
+    // A defence trigger now does not break it: it flies on and releases.
+    let order = close_cue(&mut strike, &mut world, &mut tick, 4.8, 0.1, true);
+    assert_eq!(strike.phase(), Phase::Attack);
+    assert!(order.steer.is_some() && order.release.is_none());
+    let order = close_cue(&mut strike, &mut world, &mut tick, 0., 0., true);
+    assert_eq!(
+        order.release,
+        Some(Release {
+            station: StationId(1),
+            target: TARGET
+        })
+    );
+    assert!(!strike.holds_run(tick));
+    // Right after the release it reacts.
+    let mut cx = world.context(tick);
+    cx.defending = true;
+    let order = strike.step(&cx);
+    assert_eq!((strike.phase(), order.steer), (Phase::Defend, None));
+}
+
+#[test]
+fn the_window_holds_no_longer_than_its_limit() {
+    let mut world = quiet_world();
+    world.own.position = [0., 3_000., 8_000.];
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    let mut tick = 12;
+    close_cue(&mut strike, &mut world, &mut tick, 6., 3., false);
+    let opened = strike.committed.expect("the window is open");
+    assert!(strike.holds_run(tick));
+    // The cue stalls 3 s short: the run holds until the limit, then the
+    // defence breaks it.
+    while strike.phase() == Phase::Attack && tick < opened + 2 * COMMIT_HOLD_TICKS {
+        let mut cx = world.context(tick);
+        cx.defending = true;
+        strike.step(&cx);
+        tick += 12;
+    }
+    assert!(tick - 12 > opened + COMMIT_HOLD_TICKS);
+    assert!(tick - 12 <= opened + COMMIT_HOLD_TICKS + 12);
+    assert_eq!(strike.phase(), Phase::Defend);
+}
+
+#[test]
+fn a_committed_run_round_trips_through_a_checkpoint() {
+    let mut world = quiet_world();
+    world.own.position = [0., 3_000., 8_000.];
+    let mut strike = Strike::new(9);
+    strike.step(&world.context(0));
+    let mut tick = 12;
+    close_cue(&mut strike, &mut world, &mut tick, 6., 4., false);
+    assert!(strike.holds_run(tick));
+    let models = Models::default();
+    let coded = to_bytes(&strike, &models).unwrap();
+    let twin: Strike = from_bytes(&coded, &models).unwrap();
+    assert_eq!(twin, strike);
+    assert!(twin.holds_run(tick));
 }

@@ -181,6 +181,16 @@ pub fn report(prepared: &Prepared) -> Vec<String> {
         String::new(),
         "Planes (the numbers open-planes and --slot use):".into(),
     ];
+    if let Some(note) = &prepared.distance_note {
+        lines.insert(1, note.clone());
+    }
+    if spec.lays_out_surface() {
+        lines.push(tore_world::mission_layout::seed_retry::notice(
+            prepared.placement_initial_seed,
+            prepared.placement_preview_seed,
+            prepared.placement_attempts,
+        ));
+    }
     if spec.lays_out_surface() && spec.surface_seed == 0 {
         lines.push(
             "Defense clearance is a preview: set a nonzero surface-seed to reproduce it in flight."

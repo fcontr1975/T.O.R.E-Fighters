@@ -7,6 +7,7 @@ pushed ([releasing](../RELEASING.md)).
 
 | Release | Title |
 | --- | --- |
+| [v0.2.2](v0.2.2.md) | Notch, Chaff and Energy |
 | [v0.2.1](v0.2.1.md) | Multiplayer, Patch Up, Buttercup |
 | [v0.2.0](v0.2.0.md) | Wake up, dear, multiplayer is here! |
 | [v0.1.3](v0.1.3.md) | Bug Bash, Overspeed, World Edge and Loaded Takeoffs |

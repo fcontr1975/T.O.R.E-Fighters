@@ -4,7 +4,7 @@ use tore_world::content::Content;
 /// Raise for changes to simulation, rules, checkpoint or replay interpretation
 /// that can make peers disagree. Also raise the network protocol for such changes.
 /// Release tags, documentation and presentation changes do not raise this value.
-pub const SIMULATION_VERSION: u32 = 2;
+pub const SIMULATION_VERSION: u32 = 11;
 
 /// FNV-1a/32 over a domain, protocol, simulation version and sorted playable
 /// content item digests. Integers are little endian; keys are length prefixed.

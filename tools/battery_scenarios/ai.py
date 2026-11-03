@@ -186,10 +186,18 @@ DAMAGED = re.compile(r"^AI damage: actor=(\d+) ", re.M)
 
 def ground_collisions(output: str, actors: dict) -> list[str]:
     """AI aircraft that flew into the ground undamaged: they died on the
-    ground with no weapon kill, no ejection and no system fault."""
+    ground with no weapon kill, no ejection, no structural damage and no system fault."""
     destroyed = set(re.findall(r"destroyed: (\S+ \d-\d)", output))
     ejected = set(re.findall(r"(\S+ \d-\d) pilot ejected", output))
-    damaged = set(DAMAGED.findall(output))
+    damaged = set()
+    for line in output.splitlines():
+        match = DAMAGED.match(line)
+        if match is None:
+            continue
+        fraction = re.search(r"\bdamage_fraction=([0-9.eE+-]+)", line)
+        faults = re.search(r"\bfaults=\[([^\]]*)\]", line)
+        if (fraction and float(fraction[1]) > 0) or (faults and faults[1].strip()):
+            damaged.add(match[1])
     ids = {m.group(2): m.group(1) for m in (ACTOR.match(line) for line in output.splitlines()) if m}
     problems = []
     for m in DEATH.finditer(output):
@@ -983,8 +991,88 @@ KNOWN_FAILURES = {
 }
 
 
+def prediction_envelope_gap_regression(d):
+    executable = ROOT / "target" / "release" / "examples" / ("missile_energy_cost.exe" if os.name == "nt" else "missile_energy_cost")
+    packs = sorted(d.data.glob("menu-*.pack"))
+    if not executable.exists() or not packs:
+        d.problem("release cost example and imported menu pack required")
+        return
+    output = d.run("gaps", [executable, packs[-1], "1200", "--gap-witness"], timeout=120).text()
+    if "gap-witness: passed" not in output:
+        d.problem("imported hit/miss/hit fixture did not verify the region advice policy")
+
+
+def prediction_launch_regression(d):
+    """Same natural fight fixture as the independent review, no injected shots."""
+    executable = ROOT / "target" / "release" / "examples" / ("missile_energy_cost.exe" if os.name == "nt" else "missile_energy_cost")
+    if not executable.exists():
+        d.problem("build --release -p tore-world --example missile_energy_cost before this scenario")
+        return
+    packs = sorted(d.data.glob("menu-*.pack"))
+    if not packs:
+        d.problem("no imported menu pack")
+        return
+    # John's Phase 2.6 decision: compare balance changes to the reviewed 2.5
+    # counts, retaining the earlier Spec floor against admission regressions.
+    cases = [(name, 14400, 8, 13, spec, [])
+             for name, spec in [("UKR", 11), ("BAL", 12), ("SPA", 12), ("GRE", 12)]]
+    cases.append(("big", 7200, 23, 26, 24, ["--big"]))
+    for name, ticks, aircraft, phase25, spec, flags in cases:
+        theater = "UKR" if name == "big" else name
+        text = d.run(name, [executable, packs[-1], str(ticks), theater, "moving",
+                            "AIM120.JT", "1", "--natural", *flags], timeout=240).text()
+        match = re.search(rf"guided_launches=(\d+) ai={aircraft} .*refused=0 starved=0", text)
+        if not match:
+            d.problem(f"{name}: missing launch counts or prediction admission failed")
+            continue
+        launches = int(match[1])
+        if not .7 * phase25 <= launches <= 1.3 * phase25:
+            d.problem(f"{name}: guided launch count outside 30% of reviewed Phase 2.5 {phase25}")
+        if launches < .7 * spec:
+            d.problem(f"{name}: guided launch count below 70% of pre-overhaul Spec {spec}")
+
+
+def prediction_player_cue_regression(d):
+    executable = ROOT / "target" / "release" / "examples" / ("missile_energy_cost.exe" if os.name == "nt" else "missile_energy_cost")
+    packs = sorted(d.data.glob("menu-*.pack"))
+    if not executable.exists() or not packs:
+        d.problem("release cost example and imported menu pack required")
+        return
+    for name, flags in [("4v4", []), ("big", ["--big"])]:
+        output = d.run(name, [executable, packs[-1], "2400", "UKR", "moving", "AIM120.JT", "1", "--natural", "--player-cue", *flags], timeout=240).text()
+        match = re.search(r"player_cue_samples=\[(\d+), (\d+), (\d+)\]", output)
+        counts = list(map(int, match.groups())) if match else [0, 0, 0]
+        if sum(counts[:2]) < 1800 or sum(counts[:2]) < .9 * sum(counts):
+            d.problem(f"{name}: opening 20-second player cue must have answers on 75% of all ticks and 90% of observed-cue ticks: {counts}")
+
+
+def prediction_turning_cue_regression(d):
+    executable = ROOT / "target" / "release" / "examples" / ("missile_energy_cost.exe" if os.name == "nt" else "missile_energy_cost")
+    packs = sorted(d.data.glob("menu-*.pack"))
+    if not executable.exists() or not packs:
+        d.problem("release cost example and imported menu pack required")
+        return
+    for rate in [3, 10]:
+        output = d.run(str(rate), [executable, packs[-1], "2400", "UKR", "moving", "AIM120.JT", "1", "--natural", "--big", f"--player-turn={rate}"], timeout=240).text()
+        match = re.search(r"player_cue_samples=\[(\d+), (\d+), (\d+)\]", output)
+        c = list(map(int, match.groups())) if match else [0, 0, 0]
+        clients = re.search(r"max_clients=(\d+)", output)
+        if sum(c) < 600 or sum(c[:2]) < .9 * sum(c):
+            d.problem(f"{rate} deg/s: need 600 observed ticks and 90% answered: {c}")
+        if not clients or int(clients[1]) < 31:
+            d.problem(f"{rate} deg/s: insufficient competing requests")
+
+
 def scenarios() -> list[Scenario]:
-    out: list[Scenario] = []
+    out: list[Scenario] = [Scenario(name="ai-missile-launch-regression", lane="ai", args=[],
+        driver=prediction_launch_regression, timeout=1000,
+        notes="Four 120-second natural 4v4 fights within 30% of reviewed Spec counts; 23+ AI admission stress. Build the release missile_energy_cost example first.")]
+    out.append(Scenario(name="ai-missile-envelope-gaps", lane="ai", args=[], driver=prediction_envelope_gap_regression,
+                        timeout=180, notes="R27ER hit/miss/hit points: the gap advises the first region without IN RNG; the far hit advises its own region."))
+    out.append(Scenario(name="ai-missile-player-cue", lane="ai", args=[], driver=prediction_player_cue_regression, timeout=600,
+        notes="Actual player HUD queries in the opening 20 seconds of 4v4 and 23-AI fights: answers on 75% of all ticks and 90% of observed-cue ticks."))
+    out.append(Scenario(name="ai-missile-turning-cue", lane="ai", args=[], driver=prediction_turning_cue_regression, timeout=600,
+        notes="3 and 10 deg/s scripted player turns in a natural 23-AI fight; observed HUD availability under real shared load."))
     attack = ["--probe-attack", "600:10"]
 
     # 1. Fight sizes, even and lopsided, the default F/A-18D against itself.

@@ -68,7 +68,7 @@ fn target(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat) -> wg
 }
 impl Gpu {
     pub(crate) async fn new(scenery: &Scenery) -> AppResult<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = crate::graphics_api::instance();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,

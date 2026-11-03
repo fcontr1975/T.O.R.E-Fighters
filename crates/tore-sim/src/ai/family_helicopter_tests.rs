@@ -24,6 +24,7 @@ fn at2(rounds: u32) -> Store {
         fuze_arm_s: 0.,
         frag_radius_ft: 0.,
         falls_free: false,
+        flight: None,
     }
 }
 
@@ -38,6 +39,7 @@ fn rockets(rounds: u32) -> Store {
         fuze_arm_s: 0.,
         frag_radius_ft: 0.,
         falls_free: false,
+        flight: None,
         ..at2(rounds)
     }
 }
@@ -435,6 +437,109 @@ fn ambushed_by_a_threat_it_did_not_know_it_breaks_leaves_the_ring_then_resumes()
 }
 
 #[test]
+fn a_shot_from_a_site_it_knew_is_no_ambush_and_one_from_a_site_it_did_not_is() {
+    use crate::ai::awareness::ground::RecentWarnings;
+    use crate::ai::helicopter_threat::{AMBUSH_ID, Decision};
+    // A small site it knows 8,000 ft east, its ring (6,000 ft and the
+    // margin) clear of the target and the way in.
+    const KNOWN: u32 = 0x5000_0011;
+    let mut world = heli_world(at2(4));
+    world.own.position = [0., 1_500., 12_000.];
+    world.picture = picture(
+        &[
+            ground(TARGET, TARGET_AT, 0x200, None),
+            ground(KNOWN, [8_000., 0., 12_000.], 0x1000, site(6_000., 0., true)),
+        ],
+        vec![KNOWN],
+    );
+    fn engaged(world: &World, tick: u64, bearing: f64) -> Context<'_> {
+        Context {
+            defending: true,
+            threat_bearing_deg: Some(bearing),
+            warnings: RecentWarnings {
+                air_to_air: false,
+                surface_to_air: true,
+            },
+            ..world.context(tick)
+        }
+    }
+    // Engaged from the known site's bearing, just outside its ring: before
+    // 0.2.2 any engagement outside every ring it knew was an ambush; now it
+    // is that site's, and no ambush.
+    let mut known = Strike::new(3);
+    known.step(&world.context(1));
+    assert_eq!(known.phase(), Phase::Attack);
+    known.step(&engaged(&world, 2, 90.));
+    assert_eq!(known.phase(), Phase::Defend);
+    assert_ne!(call(&known), Some(Decision::Leave));
+    assert!(known.heli.ambush.is_none());
+    // A tick of the break without a bearing is no new evidence.
+    let lost = Context {
+        threat_bearing_deg: None,
+        ..engaged(&world, 3, 90.)
+    };
+    known.step(&lost);
+    assert!(known.heli.ambush.is_none());
+    // Engaged from the west, where it knows no site: an ambush.
+    let mut ambushed = Strike::new(3);
+    ambushed.step(&world.context(1));
+    ambushed.step(&engaged(&world, 2, 270.));
+    assert_eq!(call(&ambushed), Some(Decision::Leave));
+    let (ring, _) = ambushed.heli.ambush.expect("an ambush ring");
+    assert_eq!(ring.id, AMBUSH_ID);
+    assert!(ring.centre[0] < world.own.position[0]);
+}
+
+/// A hidden shoulder-fired team that its own launch gave away (T.O.R.E
+/// opinionated, John 2026-10-29): known at once, so the plans keep out of
+/// its ring, but the shot that gave it away is still from a site the
+/// helicopter did not know, an ambush. Once it has been known for longer
+/// than a round flies, a shot from it is a known site's.
+#[test]
+fn a_team_its_own_launch_gave_away_is_still_an_ambush_and_known_after() {
+    use crate::ai::awareness::ground::{RecentWarnings, Subjects};
+    use crate::ai::helicopter_threat::{Decision, UNMASK_SHOT_TICKS, known_rings};
+    const TEAM: u32 = 0x5000_0012;
+    let mut world = heli_world(at2(4));
+    world.own.position = [0., 1_500., 12_000.];
+    let mut team = ground(TEAM, [8_000., 0., 12_000.], 0x1000, site(6_000., 0., false));
+    team.hidden = true;
+    let subjects = [ground(TARGET, TARGET_AT, 0x200, None), team];
+    world.picture = picture(&subjects, Vec::new());
+    assert!(known_rings(&world.picture, crate::ai::targeting::Side(1)).is_empty());
+    world.picture.unmask(1, &[TEAM], &Subjects::new(&subjects));
+    assert!(
+        known_rings(&world.picture, crate::ai::targeting::Side(1))
+            .iter()
+            .any(|r| r.id == TEAM)
+    );
+    fn engaged(world: &World, tick: u64) -> Context<'_> {
+        Context {
+            defending: true,
+            threat_bearing_deg: Some(90.),
+            warnings: RecentWarnings {
+                air_to_air: false,
+                surface_to_air: true,
+            },
+            ..world.context(tick)
+        }
+    }
+    // The defence starts a second and a half after the launch.
+    let mut first = Strike::new(3);
+    first.step(&world.context(1));
+    first.step(&engaged(&world, 180));
+    assert_eq!(call(&first), Some(Decision::Leave));
+    assert!(first.heli.ambush.is_some());
+    // Long after, a shot from its bearing is the known team's.
+    let late = 2 + UNMASK_SHOT_TICKS;
+    let mut later = Strike::new(3);
+    later.step(&world.context(late - 1));
+    later.step(&engaged(&world, late));
+    assert_ne!(call(&later), Some(Decision::Leave));
+    assert!(later.heli.ambush.is_none());
+}
+
+#[test]
 fn a_hold_off_is_deterministic_and_round_trips_through_a_checkpoint() {
     let mut world = defended_world();
     let mut a = Strike::new(5);
@@ -495,4 +600,137 @@ fn inside_a_known_ring_after_a_break_it_leaves_by_the_shortest_way_out() {
         ..clear.context(1)
     });
     assert_eq!(steer(&strike.step(&clear.context(2))).heading_deg, 20.);
+}
+
+/// Every shot hits, at 700 ft/s.
+struct AllHit;
+
+impl crate::ai::strike::ShotTable for AllHit {
+    fn shot(&self, _: StationId, _: crate::ai::strike::ShotLaunch, range_ft: f64) -> Option<f64> {
+        Some(range_ft / 700.)
+    }
+}
+
+#[test]
+fn under_heavy_aaa_on_the_target_it_fires_from_farther_out_with_the_hosts_answers() {
+    // A gun 5,000 ft of reach on the target (a 7,000 ft ring), the Mi-24's
+    // strike speed 120 kt: from the usual ranges the AT-2's flight carries
+    // it into the ring, and before 2026-10-29 it held off. With the host's
+    // answers it looks farther out (John, 2026-10-29) and fires from
+    // 13,500 ft, the nearest range whose advance ends outside the ring.
+    let mut store = at2(4);
+    store.flight = Some(crate::ai::strike::FlightTimes {
+        points: [
+            (4_500., 7.7),
+            (9_000., 14.6),
+            (13_500., 24.7),
+            (18_000., 34.8),
+        ],
+    });
+    let mut world = heli_world(store);
+    world.own.limits.maximum = crate::ai::ScalarSpeed(253.);
+    world.own.limits.minimum = crate::ai::ScalarSpeed(60.);
+    world.picture = picture(
+        &[
+            ground(TARGET, TARGET_AT, 0x200, None),
+            ground(SAM, TARGET_AT, 0x800, site(0., 5_000., true)),
+        ],
+        vec![SAM],
+    );
+    let mut blind = Strike::new(3);
+    blind.step(&world.context(1));
+    assert_eq!(blind.phase(), Phase::HoldOff, "no answers: as before");
+    world.inputs.shots = crate::ai::strike::Shots(Some(std::sync::Arc::new(AllHit)));
+    let mut strike = Strike::new(3);
+    let order = strike.step(&world.context(1));
+    assert_eq!(strike.phase(), Phase::Attack);
+    assert_eq!(strike.pass(), Some(Pass::StandOff));
+    assert_eq!(strike.heli.standoff_ft, Some(13_500.));
+    assert_eq!(order.release, None);
+    // Its exit opens from that range.
+    assert!(exit_distance(&strike, &world.context(2)) >= 13_500. + STANDOFF_EXIT_FT);
+}
+
+/// A tank driving east at 50 ft/s from `TARGET_AT` with a gun of 7,500 ft
+/// reach standing 3,000 ft west of where it is now (T.O.R.E opinionated
+/// change, John 2026-10-29: the move-ahead ambush).
+fn moving_column_world() -> World {
+    let mut store = at2(4);
+    store.flight = Some(crate::ai::strike::FlightTimes {
+        points: [
+            (4_500., 8.2),
+            (9_000., 16.4),
+            (13_500., 24.5),
+            (18_000., 32.7),
+        ],
+    });
+    let mut world = heli_world(store);
+    world.own.limits.maximum = crate::ai::ScalarSpeed(253.);
+    world.own.limits.minimum = crate::ai::ScalarSpeed(60.);
+    world.picture = picture(
+        &[
+            ground(TARGET, TARGET_AT, 0x200, None),
+            ground(SAM, [-3_000., 0., 24_000.], 0x800, site(0., 7_500., true)),
+        ],
+        vec![SAM],
+    );
+    world.inputs.shots = crate::ai::strike::Shots(Some(std::sync::Arc::new(AllHit)));
+    let mut moving = solution(TARGET_AT, TARGET_AT, false);
+    moving.target_velocity = [50., 0., 0.];
+    world.inputs.solution = Some(moving);
+    world
+}
+
+#[test]
+fn a_moving_column_under_a_gun_is_ambushed_from_ahead_of_it() {
+    let world = moving_column_world();
+    let mut strike = Strike::new(3);
+    // The choice on a search tick (once a second) takes the move-ahead.
+    strike.step(&world.context(120));
+    assert_eq!(strike.phase(), Phase::Attack);
+    assert_eq!(strike.pass(), Some(Pass::StandOff));
+    let plan = *strike.move_ahead().expect("a move-ahead");
+    assert_eq!(strike.heli.standoff_ft, Some(plan.range_ft));
+    assert_eq!(strike.heli.approach, Some(plan.point));
+    // Its aim lies east of the tank, where the tank will be.
+    assert!(plan.aim[0] > TARGET_AT[0] + 1_000., "{plan:?}");
+    // The firing point is outside the gun's ring.
+    let gun = [-3_000., 0., 24_000.];
+    assert!(horizontal(plan.point, gun) >= 7_500. + threat::RING_MARGIN_FT);
+    // The same column standing still is attacked as before: no move-ahead.
+    let mut parked = moving_column_world();
+    if let Some(sol) = parked.inputs.solution.as_mut() {
+        sol.target_velocity = [0.; 3];
+    }
+    let mut still = Strike::new(3);
+    still.step(&parked.context(120));
+    assert_eq!(still.move_ahead(), None);
+}
+
+#[test]
+fn a_move_ahead_is_deterministic_and_round_trips_through_a_checkpoint() {
+    let mut world = moving_column_world();
+    let mut a = Strike::new(5);
+    let mut b = Strike::new(5);
+    let step = |world: &mut World, tick: u64| {
+        world.own.position[2] += 1.5;
+        if let Some(sol) = world.inputs.solution.as_mut() {
+            sol.target_position[0] = TARGET_AT[0] + 50. * tick as f64 / 120.;
+        }
+    };
+    for tick in 120..600 {
+        step(&mut world, tick);
+        assert_eq!(a.step(&world.context(tick)), b.step(&world.context(tick)));
+    }
+    assert!(a.move_ahead().is_some());
+    let models = Models::default();
+    let mut twin: Strike = from_bytes(&to_bytes(&a, &models).unwrap(), &models).unwrap();
+    assert_eq!(twin, a);
+    for tick in 600..900 {
+        step(&mut world, tick);
+        assert_eq!(
+            a.step(&world.context(tick)),
+            twin.step(&world.context(tick))
+        );
+    }
 }

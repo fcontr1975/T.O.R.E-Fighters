@@ -78,7 +78,10 @@ impl AiWings {
         for human in &self.humans {
             self.mission.set_human_assignment(
                 human.id,
-                preset_for_human(preset, player_position, primary_enemy),
+                clipped(
+                    preset_for_human(preset, player_position, primary_enemy),
+                    self.airfields.patrol_bounds,
+                ),
             );
         }
         let friendly_humans: Vec<u32> = self
@@ -129,7 +132,7 @@ impl AiWings {
         }
         for (id, assignment) in assignments {
             if let Some(actor) = self.mission.actor_mut(id) {
-                actor.set_assignment(assignment);
+                actor.set_assignment(clipped(assignment, self.airfields.patrol_bounds));
             }
         }
         self.mission_preset = preset;
@@ -189,6 +192,7 @@ impl AiWings {
             };
             // Inherit existing relationship metadata until the complete set of
             // group assignments below rebuilds it symmetrically.
+            assignment = clipped(assignment, self.airfields.patrol_bounds);
             assignment.hostile_escorts.clear();
             let members: Vec<_> = self
                 .slots
@@ -238,7 +242,7 @@ impl AiWings {
                 .filter(|(side, _)| *side != actor.identity().side)
                 .map(|(_, relationship)| *relationship)
                 .collect();
-            actor.set_assignment(assignment);
+            actor.set_assignment(clipped(assignment, self.airfields.patrol_bounds));
         }
     }
 
@@ -423,6 +427,7 @@ fn cap(center_ft: [f64; 3]) -> Assignment {
         role: Role::CombatAirPatrol,
         stance: Stance::EngageAssigned,
         patrol: Some(PatrolRegion {
+            clip: None,
             center_ft,
             radius_ft: CAP_RADIUS_FT,
         }),
@@ -479,6 +484,18 @@ fn hold() -> Assignment {
         stance: Stance::WeaponsHold,
         ..Assignment::default()
     }
+}
+
+/// Preserve the station and ten-mile circle, intersected with the theater.
+fn clipped(mut assignment: Assignment, bounds: Option<[[f64; 2]; 2]>) -> Assignment {
+    if let Some(region) = &mut assignment.patrol {
+        region.clip = bounds;
+        if let Some([min, max]) = bounds {
+            region.center_ft[0] = region.center_ft[0].clamp(min[0], max[0]);
+            region.center_ft[2] = region.center_ft[2].clamp(min[1], max[1]);
+        }
+    }
+    assignment
 }
 
 #[cfg(test)]
@@ -763,5 +780,23 @@ mod tests {
         assert_eq!(self_defense().stance, Stance::SelfDefense);
         assert_eq!(self_defense().role, Role::Disengage);
         assert_eq!(hold().stance, Stance::WeaponsHold);
+    }
+}
+
+#[cfg(test)]
+mod clipping_tests {
+    use super::*;
+    #[test]
+    fn cap_is_the_intersection_with_the_map_not_a_smaller_circle() {
+        let a = clipped(
+            cap([100., 20_000., 100.]),
+            Some([[0., 0.], [200_000., 200_000.]]),
+        );
+        let p = a.patrol.unwrap();
+        assert_eq!(p.radius_ft, CAP_RADIUS_FT);
+        assert!(p.contains([40_000., 20_000., 100.]));
+        assert!(!p.contains([-1., 20_000., 100.]));
+        assert!(!p.contains([100., 20_000., -1.]));
+        assert!(!p.contains([100_000., 20_000., 100.]));
     }
 }

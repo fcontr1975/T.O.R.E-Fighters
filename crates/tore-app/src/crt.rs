@@ -21,6 +21,7 @@
 //! not in the way; John asked for "nice static occasionally and a bit of
 //! chromatic aberration and pixelation to make it look like a CRT display"
 //! (opinionated, John, 2026-10-13).
+use crate::gpu_setup::NamedSteps as _;
 
 /// How strong each part of the look is. Pixel sizes are for a 1080-row
 /// output and scale with the output's height.
@@ -538,11 +539,11 @@ pub struct Crt {
 
 impl Crt {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("CRT look"),
             source: wgpu::ShaderSource::Wgsl(include_str!("crt.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("CRT look"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -1083,5 +1084,80 @@ mod shader_tests {
         ]
         .join("\n");
         validate("world", &world);
+    }
+
+    /// The type a `BuiltIn SampleMask` variable points at, as an opcode.
+    #[cfg(any(windows, target_os = "linux"))]
+    fn sample_mask_type_opcode(words: &[u32]) -> u32 {
+        const OP_TYPE_POINTER: u32 = 32;
+        const OP_VARIABLE: u32 = 59;
+        const OP_DECORATE: u32 = 71;
+        const DECORATION_BUILT_IN: u32 = 11;
+        const BUILT_IN_SAMPLE_MASK: u32 = 20;
+        let mut definitions = std::collections::HashMap::new();
+        let mut mask = None;
+        let mut at = 5;
+        while at < words.len() {
+            let (count, opcode) = ((words[at] >> 16) as usize, words[at] & 0xffff);
+            let operands = &words[at + 1..at + count];
+            match opcode {
+                OP_DECORATE if operands[1..] == [DECORATION_BUILT_IN, BUILT_IN_SAMPLE_MASK] => {
+                    mask = Some(operands[0]);
+                }
+                // Types define their first operand; a variable its second.
+                OP_VARIABLE => {
+                    definitions.insert(operands[1], (opcode, operands[0]));
+                }
+                OP_TYPE_POINTER => {
+                    definitions.insert(operands[0], (opcode, operands[2]));
+                }
+                16..=31 => {
+                    definitions.insert(operands[0], (opcode, 0));
+                }
+                _ => {}
+            }
+            at += count;
+        }
+        let variable = definitions[&mask.expect("no SampleMask variable")];
+        let pointer = definitions[&variable.1];
+        definitions[&pointer.1].0
+    }
+
+    /// AMD's Windows driver crashes compiling a `SampleMask` that is not the
+    /// array Vulkan requires (issue #8). `crates/vendor/naga` declares one;
+    /// stock naga does not.
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
+    fn the_sample_mask_is_an_array_in_spirv() {
+        const OP_TYPE_ARRAY: u32 = 28;
+        let source = "struct Out { @location(0) color:vec4<f32>, @builtin(sample_mask) mask:u32 }
+            @fragment fn written()->Out { return Out(vec4<f32>(1.0),5u); }
+            @fragment fn read(@builtin(sample_mask) mask:u32)->@location(0) vec4<f32> {
+             return vec4<f32>(f32(mask));
+            }";
+        let module = naga::front::wgsl::parse_str(source).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        for entry_point in ["written", "read"] {
+            let words = naga::back::spv::write_vec(
+                &module,
+                &info,
+                &naga::back::spv::Options::default(),
+                Some(&naga::back::spv::PipelineOptions {
+                    shader_stage: naga::ShaderStage::Fragment,
+                    entry_point: entry_point.to_string(),
+                }),
+            )
+            .unwrap();
+            assert_eq!(
+                sample_mask_type_opcode(&words),
+                OP_TYPE_ARRAY,
+                "{entry_point}"
+            );
+        }
     }
 }

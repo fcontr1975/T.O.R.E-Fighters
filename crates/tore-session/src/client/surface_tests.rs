@@ -231,3 +231,31 @@ fn a_redfor_player_starts_by_the_target_it_defends() {
         .hypot(flight.position[2] - f64::from(starts.blue[1]));
     assert!(from_blue > 15. * 6_076., "{from_blue} ft from Blue's start");
 }
+
+#[test]
+fn clients_build_the_retried_host_seed_without_retrying_locally() {
+    use tore_world::test_support::surface::placement_retry_resources;
+    let (resources, chosen) = placement_retry_resources(1);
+    let mission = spec_with_target(&target("QUCITY", 0, 3, 1));
+    let mut rig = Rig::with_import(mission, link(), 21, resources, |_| {});
+    assert_eq!(rig.host.spec().surface_seed, chosen);
+    rig.host.start_now();
+    let player = rig.join(|_| {}, level_script());
+    assert!(rig.run_until(Duration::from_secs(4), |r| r.seated(player)));
+    assert_eq!(
+        rig.players[player]
+            .client
+            .mission()
+            .unwrap()
+            .terrain
+            .surface
+            .digest(),
+        rig.host.world().terrain.surface.digest()
+    );
+    assert!(
+        !rig.players[player]
+            .events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::ContentRefused { .. }))
+    );
+}

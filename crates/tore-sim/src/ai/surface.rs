@@ -37,6 +37,9 @@
 //! - A controller told to hold ([`Inputs::hold`], a flak team waiting for a
 //!   group) keeps its lock in Track and fires nothing; the launch gates'
 //!   15 s window does not run meanwhile.
+//! - A controller with a lay ([`Inputs::lay`], a tank gun on an aircraft)
+//!   holds the target inside the gates that long before its first round,
+//!   and starts the lay again whenever the gates fail.
 //!
 //! A target may be an aircraft or, since surface units fight each other
 //! (John, 2026-10-11), a ground object or ship of the other side: the host
@@ -122,6 +125,45 @@ pub const SMALL_ARMS_ERROR_FACTOR: f64 = 4.0;
 /// (docs/spec/surface-defenses.md, "Surface against surface").
 pub fn surface_aim_error_deg(skill: i32, radar: bool) -> f64 {
     aim_error_deg(skill, radar) / 4.
+}
+/// The aim error a tank's fire control adds at an aircraft, degrees, the same
+/// at every experience (fitted, agent, 2026-10-24; John's request that tanks
+/// "not be godlike snipers" against aircraft). A tank's fire control is
+/// built for targets on the ground: its ballistic computer has no air target
+/// mode, its laser ranges poorly on a small target against the sky, and its
+/// round must strike (no proximity fuze). A better crew tracks better
+/// ([`aim_error_deg`] by skill), but cannot range better, so this part does
+/// not shrink with experience (docs/spec/surface-defenses.md, "Tanks against
+/// aircraft").
+pub const TANK_AIR_RANGING_ERROR_DEG: f64 = 0.4;
+/// The tracking lag of a tank gunner laying on an aircraft, seconds (fitted,
+/// agent, 2026-10-24): the aim error at an aircraft grows by the target's
+/// angular rate, as the gun sees it, times this. A tank's turret and gun
+/// drives and its stabiliser are made to hold a slow ground target; a gunner
+/// tracking a crossing jet by hand lags it, and the lead the fire control
+/// takes from that tracking carries the lag. A hovering helicopter adds
+/// nothing; a 100 kt helicopter crossing 3,000 ft away (about 3 degrees a
+/// second) adds 0.6 degrees; a 450 kt jet 1,000 ft away crossing at right
+/// angles (about 44 degrees a second) adds 9 degrees, a clean miss.
+pub const TANK_AIR_TRACKING_LAG_S: f64 = 0.2;
+/// Seconds a tank gun must hold an aircraft inside its fire gates (its reach
+/// and its gun's elevation) before the first round at it (fitted, agent,
+/// 2026-10-24): the gunner lays, lases and tracks long enough for the fire
+/// control to settle a lead, which it can only do once the target is in the
+/// sight inside the gun's reach. Each time the aircraft leaves the gates the
+/// lay starts again. Later rounds at the same target follow the gun's own
+/// loading cycle.
+pub const TANK_AIR_LAY_S: f64 = 3.0;
+/// A tank gun's aim error per round at an aircraft, degrees: the visual
+/// guns' error by skill, plus [`TANK_AIR_RANGING_ERROR_DEG`], plus the
+/// target's angular rate (`angular_rate_deg_s`, as the gun sees it) times
+/// [`TANK_AIR_TRACKING_LAG_S`]: 1.9, 1.4, 1.1 and 0.9 degrees at a hovering
+/// helicopter for novice, average, veteran and ace. Tanks shooting at ground
+/// units and ships keep [`surface_aim_error_deg`].
+pub fn tank_air_aim_error_deg(skill: i32, angular_rate_deg_s: f64) -> f64 {
+    aim_error_deg(skill, false)
+        + TANK_AIR_RANGING_ERROR_DEG
+        + angular_rate_deg_s.abs() * TANK_AIR_TRACKING_LAG_S
 }
 /// How much a radar-directed gun's aim error widens while its target's
 /// radio-frequency jammer is on. Visual guns are unaffected. Defined (John,
@@ -276,6 +318,13 @@ pub struct Inputs<'a> {
     /// Track, ready, without counting the launch gates' failure, and fires
     /// nothing (a flak team that has not yet engaged the target's group).
     pub hold: bool,
+    /// Ticks the target must stay inside the launch gates before the first
+    /// round at it, on top of the record's tracking delay: a tank gun's lay
+    /// on an aircraft ([`TANK_AIR_LAY_S`]). While it is above 0, every time
+    /// the gates fail in Track the lay starts again when they pass. 0 for
+    /// every other weapon and target, which keep their lock while the gates
+    /// fail.
+    pub lay: u64,
 }
 
 /// Rounds the host must fire this tick.
@@ -546,8 +595,12 @@ impl Controller {
                             self.enter_search(tick);
                         }
                     } else {
-                        self.gates_failed_since = None;
-                        if tick >= self.lock_since + profile.timing.track {
+                        if self.gates_failed_since.take().is_some() && inputs.lay > 0 {
+                            // A lay restarts once the target is back in the
+                            // gates.
+                            self.lock_since = tick;
+                        }
+                        if tick >= self.lock_since + profile.timing.track + inputs.lay {
                             self.start_burst(profile, tick);
                         }
                     }

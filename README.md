@@ -12,7 +12,7 @@
   <a href="rust-toolchain.toml"><img alt="Rust 1.91.1 pinned" src="https://img.shields.io/badge/rust-1.91.1-b7410e?logo=rust&logoColor=white"></a>
   <a href="docs/DEVELOPMENT.md"><img alt="Linux, Windows and macOS" src="https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-2f6f9f"></a>
   <a href="LICENSE"><img alt="GNU General Public License v3.0" src="https://img.shields.io/badge/license-GPL--3.0-1f6feb"></a>
-  <a href="docs/ROADMAP.md"><img alt="Milestone 2 multiplayer released, now at v0.2.1, missions and campaigns next" src="https://img.shields.io/badge/milestone-M2%20released%2C%20M3%20next-orange"></a>
+  <a href="docs/ROADMAP.md"><img alt="Milestone 2 multiplayer released, now at v0.2.2, missions and campaigns next" src="https://img.shields.io/badge/milestone-M2%20released%2C%20M3%20next-orange"></a>
 </p>
 
 <p align="center">
@@ -118,8 +118,18 @@ PNG, ZIP or PDF. The [control reference](docs/FLIGHT-CONTROLS.md) lists every ke
 **Escape > Control** remaps keys, gamepads, joysticks and head tracking
 ([controller setup](docs/INPUT.md)).
 
+For slow frame rates, turn on **Escape > Debug > Slow-frame log** during flight,
+play through the slowdown, then send that session's log. Logs are in
+`%LOCALAPPDATA%\T.O.R.E-Fighters\logs` on Windows,
+`~/Library/Logs/T.O.R.E-Fighters` on macOS, and
+`~/.local/state/T.O.R.E-Fighters/logs` on Linux (or under `$XDG_STATE_HOME`).
+[Slow-frame troubleshooting](docs/DEVELOPMENT.md#diagnosing-slow-frames) explains
+command-line options and software-renderer warnings.
+
 If the game does not start, it writes logs and a crash report that help us find
-out why. [Startup troubleshooting](docs/DEVELOPMENT.md#startup-logs-and-fatal-errors)
+out why. On Windows you can choose Vulkan or DirectX 12 on the import screen or
+under Pref > Graphics, and `--graphics-api vulkan` or `dx12` chooses for one run.
+[Startup troubleshooting](docs/DEVELOPMENT.md#startup-logs-and-fatal-errors)
 says where to find them. Bugs and questions are welcome in
 [Issues](https://github.com/john-overton/T.O.R.E-Fighters/issues) and
 [Discussions](https://github.com/john-overton/T.O.R.E-Fighters/discussions).
@@ -140,12 +150,15 @@ recovered yet, T.O.R.E uses a documented approximation labelled *fitted*. See
 
 ## What works today
 
-Version 0.2.1 follows the [Milestone 2: Multiplayer](docs/ROADMAP.md#milestone-2-multiplayer)
+Version 0.2.2 follows the [Milestone 2: Multiplayer](docs/ROADMAP.md#milestone-2-multiplayer)
 release, 0.2.0. Build a Quick Mission with friends, fly together or against each
 other, and return to the lobby for the next round. 0.2.0 also brought ground
 attacks, defended surface targets, more aircraft and a fuller world to single
 player; 0.2.1 keeps scores across revivals, matches games by compatibility code
-and fixes the macOS first launch. The release notes for
+and fixes the macOS first launch; 0.2.2 flies guided stores on an energy model
+with physical decoys, reworks AI missile defense, limits Quick Mission
+distances per theater and fixes a white-window crash on AMD graphics cards on
+Windows. The release notes for [0.2.2](docs/release/v0.2.2.md),
 [0.2.1](docs/release/v0.2.1.md) and [0.2.0](docs/release/v0.2.0.md) describe
 the changes.
 

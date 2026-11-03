@@ -137,6 +137,20 @@ TANKER (fuel) and MISTRK ("SAM-Carrying Truck"). All three are unarmed class
 resupply SAM rails and AAA magazines under the surface-AI plan (TRUCK and
 MISTRK) are `SUPPLY_TRUCKS`. That split is a design choice, not retail data.
 
+## Shoulder-fired teams
+
+Five SAM records are infantry teams with a shoulder-fired launcher (MANPADS):
+SA-7, SA-14, SA-16, FIM-92 and Mistral (`MIS`). Nothing in the record marks
+them as such. They are the only SAM-class units with the men's hit points (5,
+every vehicle and launcher 100 or more) and the men's top speed (`_maxSpeed`
+10, SAM vehicles 50; the fixed Crotale reads 10 but has 100 hit points). The
+reader names this rule `SurfaceUnit::is_shoulder_fired_team`: a SAM-class unit,
+not a ship, with at most `TEAM_MAX_HIT_POINTS` (5) and at most `TEAM_MAX_SPEED`
+(10). The census test checks that the rule picks exactly these five. The AI
+uses it to hide the teams from its threat picture
+([AI strike](../spec/ai-strike.md#what-the-ai-knows)); the rearm times of the
+surface supply rules name the same five.
+
 ## NPC block
 
 | Field | Notes |

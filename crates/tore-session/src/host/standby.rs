@@ -374,7 +374,12 @@ impl Host {
             }
         }
         stream.status = Some(status);
-        stream.asks_checkpoint |= status.needs_checkpoint;
+        // The newest status says whether a checkpoint is still wanted: one
+        // sent while a resync was on its way, and answered by it, asks for
+        // nothing once a later status says so (the battery's planned
+        // handover, 2026-10-24: kept from the older status, the ask sent a
+        // second checkpoint the restored copy had no use for).
+        stream.asks_checkpoint = status.needs_checkpoint;
         if stream.ready() != was_ready {
             self.standbys.changed = true;
             self.lobby_dirty = true;

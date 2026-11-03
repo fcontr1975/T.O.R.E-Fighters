@@ -239,6 +239,7 @@ where
         guidance: readout.estimates.guidance_available,
         in_range: readout.estimates.in_range,
         hit: readout.estimates.hit_percent,
+        min_ft: readout.estimates.min_range.unwrap_or(0.),
         max_ft: readout.estimates.max_range.unwrap_or(0.),
         band_min: readout.estimates.band.map(|b| b.minimum).unwrap_or(0.),
         band_max: readout.estimates.band.map(|b| b.maximum).unwrap_or(0.),

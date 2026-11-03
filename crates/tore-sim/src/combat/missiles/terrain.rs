@@ -33,55 +33,95 @@ impl Motion {
         intercept: Vector,
         ground: &dyn Fn(f64, f64) -> f64,
     ) -> Vector {
-        let aim = self.aim(position, intercept);
-        if self.cruise.is_none() {
-            return aim;
-        }
+        cruise_aim(self.cruise, self.velocity, position, intercept, ground)
+    }
+}
+
+pub(super) fn cruise_aim(
+    cruise: Option<Cruise>,
+    velocity: Vector,
+    position: Vector,
+    intercept: Vector,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> Vector {
+    let aim = cruise.map_or(intercept, |c| c.aim(position, intercept));
+    if cruise.is_none() {
+        return aim;
+    }
+    clearance_aim(velocity, position, intercept, aim, ground)
+}
+
+pub(super) fn energy_cruise_aim(
+    cruise: Cruise,
+    velocity: Vector,
+    position: Vector,
+    intercept: Vector,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> (Vector, bool) {
+    let mut aim = cruise.aim(position, intercept);
+    if length(sub(aim, intercept)) > 1e-6 {
         let dx = intercept[0] - position[0];
         let dz = intercept[2] - position[2];
-        let distance = dx.hypot(dz);
-        if distance < 1. {
-            return aim;
-        }
-        // A flat surface is not an intervening obstacle. Preserve low sea
-        // cruise and terminal profiles there, including existing sag behavior.
-        let base = ground(position[0], position[2]).min(ground(intercept[0], intercept[2]));
+        let distance = dx.hypot(dz).max(1.);
         let ahead = distance.min(LOOKAHEAD_FT);
-        let aim_distance = (aim[0] - position[0]).hypot(aim[2] - position[2]);
-        let profile_slope = (aim[1] - position[1]) / aim_distance.max(1.);
-        let mut slope = profile_slope;
-        let samples = (ahead / SAMPLE_FT).ceil() as u32;
-        let response = self.velocity[0].hypot(self.velocity[2]) * RESPONSE_SECONDS;
-        for i in 0..=samples {
-            let along = ahead * f64::from(i) / f64::from(samples);
-            let x = position[0] + dx * along / distance;
-            let z = position[2] + dz * along / distance;
-            let clearance = (CLEARANCE_FT + SAMPLE_MARGIN_FT)
-                * ((distance - along) / TERMINAL_FT).clamp(0., 1.);
-            let terrain = ground(x, z);
-            if terrain <= base + 1. {
-                continue;
-            }
-            let height = terrain + clearance;
-            // Lead a climb by two seconds for the finite turn rate. Descents
-            // retain the actual sample distance, so a passed ridge releases
-            // the constraint naturally. The target endpoint has no clearance.
-            let run = if height > position[1] {
-                (along - response).max(SAMPLE_FT)
-            } else {
-                along.max(SAMPLE_FT)
-            };
-            slope = slope.max((height - position[1]) / run);
+        aim[0] = position[0] + dx * ahead / distance;
+        aim[2] = position[2] + dz * ahead / distance;
+    }
+    let aim = clearance_aim(velocity, position, intercept, aim, ground);
+    (aim, length(sub(aim, intercept)) > 1e-6)
+}
+
+fn clearance_aim(
+    velocity: Vector,
+    position: Vector,
+    intercept: Vector,
+    aim: Vector,
+    ground: &dyn Fn(f64, f64) -> f64,
+) -> Vector {
+    let dx = intercept[0] - position[0];
+    let dz = intercept[2] - position[2];
+    let distance = dx.hypot(dz);
+    if distance < 1. {
+        return aim;
+    }
+    // A flat surface is not an intervening obstacle. Preserve low sea
+    // cruise and terminal profiles there, including existing sag behavior.
+    let base = ground(position[0], position[2]).min(ground(intercept[0], intercept[2]));
+    let ahead = distance.min(LOOKAHEAD_FT);
+    let aim_distance = (aim[0] - position[0]).hypot(aim[2] - position[2]);
+    let profile_slope = (aim[1] - position[1]) / aim_distance.max(1.);
+    let mut slope = profile_slope;
+    let samples = (ahead / SAMPLE_FT).ceil() as u32;
+    let response = velocity[0].hypot(velocity[2]) * RESPONSE_SECONDS;
+    for i in 0..=samples {
+        let along = ahead * f64::from(i) / f64::from(samples);
+        let x = position[0] + dx * along / distance;
+        let z = position[2] + dz * along / distance;
+        let clearance =
+            (CLEARANCE_FT + SAMPLE_MARGIN_FT) * ((distance - along) / TERMINAL_FT).clamp(0., 1.);
+        let terrain = ground(x, z);
+        if terrain <= base + 1. {
+            continue;
         }
-        if slope <= profile_slope {
-            aim
+        let height = terrain + clearance;
+        // Lead a climb by two seconds for the finite turn rate. Descents
+        // retain the actual sample distance, so a passed ridge releases
+        // the constraint naturally. The target endpoint has no clearance.
+        let run = if height > position[1] {
+            (along - response).max(SAMPLE_FT)
         } else {
-            [
-                position[0] + dx * ahead / distance,
-                position[1] + slope * ahead,
-                position[2] + dz * ahead / distance,
-            ]
-        }
+            along.max(SAMPLE_FT)
+        };
+        slope = slope.max((height - position[1]) / run);
+    }
+    if slope <= profile_slope {
+        aim
+    } else {
+        [
+            position[0] + dx * ahead / distance,
+            position[1] + slope * ahead,
+            position[2] + dz * ahead / distance,
+        ]
     }
 }
 

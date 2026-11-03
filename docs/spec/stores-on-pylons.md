@@ -27,6 +27,67 @@ closer together in the tunnel with the front pair back where the tanks
 hung, and the AIM-120 under the glove pylon beside the AIM-9 on its
 shoulder rail ([the F-14](#the-f-14)).
 
+## Even paired loads
+
+**Opinionated, requested by John on 2026-10-25 (issue #6), expanded by his
+review follow-up.** Every point that carries stores on both sides of the
+aircraft loads complete pairs. This includes wings, wingtips, shoulder rails,
+fuselage pairs, tunnel pairs and paired internal bays, even while bay doors
+hide their stores. Use the resolved carrier's pairing and nonzero lateral
+position, the same `Rack::two_sided` predicate as drawing and release.
+Centreline and genuinely single-sided points keep their counts. Original
+PT/JT records are not rewritten.
+
+After existing compatibility and weight arithmetic, a positive odd maximum
+above 1 rounds down (3 to 2, 5 to 4); a maximum of 1 becomes 2. Zero stays
+zero. Quantity editing, including clicking a loaded station, steps by 2.
+Moving between a pair and a single point also moves 2, or nothing if either
+end cannot supply or accept a pair. The same conversion builds human and
+AI default loads; AI tactics do not change. Existing singleton designator
+and gun-pod equipment paths keep their separate rules.
+
+A maximum of one becoming two is an explicit minimum-pair exception to the
+old row weight class. Both stores' full weight, including tank fuel, counts
+toward aircraft takeoff weight. This can require removing other stores or
+fuel. All other odd maxima round down after the weight calculation.
+
+**Saved preflight loads:** a saved single on a paired point becomes a pair
+(1 to 2), as John requested. Larger odd quantities round down (3 to 2).
+Clamp to the current maximum; zero stays zero. Layout maxima use the same
+rule. A saved single is not silently removed to avoid overweight.
+
+Quick Mission restores a structurally valid migrated load into the editor
+even if overweight. The existing weight display shows the excess. Fly refuses
+with `This plane is too heavy to take off. Remove stores or fuel.` until the
+player changes stores or fuel. Invalid records still fall back to the normal
+load. Non-interactive single-player mission construction also applies the
+migration, then refuses an overweight start with that same error through
+`Combat::with_loadout`. It does not drop the pair, reduce fuel, substitute a
+default load or begin simulation. Network requests must already obey current
+counts and aircraft weight limits; old odd requests are refused. An odd
+count on a two-sided point is refused with `Paired stores must be loaded in
+pairs.` (or `Paired tanks ...`); any other layout or quantity mismatch is
+reported without attributing it to pairing.
+
+In-flight ammunition, checkpoints and recorded store layouts are not
+migrated: firing one store legitimately leaves an odd count. Each even load
+starts with equal side counts and mass at mirrored positions. The existing
+release rule remains left, right, left, right for the selected point, so the
+heavier remaining side of that point fires next after its first shot.
+Jettison removes actual remaining stores. The flight adapter still uses total
+payload mass and total load-dependent drag; no lateral store-CG or per-side
+drag torque model is introduced.
+
+Retail has aggregate source-row capacities and an alternating per-row release
+offset. John confirms it did not draw these pylons and loaded stores.
+T.O.R.E's old right-extra layout independently applied to every row caused
+the visible pile-up. Even preflight loads are a deliberate departure from
+retail quantity editing, not a correction to the original records.
+[Source-row research](../formats/aircraft-ordnance.md#paired-point-counts-and-physics)
+owns that evidence and its limitations. The
+[roster validation](../baselines/even-paired-loads.md) lists every changed
+maximum and reports the default-load audit.
+
 ## What the player sees
 
 - **Every store leaves from where it hangs.** A missile, bomb or rocket
@@ -91,7 +152,7 @@ shoulder rail ([the F-14](#the-f-14)).
 | Fuselage pairs one behind another | A Fuselage record whose side holds two stores, or four or more, has two pylons on that side, one ahead of the other: their stores' middles are half a store length and 0.5 ft either side of the record's position, so they clear by 1 ft. The front pylon's store leaves first, so four leave left front, right front, left rear, right rear. Four or more a side: two side by side on each pylon's rack | opinionated, John 2026-10-13 ("fuselage missile pairs one behind another: fix"); the gap and the front-first order are agent decisions (the real aircraft's firing order is not published; front first keeps a rear missile from passing under a loaded front one) |
 | Fuselage pair on the centreline | A paired Fuselage weapon record at x 0 holding two or more (the F-4E's and F-4G's four Sparrows) hangs 3 ft either side of the centreline, in the Sparrow wells | agent decision, 2026-10-13 (fitted) |
 | Never paired | An internal gun, whatever its flags; a record on the centreline (nothing to mirror) | agent decision |
-| Which side | The mirror (left) when the whole releases left on the station after this one (rounds over `actualRoundsPerGame`) is odd; so the left side empties first and the right holds the odd store | retail parity rule; whether retail counts before or after the debit is unknown, the order is fitted |
+| Which side | The mirror (left) when the whole releases left on the station after this one (rounds over `actualRoundsPerGame`) is odd. Even wing loads start symmetric and release left then right; a partially spent point can hold one extra on the right | fitted release order based on the documented retail per-row alternation; no claim of a retail drawn-store split |
 | Unlimited ammunition cheat | The count never moves, so the side follows the release's projectile number (alternates) | agent decision |
 | Who | The player, the AI (strike stores, missiles and seeker missiles alike) and every network seat. Retail releases a distant AI aircraft from its centre; T.O.R.E releases every aircraft from its pylon | agent decision |
 | Guns | Keep their muzzle (gun mount, AC-130 barrel) | unchanged |

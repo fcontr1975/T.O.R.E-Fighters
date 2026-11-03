@@ -215,11 +215,15 @@ class UnlockedMissileTests(unittest.TestCase):
             log = work / "log" / "log.jsonl"
             log.write_text("")
             self.assertTrue(rr.unlocked_release_problems(work, "readiness=MaximumRange", mode="max-range"))
-            rows = [{"kind": "weapon.launch", "subject": 0}, {"kind": "weapon.outcome", "subject": 0}]
+            rows = [{"kind": "weapon.launch", "subject": 0, "object": 1, "fields": {"projectile": 7}},
+                    {"kind": "weapon.outcome", "subject": 0, "fields": {"projectile": 7}}]
             log.write_text("\n".join(json.dumps(r) for r in rows))
             self.assertEqual(rr.unlocked_release_problems(work, "readiness=MaximumRange", mode="max-range"), [])
             self.assertTrue(rr.unlocked_release_problems(work, "readiness=Ready", mode="max-range"))
-            rows.append({"kind": "combat.hit", "subject": 0})
+            rows.append({"kind": "combat.hit", "subject": 0, "object": 0, "fields": {"projectile": 7}})
+            log.write_text("\n".join(json.dumps(r) for r in rows))
+            self.assertTrue(rr.unlocked_release_problems(work, "readiness=MaximumRange", mode="max-range"))
+            rows[-1]["object"] = 1
             log.write_text("\n".join(json.dumps(r) for r in rows))
             self.assertTrue(rr.unlocked_release_problems(work, "readiness=MaximumRange", mode="max-range"))
 

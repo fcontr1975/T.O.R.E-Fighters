@@ -363,9 +363,12 @@ def head_ir_problems(work: Path, output: str) -> list[str]:
     elif not any(r.get("fields", {}).get("aspect_deg", 0) > 170
                  and 2.5 * 6076 < r.get("fields", {}).get("range_ft", 0) < 3.1 * 6076 for r in launches):
         problems.append("AIM-9M release was not head-on near 3 nm")
-    if not any(r.get("kind") == "combat.hit" and r.get("subject") == 0
-               and r.get("fields", {}).get("weapon") in weapons for r in rows):
-        problems.append("head-on guided missile did not reach the fixture target")
+    if not any(r.get("kind") == "weapon.decoyed" and r.get("subject") == 0
+               and r.get("fields", {}).get("decoy") == "flare" for r in rows):
+        problems.append("seeded head-on AIM-9M was not seduced by the target's flare")
+    if any(r.get("kind") == "combat.hit" and r.get("subject") == 0
+           and r.get("fields", {}).get("weapon") in weapons for r in rows):
+        problems.append("decoyed head-on AIM-9M unexpectedly hit after device passage")
     if not any(r.get("kind") == "audio.tone" and r.get("fields", {}).get("tone") == "infrared lock" for r in rows):
         problems.append("head-on IR lock tone was not recorded")
     return problems
@@ -396,8 +399,12 @@ def unlocked_release_problems(work: Path, output: str, *, mode: str) -> list[str
     elif mode == "max-range":
         if "readiness=MaximumRange" not in output:
             problems.append("shot did not retain MAX RANGE advisory")
-        if any(r.get("kind") == "combat.hit" and r.get("subject") == 0 for r in rows):
-            problems.append("beyond-energy shot unexpectedly hit")
+        intended = {r.get("fields", {}).get("projectile"): r.get("object") for r in launches}
+        if not intended or None in intended or any(target is None for target in intended.values()):
+            problems.append("beyond-energy shot has no recorded designated target")
+        if any(r.get("kind") == "combat.hit" and r.get("subject") == 0
+               and r.get("fields", {}).get("projectile") in intended for r in rows):
+            problems.append("beyond-energy shot produced an unintended hit")
     if mode != "maddog" and not any(r.get("kind") == "weapon.outcome"
             and r.get("subject") == 0 for r in rows):
         problems.append("shot has no recorded physical outcome")

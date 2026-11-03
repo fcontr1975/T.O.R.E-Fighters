@@ -157,6 +157,7 @@ pub fn serve_with(
         spec,
         resources,
         world,
+        distance_note,
         ..
     } = prepared;
     let aircraft = world.roster.planes().len();
@@ -213,7 +214,7 @@ pub fn serve_with(
         commit: commit().to_owned(),
         install_id,
     })?;
-    for line in &start_lines {
+    for line in start_lines.iter().chain(&distance_note) {
         log.log(timer.unix_seconds(), line);
     }
     log.log(timer.unix_seconds(), &start_line);

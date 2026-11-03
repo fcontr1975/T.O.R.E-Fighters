@@ -47,7 +47,7 @@ use crate::sensors::{self, Observable, Sensors};
 // changing any of these.
 const DECISION_FUNCTIONS: u64 = 0x6b7a_6611_f77f_f972;
 const CONTROLLERS: u64 = 0x60e4_6979_91de_258a;
-const MISSION_ENGAGEMENT: u64 = 0x5157_5891_47aa_dc97;
+const MISSION_ENGAGEMENT: u64 = 0xc1bb_2d61_7227_eb04;
 const AIRFIELD: u64 = 0x0a4b_f5ea_aa0a_581f;
 
 #[test]
@@ -519,6 +519,13 @@ fn record_assignment(fp: &mut Fingerprint, assignment: &Assignment) {
     fp.option(assignment.patrol, |fp, patrol| {
         fp.vector(patrol.center_ft);
         fp.f64(patrol.radius_ft);
+        if let Some(bounds) = patrol.clip {
+            for point in bounds {
+                for value in point {
+                    fp.f64(value);
+                }
+            }
+        }
     });
 }
 
@@ -788,6 +795,7 @@ fn station_view(
         employment_fit: None,
         minimum_range_ft: range.0,
         maximum_range_ft: range.1,
+        energy_target: None,
         infrared_envelope: None,
         requires_radar: false,
         requires_sensor: false,
@@ -916,6 +924,7 @@ fn decision_functions(probe: &Probe) -> u64 {
         assignment(Role::FreeEngagement, Stance::EngageAssigned),
         Assignment {
             patrol: Some(PatrolRegion {
+                clip: None,
                 center_ft: [0., 20_000., 10_000.],
                 radius_ft: 15_000.,
             }),
@@ -1415,6 +1424,7 @@ fn orders_for_scripted_ace(
             heading_deg: 200.,
             pitch_deg: -10.,
             rotorcraft: false,
+            extend: false,
         })),
         1_560 => controller.set_defense_motion(None),
         1_680 => controller.set_search_contact(Some(SearchContact {
@@ -1579,6 +1589,7 @@ fn store(station: u8, kind: SeekerClass, gun: bool, rounds: u32, radar: bool) ->
             tracking_delay: Delay::quarters(1),
             pacing: pacing(10, Delay::quarters(1), Delay::quarters(2)),
             maximum_range_ft: Some(9_000.),
+            energy_target: None,
             minimum_range_ft: 0.,
             infrared_envelope: None,
             requires_radar: false,
@@ -1613,6 +1624,7 @@ fn store(station: u8, kind: SeekerClass, gun: bool, rounds: u32, radar: bool) ->
             Delay::seconds(if infrared { 2 } else { 4 }),
         ),
         maximum_range_ft: Some(if infrared { 14_000. } else { 42_000. }),
+        energy_target: None,
         minimum_range_ft: if infrared { 1_000. } else { 2_000. },
         infrared_envelope: None,
         requires_radar: radar && !infrared,

@@ -1526,6 +1526,7 @@ pub fn guided() -> tore_sim::combat::guided::GuidedSight {
     use tore_sim::combat::guided::{Advisory, GuidedLevel, GuidedSight};
     use tore_sim::combat::missiles::Guidance;
     GuidedSight {
+        energy_intercept: None,
         kind: Guidance::Laser,
         aim: Some([39_000., 190., -27_000.]),
         buddy: true,
@@ -1706,6 +1707,7 @@ pub fn readout() -> tore_world::readout::CockpitReadout {
             guidance_available: true,
             can_lock: true,
             observation: Some(observation),
+            min_range: Some(1_700.),
             max_range: Some(48_000.),
             band: Some(FiringBand {
                 minimum: 3_000.,

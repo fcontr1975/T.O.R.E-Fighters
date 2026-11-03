@@ -1770,7 +1770,7 @@ def drive_master_listing(d: Drive) -> None:
     if not master.wait_for(r'^listing id=[0-9a-f]{16} from=127\.0\.0\.1:\d+ name="T\.O\.R\.E server" players=0/', 5):
         d.problem("the master's `listings` does not show the server")
     server.send("status")
-    if not server.wait_for(rf"broadcast: listed, seen at 127\.0\.0\.1:{port}$", 5):
+    if not server.wait_for(rf"broadcast: listed, seen at 127\.0\.0\.1:{port}, worst [0-9.]+ ms$", 5):
         d.problem("the status line does not show the listing")
     # The Internet Lobby's own listing (slice I4): `tore-app --browse` lists the server with its details.
     browsed = d.run("browse", [d.app, "--browse", "4", "--master", f"{LOCALHOST}:{mport}"], timeout=60)

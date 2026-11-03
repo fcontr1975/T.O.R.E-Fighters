@@ -211,7 +211,7 @@ fn a_refused_watch_leaves_the_game_not_watching() {
 #[test]
 fn the_delayed_watch_countdown_uses_the_live_deadline() {
     let mut rig = Rig::with_config(
-        spec(2, 1, 200),
+        spec(2, 1, 150),
         LinkConfig::for_round_trip(40 * MS, 0., 0., 0.),
         35,
         |c| {

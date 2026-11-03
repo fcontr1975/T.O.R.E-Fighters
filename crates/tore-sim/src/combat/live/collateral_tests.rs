@@ -106,6 +106,9 @@ fn sparrow() -> Weapon {
         .clone();
     w.source = "AIM7.JT".into();
     w.flags = 0x1;
+    // This constant-speed fixture still represents a radar missile. A zero
+    // seeker signature plus no fuel describes an unpowered coordinate bomb.
+    w.seeker.signature = 3;
     w.movement = constant(1000);
     w.damage.by_class = [170, 17, 51, 34, 170];
     w.damage.fuze_radius = 100;
@@ -274,8 +277,8 @@ fn missile_splash_hurts_a_wingman_in_formation_and_credits_the_shooter() {
 }
 
 #[test]
-fn a_shooter_caught_in_its_own_blast_is_hurt_and_credits_no_one() {
-    for (setting, hurt) in [(FriendlyFire::On, true), (FriendlyFire::Off, false)] {
+fn own_missile_blast_is_immune_but_own_bomb_damage_is_uncredited() {
+    for setting in [FriendlyFire::On, FriendlyFire::Off] {
         let mut s = scene();
         s.friendly_fire = setting;
         // The shooter flies 200 ft from the burst.
@@ -290,7 +293,11 @@ fn a_shooter_caught_in_its_own_blast_is_hurt_and_credits_no_one() {
         ));
         run_from(&mut s, 120, far());
         assert_eq!(hp(&s, 1), 830, "{setting:?}");
-        assert_eq!(hp(&s, SHOOTER) < 1000, hurt, "{setting:?}");
+        assert_eq!(
+            hp(&s, SHOOTER),
+            1000,
+            "{setting:?}: permanent missile immunity"
+        );
         assert!(s.ledger.kills().is_empty());
         assert!(s.take_strikes().iter().all(|k| k.victim != SHOOTER));
     }
@@ -608,7 +615,7 @@ fn a_store_spawned_inside_its_launchers_box_with_no_separation_does_no_harm() {
 }
 
 #[test]
-fn a_store_that_leaves_the_box_and_comes_back_is_treated_normally() {
+fn a_missile_returning_to_its_launcher_is_always_spared() {
     for ai in [false, true] {
         let (mut s, own, id) = launch_scene(ai);
         let mut w = sparrow();
@@ -641,8 +648,8 @@ fn a_store_that_leaves_the_box_and_comes_back_is_treated_normally() {
                 break;
             }
         }
-        assert!(hurt(&back, id), "ai {ai}: {back:?}");
-        assert!(launcher_hp(&s, id) < before, "ai {ai}");
+        assert!(!hurt(&back, id), "ai {ai}: {back:?}");
+        assert_eq!(launcher_hp(&s, id), before, "ai {ai}");
     }
 }
 
@@ -674,15 +681,15 @@ fn a_drop_launched_store_climbing_back_past_its_launcher_does_no_harm() {
         assert_eq!(after, before, "ai {ai}: {events:?}");
         assert!(!hurt(&events, id), "ai {ai}: {events:?}");
         // The same path from a store that lit on the rail is a store that left
-        // the box and came back: its fuze fires on the launcher.
+        // the box and came back: permanent missile immunity still applies.
         let (events, before, after) = climbing_back(ai, 0);
-        assert!(hurt(&events, id), "ai {ai}: {events:?}");
-        assert!(after < before, "ai {ai}");
+        assert!(!hurt(&events, id), "ai {ai}: {events:?}");
+        assert_eq!(after, before, "ai {ai}");
     }
 }
 
 #[test]
-fn a_drop_launched_store_that_turns_back_after_separating_is_treated_normally() {
+fn a_drop_launched_missile_returning_after_separation_is_spared() {
     for ai in [false, true] {
         let (mut s, own, id) = launch_scene(ai);
         let mut w = sparrow();
@@ -709,8 +716,8 @@ fn a_drop_launched_store_that_turns_back_after_separating_is_treated_normally() 
                 break;
             }
         }
-        assert!(hurt(&back, id), "ai {ai}: {back:?}");
-        assert!(launcher_hp(&s, id) < before, "ai {ai}");
+        assert!(!hurt(&back, id), "ai {ai}: {back:?}");
+        assert_eq!(launcher_hp(&s, id), before, "ai {ai}");
     }
 }
 
@@ -745,7 +752,7 @@ fn a_store_bursting_inside_its_launchers_box_does_not_hurt_the_launcher() {
 }
 
 #[test]
-fn a_burst_just_outside_the_box_still_hurts_the_launcher() {
+fn a_missile_burst_outside_the_box_still_spares_the_launcher() {
     for ai in [false, true] {
         // Target 1 is 200 ft ahead: the 100 ft fuze (120 ft with the body)
         // fires the store at 80 ft, 52 ft beyond the launcher's 28 ft box.
@@ -765,15 +772,16 @@ fn a_burst_just_outside_the_box_still_hurts_the_launcher() {
         let before = launcher_hp(&s, id);
         let events = run_from(&mut s, 120, own);
         assert!(events.contains(&Event::Hit(1)), "ai {ai}: {events:?}");
-        assert!(
-            launcher_hp(&s, id) < before,
-            "ai {ai}: caught in its own blast"
+        assert_eq!(
+            launcher_hp(&s, id),
+            before,
+            "ai {ai}: own missile blast immunity"
         );
     }
 }
 
 #[test]
-fn a_ground_burst_inside_the_box_still_hurts_the_launcher() {
+fn ground_bursts_spare_missile_launchers_but_preserve_bomb_damage() {
     // John, 2026-10-13: the grace is for airbursts only. A store that goes
     // off on the terrain or on a ground object or ship gives its launcher the
     // normal ground share, even with the burst inside the 28 ft box.
@@ -806,7 +814,7 @@ fn a_ground_burst_inside_the_box_still_hurts_the_launcher() {
             let events = run_from(&mut s, 60, own);
             // It went off close enough to be inside the launcher's box.
             assert!(
-                launcher_hp(&s, id) < before,
+                (launcher_hp(&s, id) < before) != launcher_immune(&w),
                 "ai {ai} {} object {on_object}: {events:?}",
                 w.source
             );
@@ -1078,4 +1086,14 @@ fn a_burst_that_is_the_shots_own_outcome_makes_its_shooter_the_last_attacker() {
         .ledger
         .total(|k| k.owner == SHOOTER && k.kind == crate::combat::ledger::ShotKind::AirToAir);
     assert_eq!((tally.launched, tally.hit), (1, 1));
+}
+
+#[test]
+fn missile_blast_spares_launcher_outside_launch_volume_and_on_ground() {
+    for detonation in [Detonation::Air, Detonation::Ground] {
+        let mut b = burst(&sparrow(), detonation);
+        b.missile = true;
+        assert!(b.graced(SHOOTER, [500., 0., 0.], 30.));
+        assert!(!b.graced(SHOOTER + 1, [500., 0., 0.], 30.));
+    }
 }

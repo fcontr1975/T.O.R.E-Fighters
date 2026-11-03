@@ -7,10 +7,11 @@
 //! adapter and present-mode choices mirror `renderer.rs` so that a first run
 //! exercises the same GPU selection a game run does, and the 4:3 canvas is
 //! letterboxed through the same [`Viewport`] the menu uses.
+use crate::gpu_setup::NamedSteps as _;
 use crate::{
     AppResult,
     menu::{HEIGHT, WIDTH},
-    renderer::Viewport,
+    renderer::{Viewport, WindowSurface},
 };
 use std::sync::Arc;
 use winit::window::Window;
@@ -39,7 +40,10 @@ struct VertexOutput {
 
 pub(crate) struct CanvasPresenter {
     first_frame: crate::startup::FirstFrame,
-    surface: wgpu::Surface<'static>,
+    /// Presents in a row whose surface gave no image (see
+    /// [`CanvasPresenter::surface_retry`]).
+    surface_failures: u32,
+    surface: WindowSurface,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -51,25 +55,37 @@ pub(crate) struct CanvasPresenter {
 
 impl CanvasPresenter {
     pub(crate) async fn new(window: Arc<Window>) -> AppResult<Self> {
+        crate::graphics_api::setup_starting(crate::graphics_api::Screen::Canvas);
         crate::diagnostics::stage("first-run graphics instance and surface");
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window.clone())?;
+        let instance = crate::graphics_api::instance();
+        let surface = {
+            let _step = crate::gpu_setup::begin("surface", "first-run window");
+            instance.create_surface(window.clone())?
+        };
         crate::diagnostics::stage_done();
         crate::diagnostics::stage("first-run graphics adapter selection");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
+        let adapter = {
+            let _step = crate::gpu_setup::begin("adapter request", "first-run window");
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await?
+        };
         crate::diagnostics::stage_done();
         log::info!("first-run adapter: {:?}", adapter.get_info());
+        crate::gpu_setup::note_adapter(&adapter.get_info());
         crate::diagnostics::stage("first-run graphics device creation");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await?;
+        let (device, queue) = {
+            let _step = crate::gpu_setup::begin("device request", "first-run window");
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await?
+        };
         crate::diagnostics::stage_done();
+        crate::diagnostics::reassert_crash_reporter();
         device.set_device_lost_callback(|reason, message| {
             if reason != wgpu::DeviceLostReason::Destroyed {
                 log::error!("first-run graphics device lost: {reason:?}: {message}");
@@ -89,7 +105,10 @@ impl CanvasPresenter {
             wgpu::PresentMode::Fifo
         };
         config.desired_maximum_frame_latency = 1;
-        surface.configure(&device, &config);
+        {
+            let _step = crate::gpu_setup::begin("surface configuration", "first-run window");
+            surface.configure(&device, &config);
+        }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Locate canvas"),
             size: wgpu::Extent3d {
@@ -109,11 +128,11 @@ impl CanvasPresenter {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Locate compositor"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Locate"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -156,7 +175,8 @@ impl CanvasPresenter {
         crate::diagnostics::stage_done();
         Ok(Self {
             first_frame: Default::default(),
-            surface,
+            surface_failures: 0,
+            surface: WindowSurface::new(surface),
             device,
             queue,
             config,
@@ -174,13 +194,30 @@ impl CanvasPresenter {
     }
 
     pub(crate) fn resize(&mut self) {
+        if self.configure() {
+            self.window.request_redraw();
+        }
+    }
+
+    /// Configures the surface for the window's size; false at no size.
+    fn configure(&mut self) -> bool {
         let size = self.window.inner_size();
         if size.width > 0 && size.height > 0 {
             self.config.width = size.width;
             self.config.height = size.height;
             self.surface.configure(&self.device, &self.config);
-            self.window.request_redraw();
+            true
+        } else {
+            false
         }
+    }
+
+    /// After a present the surface gave no image for: how long to wait
+    /// before trying again, as the game's renderer does
+    /// ([`crate::frame_pacing::surface_retry`]); None after a good one.
+    pub(crate) fn surface_retry(&self) -> Option<std::time::Duration> {
+        (self.surface_failures > 0)
+            .then(|| crate::frame_pacing::surface_retry(self.surface_failures))
     }
 
     /// Upload one 640x480 RGBA frame and show it, letterboxed.
@@ -194,13 +231,17 @@ impl CanvasPresenter {
             return Ok(false);
         }
         let frame = match self.surface.get_current_texture() {
-            Ok(frame) => frame,
+            Ok(frame) => {
+                self.surface_failures = 0;
+                frame
+            }
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.resize();
+                self.configure();
+                self.surface_failures = self.surface_failures.saturating_add(1);
                 return Ok(false);
             }
             Err(wgpu::SurfaceError::Timeout | wgpu::SurfaceError::Other) => {
-                self.window.request_redraw();
+                self.surface_failures = self.surface_failures.saturating_add(1);
                 return Ok(false);
             }
             Err(error) => return Err(error.into()),
@@ -253,7 +294,11 @@ impl CanvasPresenter {
             self.window.pre_present_notify();
         }
         frame.present();
-        self.first_frame.complete();
+        // The canvas working says nothing about the game's own pipelines, which
+        // get their own marker, and a long import must not count as GPU setup.
+        if self.first_frame.complete() {
+            crate::graphics_api::setup_ended();
+        }
         Ok(true)
     }
 }

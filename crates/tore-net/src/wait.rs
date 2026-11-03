@@ -2,8 +2,9 @@
 //! clock: the dedicated server's main loop and the game's host thread (moved
 //! here from `tore-server` in slice EF3, unchanged).
 //!
-//! Sleeping is coarse: on Windows a sleep of a millisecond can last 15, so the
-//! wait sleeps until a little before the deadline and spins for the rest. The
+//! Sleeping is coarse: a sleep can wake late (on Windows by about half a
+//! millisecond, on macOS by far more), so the wait sleeps until a little
+//! before the deadline and spins for the rest. The
 //! host catches up any tick a late wake-up missed (agent decision; the margins
 //! are fitted). Slice EF-X measured the wait on the CI runners: on Linux and
 //! Windows it wakes for a 120 Hz tick a few microseconds late, at most 1.2 ms;
@@ -15,12 +16,18 @@ use std::time::Duration;
 
 use crate::datagram::RealClock;
 
-/// How long before a deadline the wait stops sleeping and spins. Windows'
-/// default timer resolution is about 15.6 ms and the standard library cannot
-/// raise it, so there the spin is long enough to ride out most of an
-/// overshoot; elsewhere a sleep overshoots by a fraction of a millisecond.
+/// How long before a deadline the wait stops sleeping and spins. The
+/// standard library sleeps on a high-resolution waitable timer on Windows 10
+/// (1803) and later, so a short sleep there overshoots by about half a
+/// millisecond (0.53 ms typical, 0.59 to 0.77 ms at the 99th percentile on
+/// the Windows 11 CI machine, 2026-10-24) rather than the 15.6 ms of the
+/// default timer resolution; the margin covers that. It was 2 ms, which kept
+/// a hosting game or a server on Windows spinning about a fifth of a core
+/// while a mission flew, for no earlier wake (agent decision, fitted; see
+/// docs/ARCHITECTURE.md, "Sleep and wait accuracy on each system").
+/// Elsewhere a sleep overshoots by a fraction of a millisecond.
 #[cfg(windows)]
-pub const SPIN_MARGIN: Duration = Duration::from_millis(2);
+pub const SPIN_MARGIN: Duration = Duration::from_micros(750);
 #[cfg(not(windows))]
 pub const SPIN_MARGIN: Duration = Duration::from_micros(400);
 

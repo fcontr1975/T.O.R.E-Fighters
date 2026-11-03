@@ -1234,6 +1234,27 @@ impl Recorder {
                         convert::weapon_info(shot.weapon, weapon).class.name(),
                     );
                 }
+                if let Some(energy) = live_shots
+                    .get(id)
+                    .and_then(|p| p.motion)
+                    .and_then(|m| m.energy)
+                {
+                    let b = energy.body;
+                    event = event
+                        .with("missile-model", "energy-1")
+                        .with(
+                            "missile-data",
+                            format!("{:016x}", tore_formats::missile_data::fingerprint()),
+                        )
+                        .with("motor-ignition", i64::from(b.ignition))
+                        .with("motor-boost-end", i64::from(b.ignition + b.boost.ticks))
+                        .with(
+                            "motor-end",
+                            i64::from(b.ignition + b.boost.ticks + b.sustain.ticks),
+                        )
+                        .with("motor-boost-powered", b.boost.thrust > 0.)
+                        .with("motor-sustain-powered", b.sustain.thrust > 0.);
+                }
                 let mode = live_shots
                     .get(id)
                     .map_or("unguided", |p| match p.guidance.as_ref() {

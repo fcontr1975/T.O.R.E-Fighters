@@ -264,6 +264,7 @@ pub fn draw(
     // The gyro-smoothed bank for the bank scale, and the time compression rate.
     (gyro_bank, time_scale): (f64, f64),
 ) {
+    let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Hud);
     let mut p = Paint {
         pixels,
         clip: HUD_CLIP,

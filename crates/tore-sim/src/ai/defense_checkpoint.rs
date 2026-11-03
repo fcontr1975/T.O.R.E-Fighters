@@ -9,18 +9,23 @@
 //! decision compares equal.
 
 use super::{
-    BurstRequest, DefenseDebug, DefenseDecision, DefenseState, Maneuver, MotionSuggestion,
+    BurstRequest, DefenseDebug, DefenseDecision, DefenseState, Maneuver, MissileMemory,
+    MotionSuggestion,
 };
 
 crate::checkpoint_enum!(Maneuver {
     Jink = 0,
     Notch = 1,
+    Drag = 2,
+    Beam = 3,
+    Break = 4,
 });
 
 crate::checkpoint_struct!(MotionSuggestion {
     maneuver,
     heading_deg,
     flight_path_pitch_deg,
+    reduce_heat,
 });
 
 crate::checkpoint_struct!(BurstRequest { chaff, flares });
@@ -39,12 +44,14 @@ crate::checkpoint_struct!(DefenseDebug {
     insufficient_time,
     stale,
     maneuver_now,
+    passed,
     may_burst,
     release_now,
 });
 
 crate::checkpoint_struct!(DefenseDecision {
     threat_id,
+    reserve_allowed,
     motion,
     burst,
     debug,
@@ -52,8 +59,32 @@ crate::checkpoint_struct!(DefenseDecision {
 
 crate::checkpoint_struct!(DefenseState {
     selected_threat,
+    missiles,
+    last_contact,
+    first_device_threat,
+    observed_tick,
+    phase,
+    extension_finished,
+    passed,
+    beam_side,
+    break_heading_deg,
+    devices_requested,
+    last_threat_tick,
+    last_encounter_tick,
     jink_base_heading_deg,
     jink_heading_deg,
     jink_started_tick,
     last_burst_tick,
+});
+
+crate::checkpoint_struct!(MissileMemory {
+    id,
+    class,
+    sample_tick,
+    range_ft,
+    opening_tick,
+    opening_range_ft,
+    passed,
+    break_heading,
+    devices
 });

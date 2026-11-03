@@ -275,6 +275,71 @@ fn lowest_point(shape: &Shape) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
+/// A lifted bridge's painted shadow stays on terrain, never in midair.
+pub(super) fn ground_bridge_shadows(
+    drawn: &mut Drawn,
+    terrain: &tore_world::terrain::Terrain,
+    limit: usize,
+) -> AppResult<()> {
+    let mut vertices = Vec::new();
+    for triangle in drawn.vertices.chunks_exact(3 * FLOATS) {
+        let corners: [&[f32]; 3] = std::array::from_fn(|i| &triangle[i * FLOATS..(i + 1) * FLOATS]);
+        if corners[0][5] != SHADOW_LAYER {
+            vertices.extend_from_slice(triangle);
+            continue;
+        }
+        let center: [f32; 3] =
+            std::array::from_fn(|a| corners.iter().map(|p| p[a]).sum::<f32>() / 3.);
+        let raised = corners
+            .iter()
+            .any(|p| p[1] > terrain.height(p[0], p[2]).max(0.) + 2.)
+            || center[1] > terrain.height(center[0], center[2]).max(0.) + 2.;
+        if !raised {
+            vertices.extend_from_slice(triangle);
+            continue;
+        }
+        // Merely projecting the four corners leaves a horizontal shadow
+        // suspended between the raised banks. Subdivide across the river.
+        let reach = (0..3)
+            .map(|i| {
+                let a = corners[i];
+                let b = corners[(i + 1) % 3];
+                (a[0] - b[0]).hypot(a[2] - b[2])
+            })
+            .fold(0f32, f32::max);
+        let steps = (reach / 64.).ceil().clamp(1., 256.) as usize;
+        let point = |i: usize, j: usize| {
+            let mut v: [f32; FLOATS] = std::array::from_fn(|a| {
+                corners[0][a]
+                    + (corners[1][a] - corners[0][a]) * i as f32 / steps as f32
+                    + (corners[2][a] - corners[0][a]) * j as f32 / steps as f32
+            });
+            v[1] = v[1].min(terrain.height(v[0], v[2]).max(0.) + 1.);
+            v
+        };
+        for i in 0..steps {
+            for j in 0..steps - i {
+                vertices.extend(point(i, j));
+                vertices.extend(point(i + 1, j));
+                vertices.extend(point(i, j + 1));
+                if i + j + 1 < steps {
+                    vertices.extend(point(i + 1, j));
+                    vertices.extend(point(i + 1, j + 1));
+                    vertices.extend(point(i, j + 1));
+                }
+            }
+        }
+        if vertices.len() > limit {
+            return Err("bridge shadow exceeds scenery geometry budget".into());
+        }
+    }
+    if vertices.len() > limit {
+        return Err("bridge shadow exceeds scenery geometry budget".into());
+    }
+    drawn.vertices = vertices;
+    Ok(())
+}
+
 /// Appends `shape`'s faces and lines standing at `stand` to `out`, as the
 /// static scene draws a placement: shape axes right, forward, up; textures
 /// from `layers` (a face whose texture is not there draws in its colour).
@@ -608,7 +673,7 @@ enum Ruined {
     Branch(Shape),
     /// A ruin generated from the intact shape ([`super::rubble`]).
     Generated(super::rubble::Ruin),
-    /// Pavement, a bridge end, a rock: it stays as it stood.
+    /// Pavement or a rock: it stays as it stood.
     Intact,
 }
 
@@ -737,7 +802,7 @@ impl SurfaceArt {
             None
         });
         // A building with no `~` variant: its retail ruin, a generated one,
-        // or (pavement, bridge ends, rocks) its intact look (B16).
+        // or (pavement, rocks) its intact look (B16).
         let ruined = if matches!(look, DestroyedLook::Removed) && !self.kept.contains(&id) {
             self.ruined(build, object_type, main_shape.as_deref(), intact)
         } else {
@@ -847,7 +912,11 @@ impl SurfaceArt {
             }
         }
         if let Some(wreck) = wreck_drawn {
-            self.wrecks.insert(id, wreck?);
+            let mut wreck = wreck?;
+            if tore_world::grounding::bridges::is_bridge(object_type) {
+                ground_bridge_shadows(&mut wreck, build.terrain, BUDGET)?;
+            }
+            self.wrecks.insert(id, wreck);
         }
         // A launcher whose shape draws its load.
         if let Some(name) = &main_shape
@@ -899,12 +968,15 @@ impl SurfaceArt {
             let damaged = BTreeMap::from([(DAMAGED_WORD, 1)]);
             build.shape(&mut self.layers, name, Some(&damaged)).ok()
         });
-        // What does not burn (pavement, a bridge end, a rock) stays as it
+        // What does not burn (pavement or a rock) stays as it
         // stood unless retail draws it broken.
         let burns = object_fire(object_type, false) != FireClass::None;
+        let bridge_end = ["BR1END.OT", "BR2END.OT", "BR3END.OT", "BRDEND.OT"]
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(object_type));
         let ruined = match branch {
             Some(shape) => Ruined::Branch(shape),
-            None if !burns => Ruined::Intact,
+            None if !burns && !bridge_end => Ruined::Intact,
             None => match super::rubble::collapse(intact) {
                 Some(ruin) => Ruined::Generated(ruin),
                 None => Ruined::Intact,
@@ -1648,6 +1720,27 @@ mod tests {
     }
 
     #[test]
+    fn raised_bridge_shadow_samples_the_ground_between_its_corners() {
+        let terrain = tore_world::test_support::terrain();
+        let mut drawn = Drawn::default();
+        for at in [
+            [1000., 2000., 1000.],
+            [2000., 2000., 1000.],
+            [1000., 2000., 2000.],
+        ] {
+            let mut v = vertex(at, [0.; 2], -1.);
+            v[5] = SHADOW_LAYER;
+            drawn.vertices.extend(v);
+        }
+        ground_bridge_shadows(&mut drawn, &terrain, BUDGET).unwrap();
+        assert!(drawn.vertices.len() > 3 * FLOATS);
+        for v in drawn.vertices.chunks_exact(FLOATS) {
+            assert!(v[1] <= terrain.height(v[0], v[2]).max(0.) + 1.001);
+        }
+        assert!(ground_bridge_shadows(&mut drawn, &terrain, 1).is_err());
+    }
+
+    #[test]
     fn a_ground_shadow_decal_is_drawn_dark_for_the_dithered_pass() {
         // The suspension bridge's span on the water and the crane's
         // footprint are solid colour 6 quads on the lowest plane: a magenta
@@ -1817,6 +1910,75 @@ mod tests {
     }
 
     #[test]
+    fn all_four_bridge_ends_collapse_deterministically_from_hp_and_replay_restore() {
+        let terrain = tore_world::test_support::terrain();
+        let resources = BTreeMap::new();
+        let definitions = BTreeMap::new();
+        let mut pages = Vec::new();
+        let mut build = Build {
+            resources: &resources,
+            terrain: &terrain,
+            definitions: &definitions,
+            first_page: 0,
+            pages: &mut pages,
+        };
+        let stand = level([100., 200., 300.]);
+        let shape = cube();
+        for kind in ["BR1END.OT", "BR2END.OT", "BR3END.OT", "BRDEND.OT"] {
+            let mut a = SurfaceArt::default();
+            let mut b = SurfaceArt::default();
+            a.add(&mut build, 7, kind, &shape, &stand, 0.).unwrap();
+            b.add(&mut build, 7, kind, &shape, &stand, 0.).unwrap();
+            let ruin = a.drawn(7, &Look::Wreck).unwrap();
+            assert_eq!(ruin.vertices, b.drawn(7, &Look::Wreck).unwrap().vertices);
+            let top = positions(&ruin.vertices)
+                .iter()
+                .map(|p| p[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(top > 200. && top <= 212., "{kind}: {top}");
+            for hp in [500, 250, 1, 0, 1, 0, 500] {
+                assert_eq!(
+                    a.look(7, hp > 0, true, None),
+                    if hp > 0 { None } else { Some(Look::Wreck) }
+                );
+            }
+            assert_eq!(
+                tore_world::surface::wreck::object_fire(kind, false),
+                tore_world::surface::wreck::FireClass::None
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_damage_and_replay_restore_preserve_the_placed_datum() {
+        let mut fallen = cube();
+        for face in &mut fallen.faces {
+            for p in &mut face.positions {
+                p[2] -= 10.;
+            }
+        }
+        let stand = level([100., 200., 300.]);
+        let mut art = SurfaceArt::default();
+        let drawn = art
+            .ruin_drawn(&Ruined::Branch(fallen), &stand, 40., false)
+            .unwrap();
+        let low = positions(&drawn.vertices)
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min);
+        // A fallen span is allowed below the intact datum. Regrounding its
+        // new lowest point would incorrectly raise it back into the road.
+        assert!((low - 180.).abs() < 1e-5);
+        art.wrecks.insert(7, drawn);
+        for hp in [500, 250, 1, 0, 250, 0, 500] {
+            assert_eq!(
+                art.look(7, hp > 0, true, None),
+                if hp > 0 { None } else { Some(Look::Wreck) }
+            );
+        }
+    }
+
+    #[test]
     fn a_destroyed_runway_stays_drawn() {
         // B15: a runway at zero hit points keeps its pavement (its intact
         // look), whether or not combat registered it; any other placement
@@ -1968,6 +2130,7 @@ mod tests {
             battery: None,
             loads: Vec::new(),
             npc: [0; 4],
+            team: false,
         });
         let camera = Camera::new();
         // A jet due east of it.

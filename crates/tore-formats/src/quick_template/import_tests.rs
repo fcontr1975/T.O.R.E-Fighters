@@ -93,6 +93,18 @@ fn all_84_surface_units_parse() {
         );
     }
 
+    // The shoulder-fired SAM teams are exactly the five MANPADS records.
+    let mut teams: Vec<&str> = units
+        .iter()
+        .filter(|(_, unit)| unit.is_shoulder_fired_team())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    teams.sort_unstable();
+    assert_eq!(
+        teams,
+        ["FIM92.NT", "MIS.NT", "SA14.NT", "SA16.NT", "SA7.NT"]
+    );
+
     // Spot values from the survey tables.
     let sa6 = &units["SA6.NT"];
     assert_eq!(

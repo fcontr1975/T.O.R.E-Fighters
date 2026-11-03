@@ -23,6 +23,12 @@ pub const TRUCK_TYPES: [&str; 3] = ["TRUCK.NT", "TANKER.NT", "MISTRK.NT"];
 /// within 0.1 mile refills SAM rails and AAA magazines. TANKER carries fuel
 /// and does not count.
 pub const SUPPLY_TRUCKS: [&str; 2] = ["TRUCK.NT", "MISTRK.NT"];
+/// The most hit points a shoulder-fired SAM team has: the men's and the
+/// MANPADS teams' 5 (every vehicle and launcher has 100 or more).
+pub const TEAM_MAX_HIT_POINTS: i32 = 5;
+/// The fastest a shoulder-fired SAM team moves (`_maxSpeed`): the men's and
+/// the MANPADS teams' 10 (SAM vehicles 50).
+pub const TEAM_MAX_SPEED: i32 = 10;
 /// The retail "Destroyed Vehicle" static object (shape `dest.SH`). The record
 /// names no wreck; this is the only candidate in the archive (see the doc).
 pub const DESTROYED_VEHICLE_OBJECT: &str = "DEST.OT";
@@ -327,6 +333,18 @@ impl SurfaceUnit {
     pub fn is_ship(&self) -> bool {
         self.class & class::SHIP != 0
     }
+    /// A shoulder-fired SAM team (MANPADS: SA-7, SA-14, SA-16, FIM-92,
+    /// Mistral in the retail data): a SAM-class unit, not a ship, with the
+    /// hit points and the foot pace of men ([`TEAM_MAX_HIT_POINTS`],
+    /// [`TEAM_MAX_SPEED`]). No flag marks them; this is the only rule that
+    /// parts them from every vehicle and fixed launcher (docs/formats/
+    /// surface-units.md, "Shoulder-fired teams").
+    pub fn is_shoulder_fired_team(&self) -> bool {
+        self.class & class::SAM != 0
+            && !self.is_ship()
+            && self.hit_points <= TEAM_MAX_HIT_POINTS
+            && self.movement.max_speed <= TEAM_MAX_SPEED
+    }
 }
 
 fn damaged_shape(class: u16, shape: Option<&str>) -> Option<String> {
@@ -524,6 +542,34 @@ pub(crate) mod tests {
             &[(0, 0, 0, 12740, Some("SA6.JT"), 3)],
         );
         SurfaceUnit::parse(text.as_bytes()).unwrap()
+    }
+
+    fn sam(hit_points: &str, max_speed: &str, class: &str) -> SurfaceUnit {
+        let text = fixture(
+            ["SA-7", "SA-7 Grail", "SA7.NT"],
+            Some("sa7.SH"),
+            &[
+                ("obj_class", class),
+                ("hitPoints", hit_points),
+                ("_maxSpeed", max_speed),
+            ],
+            &[],
+            &[(0, 0, 0, 16380, Some("SA7.JT"), 2)],
+        );
+        SurfaceUnit::parse(text.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_shoulder_fired_team_is_a_sam_with_the_hit_points_and_pace_of_men() {
+        // The retail teams (SA-7, SA-14, SA-16, FIM-92, Mistral): 5 and 10.
+        assert!(sam("5", "10", "$1000").is_shoulder_fired_team());
+        // A SAM vehicle (SA-9, SA-13): 100 and 50.
+        assert!(!sam("100", "50", "$1000").is_shoulder_fired_team());
+        assert!(!sa6().is_shoulder_fired_team());
+        // The Crotale stands still at a foot's pace but has 100 hit points.
+        assert!(!sam("100", "10", "$1000").is_shoulder_fired_team());
+        // A soldier with a rifle is not a SAM.
+        assert!(!sam("5", "10", "$0040").is_shoulder_fired_team());
     }
 
     #[test]

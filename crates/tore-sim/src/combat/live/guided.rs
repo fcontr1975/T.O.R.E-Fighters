@@ -291,6 +291,13 @@ pub(super) fn steer<G: Fn(f64, f64) -> f64>(
 ) -> Option<(BombMotion, u64)> {
     let glide = guided::is_glide_bomb(w);
     let was_guiding = flight.mode == Mode::Guiding;
+    if p.motion
+        .and_then(|m| m.energy)
+        .is_some_and(|e| e.flight.lost || p.age >= u64::from(e.body.life))
+    {
+        flight.mode = Mode::Blind;
+        flight.seconds = None;
+    }
     if glide && p.age >= u64::from(w.movement.remove_t) * 30 && flight.mode != Mode::Blind {
         flight.mode = Mode::Blind;
         if let Some(motion) = p.motion {
@@ -372,15 +379,23 @@ pub(super) fn steer<G: Fn(f64, f64) -> f64>(
         && let (Some(point), Some(motion)) = (flight.point, p.motion.as_mut())
     {
         if !glide {
-            let aim = motion.aim_over_terrain(p.position, point, cx.ground);
-            let desired = missiles::commanded_heading(
-                p.direction,
-                motion.path(),
-                unit(missiles::sub(aim, p.position)),
-            );
-            let next = missiles::steer(&w.movement, p.age, p.direction, desired);
-            motion.turn(p.direction, next);
-            p.direction = next;
+            if motion.energy.is_some() {
+                let velocity = flight
+                    .target
+                    .and_then(|id| row(cx.targets, cx.rows, id))
+                    .map_or([0.; 3], |t| t.velocity);
+                motion.track(point, velocity);
+            } else {
+                let aim = motion.aim_over_terrain(p.position, point, cx.ground);
+                let desired = missiles::commanded_heading(
+                    p.direction,
+                    motion.path(),
+                    unit(missiles::sub(aim, p.position)),
+                );
+                let next = missiles::steer(&w.movement, p.age, p.direction, desired);
+                motion.turn(p.direction, next);
+                p.direction = next;
+            }
         }
         // A cruise profile's fly-out samples the terrain on every step to
         // impact, so it is worked out on the first guiding tick and then
@@ -391,7 +406,9 @@ pub(super) fn steer<G: Fn(f64, f64) -> f64>(
             || (!glide && motion.cruise.is_none())
             || p.age == 0
             || (p.age + u64::from(p.id)).is_multiple_of(SECONDS_REFRESH_TICKS);
-        flight.seconds = if refresh {
+        flight.seconds = if motion.energy.is_some() {
+            flight.seconds.map(|s| (s - missiles::DT).max(0.))
+        } else if refresh {
             guided::time_to_with_terrain(
                 w,
                 *motion,
@@ -604,6 +621,7 @@ pub(super) fn sight<G: Fn(f64, f64) -> f64>(
     })
     .flatten();
     Some(GuidedSight {
+        energy_intercept: None,
         kind,
         aim,
         buddy,

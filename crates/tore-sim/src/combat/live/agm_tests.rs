@@ -57,6 +57,7 @@ fn ground(s: &mut State, id: u32, x: f64, z: f64, class: u16) {
         GroundListing {
             flags: 0x821,
             max_visible: 78,
+            team: false,
         }
     ));
 }

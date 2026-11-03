@@ -1,0 +1,14 @@
+# Enable via the command line, then exercise the last Debug row in both directions.
+wait 1
+key Escape
+key Left
+key Up
+key Enter
+wait 0.2
+shot debug-frame-log-off.ppm
+key Enter
+wait 0.2
+shot debug-frame-log-on.ppm
+key Escape
+wait 2
+exit

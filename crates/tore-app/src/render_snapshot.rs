@@ -148,6 +148,7 @@ pub fn aircraft_batches<'a>(
     world: &Terrain,
     scenery: &Scenery,
 ) -> Vec<(&'a Airframe, Vec<f32>, Vec<Contact>)> {
+    let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Aircraft);
     aircraft_batches_with(
         tore_workers::shared(),
         snapshot,
@@ -357,6 +358,7 @@ pub fn combat_geometry(
     world: &Terrain,
     scenery: &Scenery,
 ) -> CombatGeometry {
+    let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Aircraft);
     let mut v = Vec::new();
     let mut contacts = Vec::new();
     let extent = ownship.visual_extent();

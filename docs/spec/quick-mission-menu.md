@@ -127,9 +127,14 @@ writes the strengths `none`, `light`, `moderate` and `heavy`
   (fitted), and never an enemy field (slice AL1): with none the start is
   refused.
 - **Seed.** Pressing OK on a mission with a target, or with area defenses,
-  draws a new number that the layout is rolled from, so each flight can differ and a restart
-  of the same flight repeats it. The lobby sends none; the host draws it when
-  the flight starts.
+  keeps the number the creator reserved for it (the map shows the same
+  layout). A new flight reserves a new seed and a restart repeats the
+  accepted one. The lobby sends the reserved seed to the host. Selecting a theater
+  or target again reserves a fresh layout (fitted interface choice, agent,
+  2026-10-25). If the reserved seed's layout cannot place every vehicle, or
+  leaves a target's Blue start no room for the distance, the launch takes the
+  next seed, at most sixteen in all, as a host does (agent decision,
+  2026-10-28).
 - **Lobby.** The King edits the fields like any other; everyone else sees the
   King's choice read-only, with the same dimming rule as the other fields.
   A multiplayer start stays airborne, so `start ground auto` does not reach
@@ -334,8 +339,8 @@ Original Quick Mission spawn geometry is **unknown**. Next research: recover
 the generator's relative wing placements and situation offsets. Pending that,
 the **fitted**, agent-selected placement puts friendly wings 2 and 3 at 4096 ft
 left/right and 4096 ft behind the player. Enemy wing 1 starts at the selected
-separation, with enemy wings 2 and 3 offset 4096 ft left/right. Enemy aircraft
-face the friendly group. Airborne aircraft start at the chosen altitude; a
+separation, with enemy wings 2 and 3 offset 4096 ft left/right. Where and which
+way the enemy faces follows the [situation](#situation). Airborne aircraft start at the chosen altitude; a
 ground start parks the player's wing instead (see
 [Player ground start](#player-ground-start)). Slots rotate with each wing
 leader. Close tracking projects the slot along the leader velocity; separated
@@ -354,6 +359,36 @@ miles", "100 miles", "150 miles", "200 miles", "300 miles"). Every label means n
 miles. An out-of-range choice falls back to the 5 mile default instead of
 failing.
 
+### Situation
+
+The manual (p.19): "Specify the battle situation for friendly forces.
+Friendly forces can hold the ADVANTAGE (behind the opponents, on their tail),
+be in a NEUTRAL situation (approaching each other head-on), or be at a
+DISADVANTAGE (opponents are behind you, on your tail)." The creator's field 16
+("Your situation is"), neutral by default, places an airborne start (John,
+2026-10-28; the geometry is fitted, agent decision):
+
+| Situation | Enemy group | Enemy heading |
+| --- | --- | --- |
+| Neutral | Ahead of the player at the separation | Toward the player, head-on |
+| Advantage | Ahead of the player at the separation | The player's heading: flying away, the player on its tail |
+| Disadvantage | Behind the player at the separation | The player's heading: on the player's tail |
+
+The separation is measured from the player to Enemy Wing 1's leader. Enemy
+wings 2 and 3 stay 4096 ft left and right of it. An enemy facing the player
+mirrors its formation, its wingmen farther away; an enemy flying the player's
+heading keeps it, so its wingmen trail toward the player (advantage) or away
+(disadvantage). The friendly wings do not move. As in a neutral start, the
+whole airborne scene turns to keep the enemy on the map.
+
+The situation means nothing, and the start is neutral, when the player starts
+on the ground (a parked wing cannot be on anyone's tail) or when a ground
+target is chosen (its template places the enemy by the target). An enemy
+ground start parks only Enemy Wing 1; the other enemy wings take the
+situation. The mission text carries it as `situation advantage` or
+`situation disadvantage` (absent when neutral), so the lobby's read-only
+creator shows the King's choice.
+
 ### Keeping the enemy on the map
 
 John requested on 2026-09-23 that the enemy group is aimed into the map when
@@ -363,22 +398,60 @@ the selected separation would put it off the edge. Rule (the numbers are
 - Every enemy aircraft, including the side wings 4096 ft left and right and
   the formation slots behind them, must start at least one terrain cell
   (8,192 ft) inside the map edge.
-- Straight ahead is kept when the whole group fits there. Otherwise bearings
-  are tried one degree at a time, nearest to straight ahead first, clockwise
-  before counter-clockwise at equal angles. The first bearing that fits at the
-  full distance is used.
+- Straight ahead (straight behind in a disadvantage) is kept when the whole
+  group fits there. Otherwise bearings are tried one degree at a time, nearest
+  first, clockwise before counter-clockwise at equal angles. The first bearing
+  that fits at the full distance is used.
 - In an airborne start the whole airborne scene turns: the player's starting
-  heading and the friendly wings turn with the enemy, so the enemy is still
-  straight ahead. In a ground start the parked wing cannot turn, so only the
-  enemy group moves around the airport and still faces it.
-- If no bearing fits at the full distance, the bearing that allows the longest
-  distance is used at that distance, and the flight opens with a message such
-  as "Enemy forces start 142 miles away: 300 miles does not fit this theater."
-  Restart keeps the same placement.
+  heading and the friendly wings turn with the enemy, so the enemy keeps its
+  place ahead or behind. In a ground start the parked wing cannot turn, so
+  only the enemy group moves around the airport and still faces it.
+- **Only distances that fit are offered** (John, 2026-10-28). The creator's
+  Distance list holds the distances a fixed table gives for the theater, the
+  ground target (or none, or area defenses, which place no start) and the
+  start; the others are not listed. Nothing is greyed and nothing is checked
+  while the player edits: the table was measured once, offline, with the
+  launch solver, and is checked in (`tore_world::mission_layout::distance_table`,
+  regenerated as [the developer guide](../DEVELOPMENT.md#quick-mission-distance-table)
+  says; the measured table is in
+  [the baseline](../baselines/qmc-distance-table.md)).
+- When a theater, target or start change leaves the chosen distance out, it
+  moves by itself to the largest offered distance at or below it, or to the
+  smallest offered one when none is below. No notice is shown.
+- A row offers a distance only when it fits every case the creator can make:
+  with no target, every enemy formation (each enemy wing 0 to 5 aircraft) in
+  all three situations, from the airborne start, and for a ground start from
+  every airfield the creator offers with every wing size; with a target and an
+  airborne start, 64 layout seeds over all sixteen AAA and SAM strength pairs.
+  The situations never changed a row. With a ground target and a ground start
+  every distance is offered: the target places the enemy, independently of
+  the distance setting (lead decision, 2026-10-26).
+- Launch still refuses a distance that does not fit ("Separation N nm does not
+  fit this setup"); nothing is silently shortened (John, 2026-10-25). With a
+  target, a seed whose layout leaves Blue no room tries the next seed first
+  (above).
+- A target whose layout always leaves something out says so while it is
+  chosen, from the same table: the Baltic's carrier group (QBFLT) shows
+  "Unavailable: 4 Yak-141 Freestyle-A (no supported carrier deck)." Shortfalls
+  that depend on the seed (area-defense units the map cannot hold, vehicles
+  with no valid nearby spot) are no longer shown before launch: launch
+  refuses an unplaceable layout and tries the next seed.
+- The footprint grade limits are 30% for tanks and 20% for vehicles, launchers,
+  guns and added radars. These are fitted values; John requested the relaxed
+  launcher/gun/radar policy on 2026-10-26. The bounded nearest-valid search,
+  supply reach and retained-equipment behavior follow [vehicle footing](surface-defenses.md#jitter).
+- A host retries a placement-refused seed in deterministic order, at most sixteen
+  attempts, before publishing its mission. Only the host chooses a replacement;
+  every client builds the accepted seed. See the [server policy](../DEDICATED-SERVER.md#surface-placement-seeds).
+- CAP regions retain their ten-nautical-mile radius and are intersected with the
+  theater rectangle. Clipping does not shrink the whole circle or change its
+  station (John, 2026-10-25; an out-of-map station is clamped to the map).
 
-From the default airborne start near the middle of a 208 by 200 cell theater,
-200 and 300 miles never fit at full distance; in the 256 by 256 cell Baltic and
-Kurile theaters 200 miles fits only toward a corner.
+Measured (2026-10-28): with no target, an airborne start offers up to 200 nm
+in twelve theaters and up to 150 nm in Egypt, France, Vietnam and Vladivostok;
+300 nm fits no theater from the airborne start. A ground start reaches 300 nm
+in Cuba and the Kuriles and 200 nm elsewhere (Vietnam offers no ground start). Many targets reach 300 nm from an
+airborne start; the [baseline](../baselines/qmc-distance-table.md) has every row.
 
 ### Home airfields
 
@@ -429,7 +502,7 @@ selection. These are practice fixtures, not friendly/enemy combat AI.
 
 Agent-selected fitted placement: all dummies start at the player's altitude and
 heading, forward at the selected separation in nautical miles (see
-[Separation](#separation)), shortened if it does not fit the map. In an
+[Separation](#separation)), unavailable if it does not fit the map. In an
 airborne start they turn with the player; in a ground start only the player is
 parked and the dummies keep the runway heading. The first is directly ahead. Successive pairs are 500 feet farther
 forward and 500 feet farther to either side per pair. Speed is 300 feet/second;
@@ -628,8 +701,7 @@ positions)". An addition: retail's creator has no map.
   changes while the map builds, that result is stale: it is dropped and the
   map is built again for the settings now in force, so the map that opens is
   always the draft's. The result is the same as before for the same
-  settings and seed, and single player still draws the flight's seed when
-  Map is clicked and keeps it on OK.
+  settings and seed. The map and OK retain the seed the creator reserved.
 - **Zoom, scroll and rocker** (opinionated, John 2026-10-11: "it should start
   zoomed in and have the scroll bars for the map, there should also be a rocker
   switch to zoom in and out"). The map opens zoomed in on the objective area
@@ -657,10 +729,10 @@ positions)". An addition: retail's creator has no map.
   is marked **BLUE WING n** or **RED WING n**. A line under the map says
   whether each side starts in the air or on the ground.
 - The positions are the flight's: opening the map builds the mission the
-  creator would fly. In single player that draws the ground target's seed
-  then, and OK keeps it once, so the flight flies the layout the map showed.
-  In the lobby the host draws the seed when the flight starts, so the map
-  shows the target's retail spot and says the target and starts may move.
+  creator would fly, using the seed the creator reserved. OK keeps
+  it once, so the flight flies the layout the map showed (unless that layout
+  is refused at launch and the next seed is taken).
+  The lobby map uses the same seed that the host receives.
 - **The objective area** (opinionated, John 2026-10-11; numbers fitted): a
   circle of 5 nm radius around a centre moved 0.5 to 2.5 nm off the targets'
   centroid, in a direction and by a distance hashed from the theater, the

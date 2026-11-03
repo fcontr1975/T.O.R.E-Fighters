@@ -427,9 +427,12 @@ class GunshipTests(unittest.TestCase):
 
 def heli_run(profile="popup", breaks=6, offset=90, kt=130, pitch=-10, blocked=0, released=True, killed=True,
              lost=None, min_agl=1400, aircraft="Mi24", quick=False, start_alt=1500, decisions=(), sead=False,
-             egress=False):
+             egress=False, shots=(), ahead=False, reach_margin=1200):
     """One helicopter run of the driver: `breaks` BREAK lines (one a second), the THREAT
-    `decisions` (slice H4), a pop-up that may release and kill, and an EGRESS (slice HF1)."""
+    `decisions` (slice H4), a pop-up that may release and kill, and an EGRESS (slice HF1).
+    `shots` are (time, known) pairs for the SHOT lines (a site's launch, `known` yes, no or none);
+    the decisions come at t=30, 31, ... so a shot before a decision has a time under it. `ahead`
+    adds a move-ahead plan's AHEAD line; `reach_margin` is the summary's `reach_margin_ft`."""
     out = [
         f"ai-strike: setup aircraft={aircraft} load=AT2.JT station=1 count=4 rounds=4 target=0x50000001 name=T-90 "
         "target_at=999570,7,789571 hp=200 skill=2 profile=none handback=none order=none mode=none",
@@ -443,6 +446,11 @@ def heli_run(profile="popup", breaks=6, offset=90, kt=130, pitch=-10, blocked=0,
             f"ai-strike: BREAK t={20 + n}.000 heading=350 track=345 bearing=22 offset={offset} masked_s=0 "
             f"blocked_s={blocked} pitch={pitch} agl_ft=1400 speed_kt={kt} bank=-30"
         )
+    for at, known in shots:
+        out.append(f"ai-strike: SHOT t={at:.3f} site=0x5000000f range_ft=11000 known={known}")
+    if ahead:
+        out.append("ai-strike: AHEAD t=1.008 range_ft=14000 fire_in_s=60.0 point=988868,778720 aim_moves_ft=3000 "
+                   "from_ft=12000")
     for n, decision in enumerate(decisions):
         out.append(f"ai-strike: THREAT t={30 + n}.000 decision={decision} target=0x50000001 ring=0x5000000b "
                    'words="threat on target, holding off"')
@@ -463,7 +471,7 @@ def heli_run(profile="popup", breaks=6, offset=90, kt=130, pitch=-10, blocked=0,
         f"ai-strike: summary t=100.000 ran_s=100.0 profile={profile} releases={n} impacts={n} "
         f"kills={1 if killed else 0} egress={'yes' if egress else 'no'} lost={'yes' if lost is not None else 'no'} activity=Defending "
         f"target_hp={'0' if killed else '200'}/200 closest_ft=4773 store_rounds_left=3 min_agl_ft={min_agl} "
-        f"break_s={float(breaks)}"
+        f"break_s={float(breaks)} reach_margin_ft={reach_margin}"
     )
     if not released:
         out.append("ai-strike: no release")
@@ -510,6 +518,46 @@ class HelicopterTests(unittest.TestCase):
         no_sead = heli_run(breaks=0, decisions=["threat_hold_off", "threat_resume"])
         self.assertNotEqual(s.heli_defense_problems(no_sead, sead), [])
 
+    def test_a_leave_is_the_answer_to_a_shot_from_a_site_it_did_not_know(self):
+        """John, 2026-10-29: `threat_leave` is the ambush by an unknown shooter. The ambush run needs a
+        SHOT with known=no before the leave; a leave after only shots from sites it knew is a fault in
+        every run."""
+        ambush = [dict(label="ambushed", decisions=["leave", "resume"], breaks=2, release=True, kill=True,
+                       unknown_shooter=True)]
+        plain = [dict(label="ambushed", decisions=["leave", "resume"], breaks=2, release=True, kill=True)]
+        leave_resume = ["threat_leave", "threat_resume"]
+        unseen = heli_run(decisions=leave_resume, shots=[(29.0, "no")])
+        self.assertEqual(s.heli_defense_problems(unseen, ambush), [])
+        self.assertEqual(s.heli_defense_problems(unseen, plain), [])
+        # Shots from a site it knew, or with no picture at all, are no ambush.
+        for known in ("yes", "none"):
+            problems = s.heli_defense_problems(heli_run(decisions=leave_resume, shots=[(29.0, known)]), ambush)
+            self.assertTrue(any("threat_leave" in p and "knew" in p for p in problems), (known, problems))
+            self.assertNotEqual(s.heli_defense_problems(heli_run(decisions=leave_resume, shots=[(29.0, known)]), plain), [])
+        # One known shot among others is not enough to cancel the unknown one before the leave.
+        mixed = heli_run(decisions=leave_resume, shots=[(28.0, "yes"), (29.0, "no")])
+        self.assertEqual(s.heli_defense_problems(mixed, ambush), [])
+        # The unknown shot has to come before the leave, not after it.
+        late = heli_run(decisions=leave_resume, shots=[(40.0, "no")])
+        self.assertNotEqual(s.heli_defense_problems(late, ambush), [])
+        # No shot at all: a gun's ambush has no SHOT line. Only the run that asks for a missile ambush
+        # needs one.
+        gun = heli_run(decisions=leave_resume)
+        self.assertEqual(s.heli_defense_problems(gun, plain), [])
+        self.assertTrue(any("no SHOT" in p for p in s.heli_defense_problems(gun, ambush)))
+        # A second leave counts from the first: it needs a shot of its own from a site it did not know.
+        twice = ["threat_leave", "threat_resume", "threat_leave", "threat_resume"]
+        both = heli_run(decisions=twice, shots=[(29.0, "no"), (31.0, "no")])
+        self.assertEqual(s.heli_defense_problems(both, ambush), [])
+        second_known = heli_run(decisions=twice, shots=[(29.0, "no"), (31.0, "yes")])
+        self.assertTrue(any("t=32.0" in p and "knew" in p for p in s.heli_defense_problems(second_known, ambush)))
+        self.assertNotEqual(s.heli_defense_problems(second_known, plain), [])
+        # Runs with no leave are untouched by shots from sites it knew.
+        held = [dict(label="held", decisions=["hold_off", "home"], no_release=True)]
+        shot_at = heli_run(breaks=0, released=False, killed=False, decisions=["threat_hold_off", "threat_home"],
+                           shots=[(40.0, "yes")])
+        self.assertEqual(s.heli_defense_problems(shot_at, held), [])
+
     def test_the_run_count_must_match(self):
         self.assertNotEqual(s.heli_defense_problems(heli_run(), self.want * 2), [])
 
@@ -526,25 +574,66 @@ class HelicopterTests(unittest.TestCase):
         scenarios = {sc.name: sc for sc in s.scenarios()}
         defended = scenarios["ai-strike-heli-defended"]
         argsets = [defended.args] + [step.args for step in defended.then]
-        self.assertEqual(len(argsets), 7)
+        self.assertEqual(len(argsets), 9)
         self.assertTrue(all("mi24" in a for a in argsets))
         self.assertNotIn("--profile", [x for a in argsets for x in a], "the AI chooses its pass")
         heli = scenarios["ai-strike-heli"]
         self.assertNotIn("--profile", [x for a in [heli.args] + [st.args for st in heli.then] for x in a])
         held = ["threat_hold_off", "threat_home"]
-        honest = [heli_run(profile="standoff", breaks=0),
-                  heli_run(breaks=0),
+        # Heavy AAA on the moving column: the move-ahead ambush (2026-10-29) fires from outside every
+        # known gun's reach and hurts the tank, with no hold-off.
+        # The ambush runs (2026-10-29): a shot from a site it did not know, the leave, the resume.
+        ambushed = dict(decisions=["threat_leave", "threat_resume"], shots=[(29.0, "no")])
+        # The SA-14 team on the target (seed 4, since the hidden teams and the move-ahead of
+        # 2026-10-29): its launch is an ambush, a move-ahead resume, the second team's ambush, home.
+        # The decisions come at t=30 to 35, the leaves at 31 and 34, each after a shot of its own.
+        seed4 = dict(decisions=["threat_hold_off", "threat_leave", "threat_resume", "threat_hold_off",
+                                "threat_leave", "threat_home"], shots=[(29.0, "no"), (33.0, "no")], ahead=True)
+        honest = [heli_run(profile="standoff", breaks=0, ahead=True),
+                  heli_run(profile="standoff", breaks=0),
                   heli_run(breaks=0, released=False, killed=False, decisions=held),
-                  heli_run(breaks=0, released=False, killed=False, decisions=held),
+                  heli_run(profile="standoff", breaks=6, released=False, killed=False, **seed4),
                   heli_run(breaks=0, decisions=["threat_hold_off", "threat_resume"], sead=True),
-                  heli_run(breaks=8, decisions=["threat_hold_off", "threat_resume", "threat_leave",
-                                                "threat_hold_off", "threat_resume"]),
-                  heli_run(profile="standoff", breaks=3, released=False, killed=False, decisions=held)]
+                  heli_run(breaks=8, **ambushed),
+                  heli_run(breaks=8, **ambushed),
+                  heli_run(profile="standoff", breaks=3, released=False, killed=False, decisions=held),
+                  heli_run(breaks=8, released=False, killed=False, decisions=["threat_leave"],
+                           shots=[(20.0, "no"), (30.0, "yes")])]
         self.assertEqual(defended.check("\n".join(honest)), [])
-        # Slice HF1: the ambushed run must leave and resume after it.
+        # The heavy-AAA run must plan a move-ahead, call no hold-off, and stay out of every known reach.
+        for wrong in (dict(ahead=False), dict(decisions=["threat_hold_off"]), dict(reach_margin=-50),
+                      dict(released=False)):
+            heavy = list(honest)
+            heavy[0] = heli_run(**{**dict(profile="standoff", breaks=0, ahead=True), **wrong})
+            self.assertNotEqual(defended.check("\n".join(heavy)), [], wrong)
+        # Seed 4 (2026-10-29): each leave answers a launch by a team it did not know; the second leave
+        # after only a known team's shot (the first team again, past its unmasking) is a fault, and so
+        # is the old hold-off and home with no ambush or move-ahead.
+        for wrong in (dict(shots=[(29.0, "no"), (33.0, "yes")]), dict(decisions=held, shots=[]),
+                      dict(ahead=False)):
+            seed4_wrong = list(honest)
+            seed4_wrong[3] = heli_run(profile="standoff", breaks=6, released=False, killed=False,
+                                      **{**seed4, **wrong})
+            self.assertNotEqual(defended.check("\n".join(seed4_wrong)), [], wrong)
+        # Slice HF1: the ambushed runs must leave and resume after it.
         unambushed = list(honest)
         unambushed[5] = heli_run(breaks=8, decisions=["threat_hold_off", "threat_resume"])
         self.assertNotEqual(defended.check("\n".join(unambushed)), [])
+        # 2026-10-29: and the leave must answer a shot from a site it did not know.
+        for known in ("yes", "none"):
+            known_site = list(honest)
+            known_site[6] = heli_run(breaks=8, decisions=["threat_leave", "threat_resume"], shots=[(29.0, known)])
+            self.assertNotEqual(defended.check("\n".join(known_site)), [], known)
+        gunned = list(honest)
+        gunned[5] = heli_run(breaks=8, decisions=["threat_leave", "threat_resume"])
+        self.assertNotEqual(defended.check("\n".join(gunned)), [])
+        # Both ambush runs lay the site out the same way: placed and destroyed after its shot. The game
+        # hides the shoulder-fired team itself (2026-10-29), so no listing stand-in.
+        for args in argsets[5:7]:
+            for flag in ("--place-site", "--sead-site", "--sead-after-shot", "--follow-threat"):
+                self.assertIn(flag, args)
+            self.assertNotIn("--site-sight", args, "the game hides the team, not the driver")
+            self.assertNotIn("--sead-at", args, "the SEAD stand-in goes by the shot, not the clock")
         quick = scenarios["qmc-strike-heli"]
         self.assertEqual(len([quick.args] + [st.args for st in quick.then]), 2)
 
@@ -988,6 +1077,78 @@ class NoLazeTests(unittest.TestCase):
         self.assertTrue(any("released after" in p for p in s.no_laze_problems(no_laze_output(rtb=released))))
         wrong = buddy_none(decision="rtb", releases=False, weapon="AS14.JT").replace("rtb reason", "manual reason", 1)
         self.assertTrue(any("want rtb" in p for p in s.no_laze_problems(no_laze_output(rtb=wrong))))
+
+
+def commit_run(open_t=23.2, release_s="5.00", held="yes", held_at=26.625, release=27.758, defend=27.767,
+               broke=None, released=True):
+    """A held `ai-strike-commit-aaa` run: the window opens, a defence is held, the bomb leaves, Defend."""
+    extra = ["ai-strike: PHASE t=0.008 name=Attack",
+             f"ai-strike: COMMIT t={open_t:.3f} open=yes release_s={release_s} held_defence=no held_at=none"]
+    if broke is not None:
+        extra += [f"ai-strike: PHASE t={broke:.3f} name=Defend", f"ai-strike: PHASE t={broke + 1:.3f} name=Attack"]
+    extra += [f"ai-strike: PHASE t={release:.3f} name=Exit",
+              f"ai-strike: COMMIT t={release:.3f} open=no release_s=none held_defence={held} "
+              f"held_at={held_at if held == 'yes' else 'none'}"]
+    if defend is not None:
+        extra.append(f"ai-strike: PHASE t={defend:.3f} name=Defend")
+    return run(profile="straight", releases=[release] if released else [], extra=extra)
+
+
+def control_run(defend=21.683, commit_at=None, release=None):
+    extra = ["ai-strike: PHASE t=0.008 name=Attack"]
+    if commit_at is not None:
+        extra.append(f"ai-strike: COMMIT t={commit_at:.3f} open=yes release_s=5.00 held_defence=no held_at=none")
+    extra.append(f"ai-strike: PHASE t={defend:.3f} name=Defend")
+    return run(profile="straight", releases=[release] if release is not None else [], extra=extra)
+
+
+class CommitTests(unittest.TestCase):
+    HELD = [dict(label="held", kind="held")]
+    BREAKS = [dict(label="control", kind="breaks")]
+
+    def test_a_held_run_passes(self):
+        self.assertEqual(s.commit_problems(commit_run(), self.HELD), [])
+
+    def test_the_window_must_open_within_5_s(self):
+        problems = s.commit_problems(commit_run(release_s="6.20"), self.HELD)
+        self.assertTrue(any("want 0 to 5" in p for p in problems), problems)
+
+    def test_no_held_defence_fails(self):
+        problems = s.commit_problems(commit_run(held="no"), self.HELD)
+        self.assertTrue(any("no defence came" in p for p in problems), problems)
+
+    def test_a_defence_outside_the_window_fails(self):
+        problems = s.commit_problems(commit_run(held_at=22.0), self.HELD)
+        self.assertTrue(any("outside the window" in p for p in problems), problems)
+
+    def test_the_release_must_be_inside_the_window(self):
+        problems = s.commit_problems(commit_run(released=False), self.HELD)
+        self.assertTrue(any("no RELEASE inside" in p for p in problems), problems)
+
+    def test_a_break_inside_the_window_fails(self):
+        problems = s.commit_problems(commit_run(broke=25.0), self.HELD)
+        self.assertTrue(any("broke into Defend" in p for p in problems), problems)
+
+    def test_the_striker_must_defend_right_after_the_release(self):
+        problems = s.commit_problems(commit_run(defend=None), self.HELD)
+        self.assertTrue(any("no Defend within" in p for p in problems), problems)
+        problems = s.commit_problems(commit_run(defend=29.0), self.HELD)
+        self.assertTrue(any("no Defend within" in p for p in problems), problems)
+
+    def test_the_control_breaks_outside_the_window(self):
+        self.assertEqual(s.commit_problems(control_run(), self.BREAKS), [])
+
+    def test_a_control_with_the_window_open_or_a_release_first_fails(self):
+        problems = s.commit_problems(control_run(commit_at=20.0), self.BREAKS)
+        self.assertTrue(any("must break outside it" in p for p in problems), problems)
+        problems = s.commit_problems(control_run(release=20.0), self.BREAKS)
+        self.assertTrue(any("released before the Defend" in p for p in problems), problems)
+        self.assertTrue(s.commit_problems(commit_run(), self.BREAKS))
+
+    def test_the_scenario_exists_with_held_runs_and_a_control(self):
+        scenario = next(sc for sc in s.scenarios() if sc.name == "ai-strike-commit-aaa")
+        self.assertEqual(len(scenario.then), 3)
+        self.assertIn("--place-site", scenario.then[-1].args)
 
 
 class SelectionTests(unittest.TestCase):

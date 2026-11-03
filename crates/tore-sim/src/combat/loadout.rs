@@ -142,8 +142,14 @@ impl Loadout {
         }
         let mut draft = self.clone();
         draft.configuration.tanks[target].store = Some(store);
-        draft.configuration.tanks[target].quantity = existing + 1;
-        draft.configuration.tanks[source].quantity -= 1;
+        let step = self
+            .tank_pairs(source)
+            .step(self.tank_pairs(target).step(1)) as u16;
+        if from.quantity < step || i32::from(existing + step) > capacity {
+            return Ok(());
+        }
+        draft.configuration.tanks[target].quantity = existing + step;
+        draft.configuration.tanks[source].quantity -= step;
         let hardpoint = draft.configuration.tanks[target].hardpoint;
         if let Some(Some(slot)) = draft.configuration.hardpoint_slots.get(hardpoint) {
             draft.quantities[*slot] = 0;
@@ -206,6 +212,11 @@ impl Loadout {
         })
     }
     pub fn tank_capacity(&self, slot: usize, tank: &live::TankStore) -> i32 {
+        self.tank_pairs(slot)
+            .maximum(self.tank_capacity_before_store_pairs(slot, tank))
+    }
+    /// Capacity before the physical store-pair policy, for the roster audit.
+    pub fn tank_capacity_before_store_pairs(&self, slot: usize, tank: &live::TankStore) -> i32 {
         if !self.cheat
             && self.configuration.tanks.get(slot).is_none_or(|station| {
                 !tore_formats::aircraft::stations::tank_allowed(
@@ -282,7 +293,9 @@ impl Loadout {
             return Ok(());
         };
         let capacity = self.tank_capacity(slot, store);
-        let quantity = (i32::from(station.quantity) + direction.signum()).clamp(0, capacity) as u16;
+        let quantity = (i32::from(station.quantity)
+            + direction.signum() * self.tank_pairs(slot).step(1))
+        .clamp(0, capacity) as u16;
         let hardpoint = station.hardpoint;
         self.configuration.tanks[slot].quantity = quantity;
         if quantity > 0
@@ -321,6 +334,44 @@ impl Loadout {
         self.refresh_equipment()
     }
     pub fn capacity(&self, slot: usize, w: &Weapon) -> i32 {
+        self.store_pairs(slot)
+            .maximum(self.capacity_before_store_pairs(slot, w))
+    }
+    pub fn store_pairs(&self, slot: usize) -> loading::StorePairs {
+        self.configuration.stations.get(slot).map_or_else(
+            || loading::StorePairs::of(Default::default(), [0.; 3]),
+            |s| loading::StorePairs::of(s.rack, s.mount),
+        )
+    }
+    fn tank_pairs(&self, slot: usize) -> loading::StorePairs {
+        self.configuration.tanks.get(slot).map_or_else(
+            || loading::StorePairs::of(Default::default(), [0.; 3]),
+            |s| loading::StorePairs::of(s.rack, s.mount),
+        )
+    }
+    /// Migrate stored preflight loads. Live ammunition is never normalized:
+    /// a single release may temporarily leave one extra store on a wing.
+    pub fn normalize_saved_store_pairs(&mut self) -> Result<()> {
+        for slot in 0..self.configuration.stations.len() {
+            let policy = self.store_pairs(slot);
+            let cap = self.capacity(slot, &self.configuration.stations[slot].weapon);
+            let station = &mut self.configuration.stations[slot];
+            station.count =
+                policy.saved_quantity(policy.maximum(i32::from(station.count)) as u16, cap);
+            self.quantities[slot] = policy.saved_quantity(self.quantities[slot], cap);
+        }
+        for slot in 0..self.configuration.tanks.len() {
+            if let Some(store) = &self.configuration.tanks[slot].store {
+                let cap = self.tank_capacity(slot, store);
+                self.configuration.tanks[slot].quantity = self
+                    .tank_pairs(slot)
+                    .saved_quantity(self.configuration.tanks[slot].quantity, cap);
+            }
+        }
+        self.refresh_equipment()
+    }
+    /// Retail arithmetic plus existing aircraft permissions, before pairing.
+    pub fn capacity_before_store_pairs(&self, slot: usize, w: &Weapon) -> i32 {
         let row = self
             .configuration
             .hardpoint_slots
@@ -526,7 +577,7 @@ impl Loadout {
     pub fn change(&mut self, slot: usize, direction: i32) {
         if let Some(s) = self.configuration.stations.get(slot) {
             let cap = self.capacity(slot, &s.weapon);
-            let step = quantity_step(cap);
+            let step = self.store_pairs(slot).step(quantity_step(cap));
             self.quantities[slot] =
                 (i32::from(self.quantities[slot]) + direction.signum() * step).clamp(0, cap) as u16;
             if self.quantities[slot] > 0 && self.configuration.stations[slot].count == 0 {
@@ -556,9 +607,20 @@ impl Loadout {
         } else {
             0
         };
-        let moved = quantity_step(capacity)
+        let step = self
+            .store_pairs(source)
+            .step(self.store_pairs(target).step(quantity_step(capacity)));
+        let moved = step
             .min(i32::from(self.quantities[source]))
             .min((capacity - existing).max(0)) as u16;
+        let moved = if (self.store_pairs(source).step(1) == 2
+            || self.store_pairs(target).step(1) == 2)
+            && !moved.is_multiple_of(2)
+        {
+            moved - 1
+        } else {
+            moved
+        };
         if moved > 0 {
             self.configuration.stations[target].weapon = weapon.clone();
             self.configuration.stations[target].count = capacity as u16;
@@ -590,10 +652,21 @@ impl Loadout {
                 .iter()
                 .zip(&self.quantities)
                 .filter(|(s, _)| !s.internal && s.weapon.source != "SUU16.JT")
-                .map(|(s, n)| f64::from(s.weapon.weight) * f64::from(*n))
+                .map(|(s, n)| s.weapon.carried_weight_lb() * f64::from(*n))
                 .sum::<f64>()
     }
     pub fn validate(&self) -> Result<()> {
+        self.validate_for_editing()?;
+        if self.total_lbs() > self.maximum_lbs {
+            return Err(super::invalid(
+                "This plane is too heavy to take off. Remove stores or fuel.",
+            ));
+        }
+        Ok(())
+    }
+    /// A structurally valid load may open in the editor while overweight.
+    /// Fly and non-interactive starts must still use `validate`.
+    pub fn validate_for_editing(&self) -> Result<()> {
         self.ammunition()?;
         if self.quantities.len() != self.configuration.stations.len()
             || !self.fuel_lbs.is_finite()
@@ -608,6 +681,9 @@ impl Loadout {
             .zip(&self.quantities)
             .enumerate()
         {
+            if !self.store_pairs(i).valid(*n) || !self.store_pairs(i).valid(s.count) {
+                return Err(super::invalid("Paired stores must be loaded in pairs."));
+            }
             if *n > 0 && novelty(&s.weapon.source) && !self.cheat {
                 return Err(super::invalid(
                     "This store is available with Cheat loading only.",
@@ -635,6 +711,9 @@ impl Loadout {
             }
         }
         for (index, tank) in self.configuration.tanks.iter().enumerate() {
+            if !self.tank_pairs(index).valid(tank.quantity) {
+                return Err(super::invalid("Paired tanks must be loaded in pairs."));
+            }
             if tank.quantity > 0 {
                 let store = tank
                     .store
@@ -666,11 +745,6 @@ impl Loadout {
         {
             return Err(super::invalid(
                 "Tank fuel and mass disagree with installed quantities.",
-            ));
-        }
-        if self.total_lbs() > self.maximum_lbs {
-            return Err(super::invalid(
-                "This plane is too heavy to take off. Remove stores or fuel.",
             ));
         }
         Ok(())

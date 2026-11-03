@@ -53,8 +53,14 @@ const SEEKER_OVERRIDES: &[(&str, SeekerKind)] = &[
 ];
 
 impl Weapon {
-    /// Fitted interpretation of the reviewed aspect field: 100 is rear-only,
-    /// 20..40 identifies the all-aspect A2A records. Zero is unspecified.
+    /// Authored public-reference store mass. The decoded weight remains available
+    /// for historical rules and damage/effect adapters.
+    pub fn carried_weight_lb(&self) -> f64 {
+        crate::missile_data::reference(&self.source)
+            .map_or(f64::from(self.weight.max(0)), |r| r.mass_kg / 0.45359237)
+    }
+
+    /// Reviewed aspect field: 100 is rear-only, 20..40 all-aspect, zero unspecified.
     pub fn infrared_all_aspect(&self) -> bool {
         corrections::infrared_aspect(&self.source)
             .unwrap_or(self.seeker.all_aspect > 0 && self.seeker.all_aspect < 100)

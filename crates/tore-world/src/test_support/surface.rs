@@ -363,3 +363,53 @@ pub fn routed_resources() -> std::collections::BTreeMap<String, Vec<u8>> {
     r.insert("~QUCOL.M".into(), text.into_bytes());
     r
 }
+
+/// A seed-dependent impossible support footprint, entirely synthetic. The first
+/// SAM pick is enlarged so its truck cannot be both clear and within supply reach.
+/// The next seed selecting another type can build normally.
+pub fn placement_retry_resources(seed: u32) -> (BTreeMap<String, Vec<u8>>, u32) {
+    use crate::surface::{catalog::Catalog, resolve};
+    use tore_formats::quick_template::Template;
+    let mut r = surface_resources();
+    r.insert("UKR.MM".into(), resources()["UKR.MM"].clone());
+    let text = object("<sam>", 20_000, "nationality2 137", "$93", "")
+        + &object("STORE.OT", 22_000, "nationality2 137", "$93", "");
+    r.insert("~QUCITY.M".into(), text.into_bytes());
+    let template = Template::parse("~QUCITY.M", &r["~QUCITY.M"]).unwrap();
+    let selected = |seed| {
+        resolve::template(
+            &template,
+            &target("QUCITY", 0, 3, seed),
+            &mut Catalog::new(&r),
+            Some("UKR.T2"),
+        )
+        .unwrap()
+        .units[0]
+            .resource
+            .clone()
+    };
+    let bad = selected(seed);
+    let mut good_seed = seed;
+    loop {
+        good_seed = good_seed.wrapping_add(1).max(1);
+        if selected(good_seed) != bad {
+            break;
+        }
+        assert!(good_seed.wrapping_sub(seed) < 16);
+    }
+    let shape = r.get_mut(&bad.replace(".NT", ".SH")).unwrap();
+    // The fixture's first vertex X also supplies the CODE scale exponent.
+    // Keep it at 8 (one foot per unit), within the reviewed 0..=16 bound.
+    // Its three i16 vertices follow the six-byte opcode.
+    for (index, vertex) in [[8i16, -30_000, 0], [30_000, -30_000, 0], [0, 30_000, 0]]
+        .into_iter()
+        .enumerate()
+    {
+        for (axis, word) in vertex.into_iter().enumerate() {
+            let at = 256 + 6 + index * 6 + axis * 2;
+            shape[at..at + 2].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    assert_eq!(tore_formats::shape::object_scale(shape).unwrap(), 1.);
+    (r, good_seed)
+}

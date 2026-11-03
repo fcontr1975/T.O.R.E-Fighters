@@ -112,6 +112,11 @@ impl ThreatService {
         }
     }
 
+    /// An explicit combat lifecycle notice overrides lost-observation grace.
+    pub fn end_threat(&mut self, id: u32) {
+        self.contacts.remove(&id);
+    }
+
     pub fn clear(&mut self) {
         self.contacts.clear();
     }

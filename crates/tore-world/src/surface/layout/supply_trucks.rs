@@ -7,8 +7,7 @@
 //! nr-b23b): a MISTRK beside every SAM unit and one more for each area
 //! battery; their guns get none.
 use super::{
-    Added, Inputs, Obstacles, Pose, added_unit, distance2, ordinal_of, ring, stands, stream_for,
-    xz, *,
+    Added, Inputs, Obstacles, Pose, added_unit, ordinal_of, ring, stands, stream_for, xz, *,
 };
 use crate::surface::{Battery, IdRange, Origin, SupplyTruck, Surface, UnitId};
 use std::collections::BTreeSet;
@@ -76,6 +75,10 @@ pub(super) fn add(
         wanted.push((served, 1, SAM_TRUCK, Some(index)));
     }
     wanted.sort_by_key(|(served, order, _, _)| (*served, *order));
+    let mut occupied = super::occupied(
+        surface.units.iter().chain(added.iter().map(|a| &a.unit)),
+        inputs.types,
+    );
     let mut trucks = Vec::new();
     let mut n = 0u32;
     let mut stream_of = std::collections::BTreeMap::new();
@@ -107,11 +110,10 @@ pub(super) fn add(
                 ),
             });
         let size = (inputs.types)(kind).footprint.radius();
-        let owner_size = (inputs.types)(&owner.resource).footprint.radius();
         let centre = xz(owner.position);
         let mut first = None;
         let mut chosen = None;
-        for _ in 0..JITTER_CANDIDATES {
+        for _ in 0..SUPPORT_CANDIDATES {
             let (offset, bearing) = ring(draws, TRUCK_FT);
             let pose = Pose {
                 at: [centre[0] + offset[0], centre[1] + offset[1]],
@@ -119,14 +121,21 @@ pub(super) fn add(
                 heading: bearing + 90,
             };
             first.get_or_insert(pose);
-            if distance2(pose.at, centre) >= (size + owner_size).pow(2)
+            if clear_of_units(pose.at, size, &occupied)
                 && stands(inputs.ground, obstacles, pose.at, size, false)
             {
                 chosen = Some(pose);
                 break;
             }
         }
-        let pose = chosen.or(first).expect("at least one candidate");
+        let pose = chosen.unwrap_or_else(|| {
+            notes.push(format!(
+                "support fallback {:#010x} {kind}: no valid spot beside {:#010x}; retained for final footprint placement",
+                id.0, served.0
+            ));
+            first.expect("a nonempty support search")
+        });
+        occupied.push((pose.at, size));
         added.push(Added {
             unit: added_unit(id, &entry, pose, owner),
             source: source.clone(),

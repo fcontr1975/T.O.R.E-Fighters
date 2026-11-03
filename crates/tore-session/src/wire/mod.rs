@@ -259,7 +259,25 @@ pub fn path_words(path: Path) -> &'static str {
 /// packets 14 and 15 for confirmed lounge return slots.
 /// 72 adds human visual designation and its checkpoint retention state.
 /// 73 adds cumulative flight reports and persistent human/AI score identities.
-pub const PROTOCOL_VERSION: u16 = 73;
+/// 74 changes rules only: tanks against aircraft and host migration resume.
+/// 75 for 0.2.2: the energy model for guided ordnance (new checkpoint state),
+/// paired store loading, AI missile defense state, bridge grounding and
+/// Quick Mission placement rules and seed retry.
+/// 76 adds the readout's range-cue minimum, reachable range regions in the
+/// prediction checkpoint, AI countermeasure pair spacing and the chaff buff.
+/// 77 doubles the chaff multiplier to 2.60 (rules only).
+/// 78 adds the Quick Mission `situation` line to the mission text and the
+/// fixed distance table with the server's distance adjustment.
+/// 79 adds the AI strike's early retarget and 5 s release commitment
+/// (new strike checkpoint state).
+/// 80 keeps AI helicopters out of known threat rings they planned through
+/// (rules only).
+/// 81 sizes helicopter threat rings from each site's real launch reach,
+/// advances by the store's flight time, keeps ambushes to unknown shooters
+/// and releases stand-off stores outside known rings (new checkpoint state).
+/// 82 hides shoulder-fired SAM teams until spotted and adds the helicopter
+/// move-ahead ambush on moving targets (new checkpoint state).
+pub const PROTOCOL_VERSION: u16 = 82;
 
 /// Section kinds after the transport's own Messages (kind 1).
 /// The tick of each interval at which a seat's snapshots are built: ticks

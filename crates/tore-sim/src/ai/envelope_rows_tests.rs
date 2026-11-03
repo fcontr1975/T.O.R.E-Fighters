@@ -145,7 +145,7 @@ fn g_limits_reference(actor: &AiActor) -> (f64, f64) {
         actor.identity.human_controlled,
     );
     (
-        positive * actor.control_health(),
+        health_scaled_positive_g(positive, actor.control_health()),
         negative * actor.control_health(),
     )
 }

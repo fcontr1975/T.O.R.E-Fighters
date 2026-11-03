@@ -75,6 +75,12 @@ class ProbeCheckTests(unittest.TestCase):
         self.assertTrue(any("flew into the ground" in p for p in ai.probe_problems(text)))
         damaged = text + "AI damage: actor=2 faults=[(4, 1)] return=None\n"
         self.assertFalse(any("flew into the ground" in p for p in ai.probe_problems(damaged)))
+        structural = text + "AI damage: actor=2 faults=[] damage_fraction=0.241\n"
+        self.assertFalse(any("flew into the ground" in p for p in ai.probe_problems(structural)))
+        tiny = text + "AI damage: actor=2 faults=[] damage_fraction=1e-9\n"
+        self.assertFalse(any("flew into the ground" in p for p in ai.probe_problems(tiny)))
+        healthy = text + "AI damage: actor=2 faults=[] damage_fraction=0\n"
+        self.assertTrue(any("flew into the ground" in p for p in ai.probe_problems(healthy)))
 
     def test_repeated_radio_line(self):
         text = CLEAN + "".join(f"  {20 + i}.0s Red two: 'Contact' []\n" for i in range(3))

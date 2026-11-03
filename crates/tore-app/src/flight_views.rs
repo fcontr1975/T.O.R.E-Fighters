@@ -457,10 +457,14 @@ impl Scene {
                         ),
                     ),
                     p.owner,
-                    p.target,
-                    p.incoming.is_some(),
+                    p.target.filter(|_| p.threatening()),
+                    p.incoming.is_some() && p.threatening(),
                 );
-                shot.aim = combat.state.guided_flight(p.id).and_then(|f| f.point);
+                shot.aim = combat
+                    .state
+                    .guided_flight(p.id)
+                    .filter(|_| p.threatening())
+                    .and_then(|f| f.point);
                 shot
             })
             .collect()

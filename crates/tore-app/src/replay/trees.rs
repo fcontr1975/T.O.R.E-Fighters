@@ -1533,9 +1533,9 @@ fn thought_defense(tree: &mut Tree, t: &Thought) {
         "Countermeasures",
         burst_text(d.burst),
         if d.burst.is_some() {
-            "released now"
+            "requested now"
         } else if d.debug.release_now && !d.debug.may_burst {
-            "wanted, but a burst went out in the last 2 s"
+            "waiting for cooldown or encounter device budget exhausted"
         } else {
             ""
         },
@@ -1552,7 +1552,14 @@ fn thought_defense(tree: &mut Tree, t: &Thought) {
         unit::S,
         "",
     );
-    tree.num(1, "Margin", d.debug.margin_s, 1, unit::S, "by skill");
+    tree.num(
+        1,
+        "Break threshold",
+        d.debug.margin_s,
+        1,
+        unit::S,
+        "by skill",
+    );
     let why = defense_reasons(&d, t.experience);
     if !why.is_empty() {
         tree.text(1, "Why now", why, "");
@@ -1564,6 +1571,9 @@ pub fn defense_maneuver(d: &DefenseDecision) -> (&'static str, String) {
     let kind = |m: defense::Maneuver| match m {
         defense::Maneuver::Jink => "jink",
         defense::Maneuver::Notch => "notch",
+        defense::Maneuver::Drag => "drag",
+        defense::Maneuver::Beam => "beam",
+        defense::Maneuver::Break => "break",
     };
     match d.motion {
         Some(m) => (
@@ -1578,6 +1588,10 @@ pub fn defense_maneuver(d: &DefenseDecision) -> (&'static str, String) {
                     ""
                 }
             ),
+        ),
+        None if d.debug.passed => (
+            "complete",
+            "missile passage confirmed by opening range".into(),
         ),
         None => (
             "not yet",
@@ -1610,11 +1624,13 @@ pub fn burst_text(burst: Option<defense::BurstRequest>) -> String {
 }
 
 /// Every reason behind maneuvering or releasing now.
-pub fn defense_reasons(d: &DefenseDecision, experience: Option<ResolvedExperience>) -> String {
+pub fn defense_reasons(d: &DefenseDecision, _experience: Option<ResolvedExperience>) -> String {
     let g = d.debug;
     let mut why = Vec::new();
-    if experience.is_some_and(|e| e.level == tore_sim::ai::Experience::Novice) {
-        why.push("a Novice always maneuvers");
+    if g.passed {
+        why.push("missile passage confirmed by opening range");
+    } else if !g.maneuver_now {
+        why.push("pilot reaction delay");
     }
     if g.bearing_only {
         why.push("only a bearing is known");
@@ -1629,7 +1645,7 @@ pub fn defense_reasons(d: &DefenseDecision, experience: Option<ResolvedExperienc
         why.push("the evidence is stale");
     }
     if g.maneuver_now && why.is_empty() {
-        why.push("impact within the maneuver time plus margin");
+        why.push("reaction complete, committed defense phase");
     }
     why.join(", ")
 }

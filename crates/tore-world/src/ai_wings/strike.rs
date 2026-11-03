@@ -57,7 +57,47 @@ pub(super) fn step(
         let Some(actor) = wings.mission.actor(id) else {
             continue;
         };
-        let stores = strike_stores(config, actor.stations());
+        let mut stores = strike_stores(config, actor.stations());
+        if config.strike_class == tore_sim::models::strike_class::StrikeClass::Helicopter {
+            // A helicopter's stand-off needs its guided store's flight time
+            // (John, 2026-10-29).
+            for store in stores.iter_mut().filter(|st| !st.kind.unguided()) {
+                if let Some(station) = config.stations.get(usize::from(store.station.0)) {
+                    store.flight = wings
+                        .flight_times
+                        .entry((
+                            station.weapon.source.clone(),
+                            state.weapon_rules == missiles::Rules::Energy,
+                        ))
+                        .or_insert_with(|| flight_times(&station.weapon, state.weapon_rules))
+                        .to_owned();
+                }
+            }
+        }
+        // The answers a stand-off release outside known rings is planned
+        // with (John, 2026-10-29). A helicopter plans with them under the
+        // energy rules only: under the others its guided round leaves no
+        // farther out than its sight's bar, its usual range.
+        let helicopter =
+            config.strike_class == tore_sim::models::strike_class::StrikeClass::Helicopter;
+        let gunship = config.strike_class == tore_sim::models::strike_class::StrikeClass::Gunship;
+        let shots = (!gunship && (!helicopter || state.weapon_rules == missiles::Rules::Energy))
+            .then(|| {
+                super::strike_reach::StrikerShots::new(
+                    &wings.shot_cache,
+                    state.weapon_rules,
+                    stores.iter().filter_map(|st| {
+                        config
+                            .stations
+                            .get(usize::from(st.station.0))
+                            .map(|station| (st.station, st.kind, &station.weapon))
+                    }),
+                )
+            })
+            .flatten();
+        let shots = strike::Shots(
+            shots.map(|table| std::sync::Arc::new(table) as std::sync::Arc<dyn strike::ShotTable>),
+        );
         let launcher = crate::combat::launcher(actor.flight());
         let selection = actor.strike().and_then(strike::Strike::selection);
         if let Some(call) = actor
@@ -126,13 +166,15 @@ pub(super) fn step(
             }) || state
                 .guided_flights()
                 .any(|(_, f)| f.owner == id && f.kind == missiles::Guidance::Laser);
-            let gunship =
-                config.strike_class == tore_sim::models::strike_class::StrikeClass::Gunship;
-            let (impact, seconds, warning, due, reach_ok) = if sel.kind == StoreKind::Gun && gunship
-            {
+            // `reach`: whether a guided bomb's glide reaches at all, and its
+            // time to the release (the AI's committed-to-release window).
+            // `stand_off`: whether the store would reach from here whatever
+            // the AI's own release range, and a guided bomb's bar.
+            let mut stand_off = (false, None);
+            let (impact, seconds, warning, due, reach) = if sel.kind == StoreKind::Gun && gunship {
                 // The gunship's guns are trained and fired by their own
                 // bridge (`super::gunship`, slice ST-F).
-                (None, None, false, false, true)
+                (None, None, false, false, (true, None))
             } else if sel.kind == StoreKind::Gun {
                 // The gun's ground cue (slice ST-T2); the striker judges its
                 // own bursts.
@@ -140,9 +182,15 @@ pub(super) fn step(
                 let cue = tore_sim::combat::gunsight::ground_cue(w, &launcher, mount, ground)
                     .ok()
                     .flatten();
-                (cue.map(|c| c.0), cue.map(|c| c.1), false, false, true)
+                (
+                    cue.map(|c| c.0),
+                    cue.map(|c| c.1),
+                    false,
+                    false,
+                    (true, None),
+                )
             } else if sel.kind.seeker() {
-                let due = seeker_due(
+                let lock = seeker_lock(
                     sel.kind,
                     w,
                     config.stations[station].mount,
@@ -150,7 +198,8 @@ pub(super) fn step(
                     position,
                     emitting,
                 );
-                (None, None, false, due, true)
+                stand_off = (lock.locked, None);
+                (None, None, false, lock.due(), (true, None))
             } else {
                 // A laser bomb the tactics let go by hand is solved on the
                 // bomb equation (slice ST-G).
@@ -181,6 +230,12 @@ pub(super) fn step(
                 let sight = (guided_kind(w) && !ballistic)
                     .then(|| state.strike_guided_sight(id, config, &launcher, &ground))
                     .flatten();
+                stand_off = sight.as_ref().map_or((false, None), |sight| {
+                    (
+                        sight.in_reach && sight.advisory.is_none(),
+                        sight.release_range_ft(),
+                    )
+                });
                 let (due, reach_ok) = match &sight {
                     // A guided bomb: due on its sight's range cue; and whether
                     // its glide can reach from here at all (it cannot from
@@ -191,12 +246,24 @@ pub(super) fn step(
                         true,
                     ),
                 };
+                // A guided bomb's time to its release (T.O.R.E, John,
+                // 2026-10-28): the level T's own, else the distance to the
+                // T's bar over the ground speed.
+                let release_seconds = sight.as_ref().and_then(|sight| {
+                    sight.release_seconds().or_else(|| {
+                        let speed = launcher.velocity[0].hypot(launcher.velocity[2]);
+                        sight
+                            .along_ft()
+                            .filter(|_| speed > 1.)
+                            .map(|along| along / speed)
+                    })
+                });
                 (
                     cue.map(|c| c.position),
                     cue.map(|c| c.seconds),
                     warning,
                     due,
-                    reach_ok,
+                    (reach_ok, release_seconds),
                 )
             };
             Some(Solution {
@@ -210,7 +277,10 @@ pub(super) fn step(
                 due,
                 warning,
                 guided_in_flight,
-                reach_ok,
+                reach_ok: reach.0,
+                release_seconds: reach.1,
+                reaches: stand_off.0,
+                bar_ft: stand_off.1,
             })
         });
         let inputs = Inputs {
@@ -220,6 +290,7 @@ pub(super) fn step(
             mission_height_ft: wings.mission_height_ft,
             solution,
             lase,
+            shots,
         };
         if let Some(actor) = wings.mission.actor_mut(id) {
             actor.set_strike_inputs(inputs);
@@ -445,9 +516,81 @@ pub(super) fn describe(
                 fuze_arm_s: f64::from(w.damage.fuze_arm_t) / 4.,
                 frag_radius_ft: f64::from(w.damage.collateral_radius.max(0)),
                 falls_free: kind == StoreKind::Laser && guided::is_glide_bomb(w),
+                flight: None,
             })
         })
         .collect()
+}
+
+/// The shares of a guided store's zone-1 range its flight time is worked
+/// out at ([`flight_times`]).
+const FLIGHT_SHARES: [f64; 4] = [0.25, 0.5, 0.75, 1.];
+/// The launch a flight time is worked out for: this high over a target on
+/// flat ground at sea level (the stand-off's masked height and its unmask
+/// climb), level, at this speed (about a helicopter's strike speed);
+/// fitted, agent.
+const FLIGHT_LAUNCH_AGL_FT: f64 = 700.;
+const FLIGHT_LAUNCH_FPS: f64 = 120. * tore_sim::runway_wind::FEET_PER_SECOND_PER_KNOT;
+/// The target's centre over the ground, feet (a vehicle's).
+const FLIGHT_TARGET_FT: f64 = 8.;
+
+/// A guided store's time of flight to a ground target at
+/// [`FLIGHT_SHARES`] of its zone-1 range (a helicopter's stand-off
+/// advance, docs/spec/ai-strike.md, "Helicopter threat awareness"; John,
+/// 2026-10-29): under the energy rules the energy model's flight
+/// ([`live::State::energy_trial`], the question the AI's guided sight
+/// asks), a range it does not reach taken at the pace of the last one it
+/// does; else, or with none reached, the range at the record's top speed.
+/// `None` with no zone-1 range or speed.
+pub(super) fn flight_times(
+    w: &tore_formats::weapons::Weapon,
+    rules: missiles::Rules,
+) -> Option<strike::FlightTimes> {
+    let zone = f64::from(w.seeker.zones[1].maximum_range.max(0));
+    let top = f64::from(w.movement.maximum_speed.max(0));
+    if zone <= 0. {
+        return None;
+    }
+    let energy = |range: f64| {
+        let launcher = live::Launcher {
+            radar_power: true,
+            position: [0., FLIGHT_LAUNCH_AGL_FT, 0.],
+            basis: tore_sim::attitude::Basis::new(0., 0., 0.),
+            speed_fps: FLIGHT_LAUNCH_FPS,
+            velocity: [0., 0., FLIGHT_LAUNCH_FPS],
+            bay_ready: true,
+            radar: true,
+            jammer: false,
+            alive: true,
+            body_present: true,
+            controls: Default::default(),
+        };
+        let target = [0., FLIGHT_TARGET_FT, range];
+        let observed = seeker::Observation {
+            id: u32::MAX,
+            position: target,
+            velocity: [0.; 3],
+            quality: 1.,
+            range: (range * range + FLIGHT_LAUNCH_AGL_FT * FLIGHT_LAUNCH_AGL_FT).sqrt(),
+            off_axis: 0.,
+        };
+        live::State::energy_trial(w, launcher, observed, [0.; 3], &|_, _| 0.)
+            .filter(|answer| answer.hit)
+            .map(|answer| answer.seconds)
+    };
+    let mut points = [(0., 0.); 4];
+    let mut pace: Option<f64> = None;
+    for (point, share) in points.iter_mut().zip(FLIGHT_SHARES) {
+        let range = share * zone;
+        let seconds = (rules == missiles::Rules::Energy)
+            .then(|| energy(range))
+            .flatten()
+            .or_else(|| pace.map(|p| p * range))
+            .or_else(|| (top > 0.).then(|| range / top))?;
+        pace = Some(seconds / range);
+        *point = (range, seconds);
+    }
+    Some(strike::FlightTimes { points })
 }
 
 /// A store's kind, or `None` for a gun or an air-to-air store.
@@ -477,17 +620,30 @@ pub(super) fn kind(w: &tore_formats::weapons::Weapon) -> Option<StoreKind> {
 }
 
 /// A seeker missile's lock on the target (docs/formats/weapons.md, "AI
-/// release against ground targets"): inside zone 1 from its mount, within
-/// the AI's fire range (10,000 ft or half the zone-1 maximum, whichever is
-/// farther), and for an anti-radiation missile a target that emits.
-fn seeker_due(
+/// release against ground targets"): inside zone 1 from its mount, and for
+/// an anti-radiation missile a target that emits; and whether that lies
+/// within the AI's fire range (10,000 ft or half the zone-1 maximum,
+/// whichever is farther), where it is due.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SeekerLock {
+    locked: bool,
+    in_fire_range: bool,
+}
+
+impl SeekerLock {
+    fn due(self) -> bool {
+        self.locked && self.in_fire_range
+    }
+}
+
+fn seeker_lock(
     kind: StoreKind,
     w: &tore_formats::weapons::Weapon,
     mount: Vector,
     launcher: &live::Launcher,
     target: Vector,
     emitting: bool,
-) -> bool {
+) -> SeekerLock {
     let zone = w.seeker.zones[1];
     let basis = launcher.basis;
     let origin: Vector = std::array::from_fn(|i| {
@@ -498,9 +654,11 @@ fn seeker_due(
     });
     let range = missiles::length(missiles::sub(target, origin));
     let fire_range = strike::GUIDED_CLOSE_FT.max(f64::from(zone.maximum_range) / 2.);
-    range <= fire_range
-        && missiles::geometry(&zone, origin, basis, target, None)
-        && (kind != StoreKind::AntiRadiation || emitting)
+    SeekerLock {
+        locked: missiles::geometry(&zone, origin, basis, target, None)
+            && (kind != StoreKind::AntiRadiation || emitting),
+        in_fire_range: range <= fire_range,
+    }
 }
 
 /// What an AI aircraft can do on a flight lead's ground order now (slice

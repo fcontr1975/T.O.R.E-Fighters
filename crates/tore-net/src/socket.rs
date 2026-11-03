@@ -135,6 +135,14 @@ impl Datagrams for ServerSocket {
         }
     }
 
+    fn can_send_to(&self, to: SocketAddr) -> bool {
+        // An IPv6 socket sends to an IPv4 address at its IPv4-mapped one.
+        match to {
+            SocketAddr::V4(_) => self.v4.is_some() || self.v6.is_some(),
+            SocketAddr::V6(_) => self.v6.is_some(),
+        }
+    }
+
     fn recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
         for socket in [&mut self.v6, &mut self.v4].into_iter().flatten() {
             if let Some(received) = socket.recv_datagram(buf)? {

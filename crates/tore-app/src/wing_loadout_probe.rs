@@ -120,7 +120,7 @@ pub fn run(assets: &Assets, out: &Path) -> AppResult<()> {
         .find(|s| cheat.capacity(*s, &novelty) > 0)
         .ok_or("no cheat station")?;
     cheat.select(slot, novelty)?;
-    cheat.quantities[slot] = 1;
+    cheat.quantities[slot] = cheat.store_pairs(slot).step(1) as u16;
     cheat.validate()?;
     spec.loadout = Some(LoadoutSpec::of(&cheat));
     let world = World::new(&spec, data, Seating::SinglePlayer)?;

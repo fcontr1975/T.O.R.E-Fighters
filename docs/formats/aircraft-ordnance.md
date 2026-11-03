@@ -189,6 +189,49 @@ candidate guidance and hold decisions. A name, physical fit or imported JT
 never establishes implemented behavior. The per-aircraft gap counts above
 include only names with a positive normal capacity, not every catalog name.
 
+## Paired-point counts and physics
+
+Research review, 2026-10-25, using the FA.EXE, FA.SMS and FA_2.LIB identities
+above. The reviewed `HARDCanLoad` span below calculates one total capacity
+for the source row. Pair flag 0x4 does not multiply that capacity or its
+weight by two. `ArmPlane` creates one card per source ordinal. A paired
+point's maximum of 3 therefore means 3 stores for that aggregate row, not
+3 on each wing. The maximum can come from the weight quotient, rather than
+an odd `maxItems` in the PT record. This distinction matters for the Hornet.
+
+The [release-state evidence](weapons.md#release-state) reads the same row's
+remaining count to alternate the lateral release offset. Thus retail counts
+do have a release-side consequence, but do not establish a physical layout
+of loaded stores. John reports that retail did not render those pylons or
+stores. No retail execution or image comparison was performed in this pass.
+The old T.O.R.E right-extra layout was an inference from release alternation,
+not a recovered retail visualization rule.
+
+The user-owned manual, printed pp.17 and 59 (local transcription
+`.local/manual/manual.txt`, lines 1291-1316 and 3933-3942), describes
+individual-count editing, total aircraft/weapon/fuel weight, and performance
+penalties from ordnance weight and drag. It does not specify left/right
+mass, CG or drag. The requested `.local/missile-update/manual.txt` was absent;
+the existing manual transcription was used instead. AS-16 Kickback is a
+separate store from AGM-84A Harpoon (manual weapon table, printed p.129).
+
+The [reviewed flight loading](native-flight.md#force-assembly-now-translated)
+uses aggregate mass buckets selected by hardpoint flag 1, not left/right
+position, at `0x4516f2..0x451814`. Its loaded drag at `0x47a690/0x4784a0`
+uses load percentages. The documented equipment resolver at `0x452770`
+multiplies weapon quantity by weight, with pod/ammunition handling, and does
+not double a paired count. This supports aggregate row weight and drag,
+not a per-wing CG calculation, in the recovered path.
+
+**Unknown:** whether another retail flight path computes a lateral store
+moment or asymmetric drag. The reviewed loading, weight and release spans
+do not prove absence across the executable. Next research step: trace the
+flight consumers of the row quantities and `HARDStoreWeight`, specifically
+any lateral-offset multiplication feeding roll or yaw. T.O.R.E currently
+uses aggregate payload mass and aggregate load drag, with no store-CG term.
+The [even-paired-load contract](../spec/stores-on-pylons.md#even-paired-loads)
+is explicitly opinionated and does not depend on closing that research.
+
 ## Quantity, weight and pod follow-up
 
 HARDStoreWeight 0x452940..0x45296c dispatches type 7 to OBJECT weight +0x57,

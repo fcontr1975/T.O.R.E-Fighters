@@ -220,6 +220,8 @@ pub fn terrain() -> Terrain {
         },
         environment: Environment::default(),
         airport_scene: tore_sim::airport::Scene::default(),
+        placement_objects: Vec::new(),
+        placement_runways: Vec::new(),
         airfield_anchors: BTreeMap::new(),
         static_manifest: Vec::new(),
         catalog: vec![],

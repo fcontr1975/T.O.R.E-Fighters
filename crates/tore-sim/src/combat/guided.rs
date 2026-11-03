@@ -442,6 +442,8 @@ impl Advisory {
 /// read back by combat.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GuidedSight {
+    /// Shared bounded model result for powered weapons; None is the prior model.
+    pub energy_intercept: Option<bool>,
     pub kind: Guidance,
     /// The point the weapon would home on: the laser spot (own or a
     /// buddy's), the JDAM's point or the AT-2's target.

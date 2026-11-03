@@ -1011,8 +1011,8 @@ pub fn run() -> AppResult<()> {
             line(
                 t,
                 format_args!(
-                    "decoy {:?} missile {:#x} {record} from {owner:#x} chance {} roll {} decoyed {}",
-                    roll.kind, roll.projectile, roll.threshold, roll.roll, roll.decoyed
+                    "decoy {:?} missile {:#x} {record} from {owner:#x} chance {}/{} roll {} decoyed {}",
+                    roll.kind, roll.projectile, roll.threshold, roll.bound, roll.roll, roll.decoyed
                 ),
             );
         }

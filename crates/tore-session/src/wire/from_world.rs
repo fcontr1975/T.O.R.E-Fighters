@@ -274,8 +274,9 @@ fn targets_picture(world: &World) -> RenderSnapshot {
                     position: p.position,
                     previous: p.previous,
                     direction: p.direction,
-                    target: p.target,
-                    incoming: p.incoming.is_some(),
+                    // As the seat picture: an inert body keeps no target cue.
+                    target: p.target.filter(|_| p.threatening()),
+                    incoming: p.incoming.is_some() && p.threatening(),
                     speed_f8: p.speed_f8,
                     powered: state.motor_powered(p),
                 }

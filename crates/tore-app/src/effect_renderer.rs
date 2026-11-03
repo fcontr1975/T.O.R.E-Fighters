@@ -16,6 +16,7 @@
 //! (docs/spec/explosions.md, "Shockwave"). It is drawn from the effect and
 //! the mission's climate alone, so replays and every networked client show
 //! it too. The vapor and the lingering dust are `blast_climate`'s.
+use crate::gpu_setup::NamedSteps as _;
 pub mod cluster;
 
 use crate::camera::Camera;
@@ -1020,7 +1021,7 @@ impl EffectRenderer {
         bias: wgpu::DepthBiasState,
         layout: Option<&wgpu::PipelineLayout>,
     ) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Original explosion, fire and crater sprites"),
             layout,
             vertex: wgpu::VertexState {
@@ -1156,6 +1157,7 @@ impl EffectRenderer {
         camera: &Camera,
         world: &crate::terrain::Terrain,
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Effects);
         let eye = camera.position;
         // The fitted sprites and their glows do not depend on the camera:
         // made once per frame (after `prepare` and `fit_fires`), shared by
@@ -1192,6 +1194,7 @@ impl EffectRenderer {
         crate::sim_renderer::write_floats(queue, &self.buffer, 0, &instances);
     }
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Effects);
         if self.count == 0 {
             return;
         }
@@ -1201,6 +1204,7 @@ impl EffectRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.set_vertex_buffer(0, self.buffer.slice(..));
+        crate::frame_log::count(crate::frame_log::Count::Effects, self.count as usize);
         if self.flat_count > 0 {
             pass.set_pipeline(&self.flat_pipeline);
             pass.draw(0..6, 0..self.flat_count);

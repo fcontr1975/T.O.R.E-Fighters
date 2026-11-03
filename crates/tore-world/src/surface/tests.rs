@@ -692,7 +692,10 @@ fn each_airfield_takes_its_layout_side_and_ai_homes_follow_it() {
 fn an_automatic_ground_start_takes_the_nearest_own_airfield_15_nm_out() {
     use crate::mission::Start;
     let r = airfield_resources();
-    let mut spec = spec_with_enemy(&target("QUCITY", 3, 3, 2));
+    // This test measures field ranking, not support beside its synthetic runway.
+    let mut spec = spec_with_enemy(&target("QUCITY", 0, 0, 2));
+    // Ground starts keep their documented distance override.
+    spec.separation_nm = 300;
     spec.start = Start::GroundAuto {
         altitude_ft: 10_000,
     };
@@ -815,4 +818,80 @@ fn a_mission_with_no_target_gets_the_enemys_area_defenses() {
     let targeted = World::new(&with_target, &r, Seating::SinglePlayer).unwrap();
     assert!(targeted.terrain.surface.area.is_none());
     assert_eq!(layout::area::units(&targeted.terrain.surface).count(), 0);
+}
+
+/// Reuse checks the current separation and the final obstacles, not just raw layout.
+#[test]
+fn audit_front_recheck_agrees_with_independent_scene_builds() {
+    let resources = surface_resources();
+    let site = crate::terrain::SurfaceSite::load(&resources, THEATER).unwrap();
+    let overrides = Overrides {
+        city_fill: false,
+        ..Overrides::default()
+    };
+    let front = |surface: &Surface| {
+        surface
+            .units
+            .iter()
+            .filter(|u| u.id.range() == IdRange::FrontLine)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut matches = 0;
+    for seed in 1..=3 {
+        let mut target = target("QUCITY", 0, 0, seed);
+        target.separation_nm = 1;
+        let mut first = Terrain::for_mission_surface(
+            &resources,
+            THEATER,
+            Some(0),
+            &overrides,
+            Some(&target),
+            None,
+        )
+        .unwrap();
+        assert!(!front(&first.surface).is_empty());
+        for distance in [1, 2, 5, 10, 20, 50, 100, 200, 300] {
+            target.separation_nm = distance;
+            let raw = site
+                .place(&resources, &first.theater, Some(&target))
+                .unwrap();
+            let direct = Terrain::for_mission_surface(
+                &resources,
+                THEATER,
+                Some(0),
+                &overrides,
+                Some(&target),
+                None,
+            )
+            .unwrap();
+            let expected = front(&first.surface) == front(&direct.surface);
+            assert_eq!(
+                site.inspection_front_matches(&resources, &first, &raw),
+                expected,
+                "seed {seed}, separation {distance}"
+            );
+            if expected {
+                matches += 1;
+            }
+        }
+        // An airport replacement can block an earlier candidate even when the
+        // raw front has not moved. The cache must reject the stale final front.
+        let unit = front(&first.surface).remove(0);
+        first.placement_objects.push(layout::Placed {
+            id: 0xffff_fffe,
+            at: [i64::from(unit.position[0]), i64::from(unit.position[2])],
+            heading: 0,
+            footprint: layout::Footprint {
+                min: [-200, -200],
+                max: [200, 200],
+            },
+        });
+        target.separation_nm = 1;
+        let raw = site
+            .place(&resources, &first.theater, Some(&target))
+            .unwrap();
+        assert!(!site.inspection_front_matches(&resources, &first, &raw));
+    }
+    assert!(matches > 0, "must exercise reuse as well as rejection");
 }

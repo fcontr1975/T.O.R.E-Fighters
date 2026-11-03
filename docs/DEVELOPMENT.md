@@ -185,7 +185,7 @@ cargo run --locked -p tore-app -- --snapshot .local/exploration/menu.ppm
 cargo run --locked -p tore-app -- --snapshot .local/exploration/pref.ppm --snapshot-state pref
 ```
 
-The inventory records archive SHA-256 hashes, entry offsets, compression headers, and format counts without extracting everything. Snapshots render the native CPU menu canvas without a GPU/audio device; they are not window screenshots. States: `normal`, `hover`, `pressed`, `help`, `pref`, `multi`, and `controls`, `controls-keyboard`, `controls-mouse` and `controls-head` for the input configuration screen with a synthetic Xbox-layout gamepad, `controls-search` (the gamepad's actions searched for "fire") and `controls-search-keys` (keyboard actions on Shift keys), `graphics` for the Graphics options screen with the default settings (with no GPU to ask, it shows Off, 2x and 4x anti-aliasing as available and 8x as unavailable, and a 3840x2160 window for the render scale's sizes), `graphics-middle` and `graphics-bottom` with its list scrolled, `graphics-scale` with the render scale row focused, and `sound` for the Sound/Music Prefs dialog with sample levels and the swap switch at YES. `replays`, `replays-settings` and `replays-delete` show the Replays screen over a synthetic list of recordings (no recordings are read), with the auto-delete settings or the delete confirmation open. `bar-multi-hover`, `bar-replays-hover`, `bar-replays-pressed` and
+The inventory records archive SHA-256 hashes, entry offsets, compression headers, and format counts without extracting everything. Snapshots render the native CPU menu canvas without a GPU/audio device; they are not window screenshots. States: `normal`, `hover`, `pressed`, `help`, `pref`, `multi`, and `controls`, `controls-keyboard`, `controls-mouse` and `controls-head` for the input configuration screen with a synthetic Xbox-layout gamepad, `controls-search` (the gamepad's actions searched for "fire") and `controls-search-keys` (keyboard actions on Shift keys), `controls-inv` (the invert box's tooltip showing), `graphics` for the Graphics options screen with the default settings (with no GPU to ask, it shows Off, 2x and 4x anti-aliasing as available and 8x as unavailable, and a 3840x2160 window for the render scale's sizes), `graphics-middle` and `graphics-bottom` with its list scrolled, `graphics-scale` with the render scale row focused, and `sound` for the Sound/Music Prefs dialog with sample levels and the swap switch at YES. `replays`, `replays-settings` and `replays-delete` show the Replays screen over a synthetic list of recordings (no recordings are read), with the auto-delete settings or the delete confirmation open. `bar-multi-hover`, `bar-replays-hover`, `bar-replays-pressed` and
 `bar-replays-focus` inspect the main-menu top-bar alignment and highlight.
 Snapshots default to CHOOSEV for repeatability; `--background` overrides it. On macOS, convert for viewing with `sips -s format png .local/exploration/menu.ppm --out .local/exploration/menu.png`. Keep all resulting retail derivatives ignored.
 
@@ -208,7 +208,10 @@ the five `packages-*` artifacts from that run with `gh run download`
 master server, [operations](MASTER-SERVER.md#downloading-a-release); and the
 four `server-*` artifacts, the dedicated server's archives,
 [downloading it](DEDICATED-SERVER.md#downloading-it)).
-`workflow_dispatch` does the same once the workflow exists on `main`.
+`workflow_dispatch` does the same once the workflow exists on `main`. A
+dispatched run stamps `git describe` as the version, or the `version` input
+when one is given, so a test package can carry the coming release's number
+without a tag: `gh workflow run release.yml --ref BRANCH -f version=0.2.2-rc.1`.
 
 CI (`ci.yml`, Rust baseline, and `network.yml`, Network loopback) no longer runs
 on every push or pull request (John, 2026-10-23): the pre-push hook covers each
@@ -240,7 +243,7 @@ Build the release binaries first, stamping the same version the package will
 carry:
 
 ```sh
-TORE_BUILD_VERSION=0.2.1 cargo build --release --locked -p tore-app -p tore-extract
+TORE_BUILD_VERSION=0.2.2 cargo build --release --locked -p tore-app -p tore-extract
 ```
 
 CI and releases no longer build 32-bit Windows (dropped 2026-10-25). The
@@ -460,6 +463,8 @@ Linux, it also rejects a binary that needs a newer glibc than Ubuntu 22.04
 ships. It checks the build host, not every supported OS installation.
 `tools/check_startup_diagnostics.py EXECUTABLE` exercises success, returned
 errors and main/worker panics without media, using isolated paths with spaces.
+On Windows it also crashes the executable on purpose and checks the native crash
+report; elsewhere it checks that those modes say they are Windows only.
 Packaging runs it on staged binaries and on the actual payload recovered from
 the MSI, DMG, tar.gz and AppImage. MSI administrative extraction validates the
 payload without changing an installed product. Source and package asset scans
@@ -538,20 +543,70 @@ tore-app --diagnostics-self-test=worker-panic
 The three deliberate failures exit nonzero. `=graphics` presents a synthetic
 canvas through the first-run renderer and exits, requiring a display/GPU.
 `=dialog` deliberately displays the platform error message for manual checks.
+On Windows, `=native-crash` and `=stack-overflow` really crash the process and
+write the native crash report, and `=native-crash-window` does it from inside a
+window's redraw. Their exit status is the exception code. Elsewhere they exit
+nonzero with a message saying they are Windows only.
 Set `TORE_NO_ERROR_DIALOG=1` for unattended normal launches. On Windows, use
 `Start-Process -Wait -PassThru` when a script must wait for the release GUI exe
 and inspect its exit code; its stdout is not a visible console.
 
 If no session file appears in either the normal or fallback location, the
 process may have been blocked before its own code ran. Check installation,
-OS security messages and available system crash reports. Rust panic hooks do
-not catch native access violations or process kills. Windows Error Reporting,
-macOS Console crash reports and Linux journal/core reports provide separate
-OS evidence where enabled. Do not confuse these with a proven application
-cause. Share the timestamped fatal report and session log when reporting a
+OS security messages and available system crash reports. On Windows a native
+crash writes the same reports as a panic, naming the exception, the faulting
+module and offset, the stage and the last GPU step
+([contract](spec/startup-diagnostics.md#native-crashes-on-windows)); Linux and
+macOS do not report native crashes, and nothing catches a process kill. Windows
+Error Reporting, macOS Console crash reports and Linux journal/core reports provide
+separate OS evidence where enabled. Do not confuse these with a proven application
+cause.
+
+The log's last `GPU setup:` line names the shader or pipeline being created when
+the driver stopped. Repeating `Watchdog: still in stage` lines mean the process hung
+rather than crashed, since a crashed process stops writing. On Windows the player
+[chooses Vulkan or DirectX 12](spec/graphics-options.md#graphics-api) on the import
+screen or in Pref > Graphics, and a launch that finds the last one
+[did not finish graphics setup](spec/graphics-options.md#when-a-launch-did-not-finish-graphics-setup)
+asks first. `--graphics-api vulkan` or `dx12` chooses for one run,
+and `--graphics-api dx12 --diagnostics-self-test=graphics` checks DirectX 12 without
+game media. Share the timestamped fatal report and session log when reporting a
 startup problem; logs can contain local paths and device names.
 
 An editor with rust-analyzer is useful but optional. No global editor configuration is required.
+
+### Diagnosing slow frames
+
+In flight, open **Escape > Debug > Slow-frame log** and turn it on. Play
+through the slowdown, then send the current session log from the locations in
+[startup logs](#startup-logs-and-fatal-errors). It starts at a 50 ms threshold,
+is local to this session, and can be turned off with the same row. It does not
+change the graphics settings or keep a paused menu drawing.
+
+From a terminal, use `tore-app --frame-log` or `tore-app --frame-log 20`.
+`TORE_FRAME_LOG=on` or `TORE_FRAME_LOG=20` works too. `--frame-log off` overrides
+the environment. For an isolated developer run on a hidden workspace:
+
+```sh
+TORE_DATA_DIR=.local/dev-profile tools/agent-run.sh target/debug/tore-app --free-flight --no-audio --frame-log 1
+```
+
+The always-on `Session system` line describes the adapter, driver, presentation,
+CPU cores, worker pool and graphics settings. A software renderer warns that
+graphics run on the CPU. On Windows, update the graphics driver and select
+**High performance** for the game under **Settings > System > Display >
+Graphics** if the log reports software rendering or an integrated GPU while a
+discrete GPU is available.
+
+`Slow frame` lines split CPU wall time by existing work phases and waits, with
+counts and flight context. `idle_event_ms` includes frame pacing and focus
+throttling; `unaccounted_ms` shows the remaining gap. GPU time is from earlier
+work and AI is included in simulation/network. Counts distinguish placed
+instances from GPU visibility. Output is limited to ten slow lines per second,
+plus a suppressed count, with percentiles and worst phases every minute.
+See the [measurement contract](spec/startup-diagnostics.md#graphics-session-and-slow-frames)
+for exact boundaries and limitations. The existing 5 MiB session log cap still
+applies, so capture the slowdown soon after enabling it.
 
 ## Terrain development loop
 
@@ -1137,7 +1192,9 @@ The Quick Mission ground-target/AAA/SAM sentence is live: the target list is the
 theater's, the strengths read "not", "lightly", "moderately" and "heavily", and
 the mission text carries them (`ground-target`, `defenses`). The enemy-distance
 choices include 100 and 150 nautical miles between 50 and 200. `--separation`
-accepts the same choices. See the
+accepts the same choices; a creator snapshot or launch moves one its theater,
+target and start do not offer as the creator does ([the distance
+table](#quick-mission-distance-table)). See the
 [creator contract](spec/quick-mission-menu.md#ground-target-and-defenses).
 Preview a theater's target line or the distance list without a display:
 
@@ -1172,7 +1229,7 @@ placement limits and [future weapon passes](ROADMAP.md#weapon-catalog-update-pas
 In Load Ordnance click a catalog weapon then a compatible station, or drag between
 them. The weapon thumbnail follows the pointer. Drag from station to station
 to transfer ammunition, or from a station into the catalog to empty it.
-Left-click a loaded station to add one, or an empty station to load the selected
+Left-click a loaded station to add one (a pair on a paired station), or an empty station to load the selected
 catalog weapon. Tab changes selected station; +/- changes ammunition;
 right-click decrements.
 Fuel rocker edits 500 lb at a time. Successful edits play the original weapon,
@@ -1419,6 +1476,69 @@ bounded to 1..1,000,000 feet. Version-4 tapes record these commands, full world
 velocity and bay permission. Use fresh tape paths because recording never
 overwrites an existing file. [Missile acceptance](baselines/missiles.md).
 
+### Missile study
+
+`--missile-study OUT_DIR` (first argument) is a headless Monte Carlo of
+air-to-air shots for studying missile accuracy and countermeasures. No window
+opens. Each shot builds a fresh combat state: the shooter (`--shooter`, default
+F-16C) flies straight and level at 0.9 Mach, designates the target through its
+own radar, waits for its mounted IR seeker where there is one and fires the
+study missile through the player trigger; the real combat step flies the
+missile. The target (`--target`, default MiG-29, with its imported signatures,
+hit points and ECM record) is scripted, and each profile in `--profiles` names
+what it does: `straight`, `break` (7 G onto the missile's beam 3 to 5 seconds
+before impact), `beam` (5 G onto the radar source's beam after 1 to 3
+seconds), `drag` (5 G away from the missile), with devices `cm-ai` (the AI's
+two-device bursts every 2 seconds inside 6 seconds), `cm-hammer` (four a
+second from one second after launch until empty) or `cm-atNs` (one device N
+seconds before closest approach), joined with `+`. `dive` descends at 25 degrees
+to a 100 ft deck. `@idle` and `@burner` set constant engine heat; `@off` cuts
+heat after the seeded 1 to 3 s reaction delay, allowing an initial hot lock.
+Scripted speed is controlled independently, so this isolates the heat effect.
+Flares meet IR seekers and chaff radar seekers. Energy is the study default;
+`--missile-model spec` selects the historical comparison. Energy releases use
+the live physical-device scene and its actual one-roll-per-episode log.
+Scripted studies skip advisory prediction work, which cannot affect their
+player-triggered release or missile motion; AI studies retain it.
+`--ranges short,medium,long`, `--aspects head,quarter,beam,tail` (quarter is
+45 degrees from the tail heading), and `--altitudes deck,low,co,high,up,down` set the cells.
+Deck/low/co/high are 500/5000/15000/35000 ft for both aircraft; up/down retain
+the earlier unequal-altitude cases. Range bands retain the decoded historical
+values to make old/new study comparisons reproducible. Additional `near` and
+`close` bands use 0.25 and 0.5 nmi, each raised to 1.1 times the decoded launch
+minimum before the same range jitter, for studying physically reachable short
+shots. They are opt-in and do not change the historical bands. These are distinct
+from the public-anchor calibration sweep. `model.txt` records the selected
+rules and the model fingerprint (physical and motor data, derivation rules,
+force/drag curves, seeker and decoy source). `--seeds N` the shots per cell (range, aspect, speed and reaction time are
+jittered per seed, deterministically), `--threads N` the workers.
+`--ai [--skill novice|average|experienced|ace]` flies the same shots against
+the game's own AI on weapons hold in a fresh Quick Mission world instead, so
+it perceives, maneuvers and dispenses as in a mission; `--ai-model
+standard|hybrid` picks the single-player (default) or networked AI flight
+model and `--trace` prints the AI target's flight and defence every quarter
+second, plus every actual device release with its current closest-approach
+estimate, maneuver and passage flag. The AI study currently repeats its fixed countermeasure random stream across
+shots, so seed-to-seed hit counts are not independent survival samples. Use its
+G, heading and release-time traces to assess defensive control until that stream
+is replaced. `--decoy-model lure` is available only with `--missile-model spec` and is
+a what-if, not game behaviour: a decoyed missile steers for the device that
+decoyed it and bursts there instead of flying straight on. `--catalog` writes only
+`catalog.csv` and exits (each missile's decoy susceptibility, seeker and turn rates, each
+aircraft's dispensers). Output is `runs.csv`, one row per shot, and
+`cells.csv`, one row per cell with Wilson 95 percent intervals. Runs also
+record the first observed loss of control speed, ground impact and Energy
+seeker notch state while enabled and controlled (first time and total duration)
+separately;
+absence of an earlier control-loss sample does not prove a cause for an impact.
+AI trials explicitly reapply weapons hold after mission group objectives and
+attribute hits through the launched projectile's ledger outcome.
+
+```sh
+TORE_DATA_DIR=.local/dev-profile target/debug/tore-app --missile-study .local/study \
+  --missiles AIM9M,AIM120 --profiles straight,cm-ai,break+cm-ai --seeds 60
+```
+
 `--missile-sag --no-audio` measures coasting A2A and SAM motion without a window.
 Use a private profile copy. [Probe and battery contract](testing/lane-flight.md),
 [before/after measurements](baselines/missile-sag.md).
@@ -1517,6 +1637,11 @@ recovery phase and physical throttle/power/temperature. [Validation](baselines/a
 `--probe-ai-guns-only` restricts AI stores to their carried gun without changing
 the player script. It is useful for sustained [gun-employment checks](baselines/ai-gun-implementation.md). `--probe-trace SECONDS` also
 prints enemy observation sources, permission, target and incoming-fire cues. `--probe-fuel-trace SECONDS` prints one `AI fuel:` line per AI aircraft at that interval (tick, aircraft, fuel, endurance, time home, fuel state, activity). `--probe-fuel POUNDS` starts every AI aircraft with that much internal fuel, so a return on low fuel can be probed in a minute. `--probe-rotor-trace SECONDS` prints one `AI rotor:` line per AI helicopter or V-22 at that interval: height over the ground, speed, climb, pitch, bank, heading, nacelles, collective, rotor speed, the rotor adapter's regime and commanded heading, path, speed, climb and nacelles, the requested path, the terrain floor and the envelope maximum (slice HF1).
+Structural damage without a system fault also prints an `AI damage:` line,
+with its exact `damage_fraction`, so a damaged crash is not labeled undamaged.
+That value is the aircraft's damage before any crash: a ground impact sets
+the flight's damage to 1, which would otherwise hide an undamaged aircraft
+that flew into the ground.
 Every probe prints first visual acquisition, first release, first gun/hit defense
 and peak bank for each enemy.
 
@@ -1815,6 +1940,139 @@ of dome turn apart). Both read `TORE_DATA_DIR`, like `--blast-preview`
 
 ## Surface unit inspection
 
+### Quick Mission objective placement audit
+
+Creator snapshots honor `--separation`. With no `--ground-target`, an explicit
+`--defenses AAA SAM` sets the area defenses; each strength is a number from 0 to 3.
+`--surface-seed` fixes the preview's layout. Normal defaults stay unchanged.
+
+Run the complete CPU surface matrix against an isolated imported profile:
+
+```sh
+TORE_DATA_DIR=.local/dev-profile python3 tools/objectives_audit.py --output .local/objective-audit --seeds 3 --supplemental
+```
+
+Build `tore-app` first with `cargo build --locked -p tore-app`. The runner does
+not build or open a window. The application can write its usual logs and city
+cache inside the selected profile. The runner retains every command's log,
+exit status and a complete `findings.tsv` table. Each table row names the theater,
+separation, template, both defense strengths, seed, object, position in feet and
+rule. Use a new output directory to preserve a previous run. Add `--theater UKR`
+(repeatable) to restrict theaters. `--fast --seeds 1` selects the first target, the first airport/strip target when different,
+and no-target area defenses in each theater, with the four matched strengths.
+The battery scenario `surface-objectives-audit` uses that subset in Ukraine and
+the Falklands. It compares independent ceilings for slope, runway clearance,
+object clearance, terrain class and bounds, so an improvement does not fail the
+scenario. The 264-case regression gate now requires zero generated-support footprint
+slope failures and zero for every other contract category. Zero-error and
+reported-error exits are both inspected. Passing this
+scenario does not certify authored shoreline or assembly overlaps.
+
+The `menus-snap-quick-target-ground-distances` scenario verifies all eleven distance
+choices in a ground-target runway start and launches its 300 nm setup. CPU Quick
+Mission snapshots honor `--ground-start`, including when it selects the creator
+without an explicit `--quick-mission`. Their `quick-snapshot` line records the
+actual start mode and selectable distances. The same regression verifies that
+an explicit airport 9 remains Odesa after choosing a target; the target's added
+Automatic row must not shift it to the preceding airport (L'viv, airport 8).
+
+The `surface-objectives-cache-kuril` scenario exercises all 4,224 Kuril cases
+and independently rebuilds two silo setups where equal raw fronts previously
+hid a different final front at another separation. It compares full scene digests,
+covering both a newly available front and a moved retained front.
+
+The underlying command is `--surface-dump --objectives [--seeds N] [--fast]
+[THEATER ...]`. The full matrix uses every offered non-empty template plus area
+defenses without a target, all sixteen AAA/SAM strength pairs, seeds 1 through
+N, and all eleven values from the game's separation list. Every case goes through
+the real surface resolver and placer, including the front line. Checks use the
+completed airport scene and its foundations. Identical object layouts reuse
+geometry checks only after comparing their complete placement inputs and
+repeating the final front pass against its exact integer obstacles at the current
+separation. Starts are recomputed from the repaired target; canonical field ranks
+are retained from the built scene because they do not depend on separation.
+`--uncached` rebuilds and checks every scene directly. The battery compares both modes' cases, findings and digests.
+The first distance repeats the raw placement for every strength pair, and the
+zero-defense scene for every template and seed, to check determinism. The table
+includes authored positions that older sweeps exempt.
+
+A `placement-refused` row also records every setup the normal launch guard would
+refuse for placement, including authored vehicles and retained front groups.
+Distance refusals remain separate.
+
+Checks cover map bounds, terrain class at the center and conservative footprint
+corners, per-vehicle footprint grades, separate runway and object clearance,
+legacy 256 ft cell-corner slope findings, rotated footprint overlap,
+route segments sampled every 250 ft, IDs and resolved template counts, missing
+layout additions, truck reach, the start/objective distances, final target
+centroids, shape-bottom clearance through shared grounding, ship waterlines and
+city-fill contact at unit centers. Horizontal
+footprint overlap is a review finding, not proof of solid-mesh collision: a road,
+bridge, airport assembly or hollow structure can intentionally share that area.
+The class query is the placement grid with texture coverage, not a pixel-by-pixel
+coastline. Route findings do not certify painted-road alignment or simulate
+turning, lanes and movement. Surface Y coordinates are authored offsets above
+support, not absolute world heights.
+
+Separation means Blue to Red, within 0.02 nm for integer rounding. Red can be
+5 nm from the target, so the objective-distance check allows 5.02 nm. A diagnostic shortened
+candidate marks a distance that the creator must not offer; mission launch refuses
+that distance instead of using the candidate.
+Ground starts override separation. The command reports strict findings separately
+from placement-contract errors; it fails on the latter. Thus a zero exit status
+is not a claim that every row is clear.
+
+`--supplemental` also runs `--surface-dump --objective-starts` through the full
+mission builder with five exact F/A-18D aircraft in each of six wings, every
+listed target, distance and seed at 20,000 ft. It checks final aircraft bounds
+and terrain clearance, actual separation, CAP regions and intercept/escort
+references, and exercises Strike role assignment. Every available runway also
+runs the five-aircraft ground-layout checks, with both sides' automatic choices
+reported; refusals remain explicit in the log. It then runs the existing grounding-sites, airport,
+parked-aircraft and merged-airport audits. These supplemental geometry audits
+have their own sampling scopes and logs; they are not the full surface matrix.
+The measured results are in the [objective placement baseline](baselines/objectives-audit.md).
+
+### Quick Mission distance table
+
+The creator's Distance list and the dedicated server read a fixed table of the
+enemy distances each theater, ground target and start offers
+(`crates/tore-world/src/mission_layout/distance_table_data.rs`, read through
+`distance_table.rs`). It is generated, never edited by hand, with the launch
+solver (`mission_layout::availability`) against an imported profile:
+
+```sh
+cargo build --locked -p tore-app
+TORE_DATA_DIR=<imported profile> TORE_WORKERS=0 nice -n 19 target/debug/tore-app \
+  --qmc-distance-table --jobs 4 --write crates/tore-world/src/mission_layout/distance_table_data.rs
+```
+
+The run is headless and takes about six minutes with six jobs on the
+development machine (each target's 64 layouts dominate). It prints one line per
+theater (the airborne row, each situation's, the ground row and every offered
+airfield's) and per target (its row and the largest distance each seed
+reached), marks a row with a hole in it `GAP`, and lists the layout
+limitations with the seeds that had them. A limitation every seed has becomes
+the target's note, which the creator shows while the target is chosen.
+`--write` needs all sixteen theaters. Options: `--jobs N` (1 to 8 worker
+threads, default 4), `--seeds N` (default 64, the table's), theater codes to
+measure only those, `--check` to fail when the checked-in table differs from
+the measurement, and `--measure` to time one creator setting change before the
+table (the placement audit) and after (a lookup). The ignored test
+`qmc_distance_table::tests::the_checked_in_table_matches_a_fresh_measurement`
+checks the Kurile and Ukraine rows:
+`TORE_DATA_DIR=<profile> cargo test -p tore-app qmc_distance -- --ignored`.
+
+Regenerate the table after any change to the start geometry, the map margin,
+the separation list, the creator's airfields or the surface layout of a target,
+and commit the data file with the change. The measured table and its rules are
+in the [distance table baseline](baselines/qmc-distance-table.md).
+No aircraft or surface AI is stepped by the new audit. Retail gameplay comparison
+is unavailable, and these checks do not establish retail parity.
+
+
+### Surface dumps and captures
+
 `--surface-dump` prints a theater's surface units as a mission resolves and
 places them ([surface defenses](spec/surface-defenses.md)): each unit's id,
 type, side, position, destroyed look and whether the scene can draw it (added
@@ -1930,6 +2188,40 @@ plus the three unused Ukraine templates, both authored and seed 1 relocated, at 
 coverage, missing geometry, footing exceptions and before/after clearance.
 `surface-grounding-sites` runs it in the battery. The separate
 `surface-grounding-radar-render` scenario captures a radar objective offscreen.
+
+`--bridge-audit OUT_DIR [LAYOUT ...] [--strict] [--capture]` reads only the
+imported pack and writes `assets.tsv`, `placements.tsv` and `banks.tsv`.
+The bank table measures excavation and constructed approach grades; strict
+audits reject cuts over 1 ft, grades over 8.1 percent (rounding tolerance)
+and END road toes more than 30 ft above terrain. By default it
+checks all 75 layouts plus every offered template that names bridge pieces
+(heavy defenses, seed 1, ordinary placement). Named layouts limit the run.
+The tables record every bridge's deck/ramp samples, endpoint clearances,
+physical feet of the connected assembly versus ground, sea-plane clearance, source orientation and
+nearby object overlap candidates. `--strict` fails for buried decks, unknown
+decks, support gaps over 30 ft or missing assets. Sampling is at most 64 ft;
+road/river artwork alignment and candidate overlaps still need visual review.
+
+`--capture` renders every bridge intact and destroyed with the existing
+scene renderer, plus half-health appearance for the first of each type.
+Optional `--view=side`, `--view=along` or `--view=near` selects a bridge
+inspection angle; `--id=40000082,40000092` limits captures to those IDs
+without narrowing the numeric audit.
+It checks that bridge geometry remains present and that live HP and replay
+HP produce identical geometry, positive HP retains intact art, and zero HP
+changes the drawn geometry. `bridge-end-ruins` covers all four END types in
+the battery. This uses the GPU and must run through
+`tools/agent-run.sh`. Keep the output outside tracked directories. Example:
+
+```sh
+TORE_DATA_DIR=.local/dev-profile target/debug/tore-app --bridge-audit .local/bridges --strict
+TORE_DATA_DIR=.local/dev-profile tools/agent-run.sh target/debug/tore-app --bridge-audit .local/bridge-images UKR --capture --strict
+```
+
+The battery's `bridge-audit` checks Ukraine and the Baltics, including the
+sloping crossings and bridge objectives. `a2g-bridge-destruction` fires a
+Maverick broadside at the Ukraine span and verifies its recorded damage and
+effect snapshots. [Behavior and limitations](spec/bridges.md).
 
 `--surface-scene OUT_DIR THEATER STEM` renders a ground target as the game
 draws it, offscreen at 1080p (no window): it steps the whole world
@@ -2201,3 +2493,20 @@ directory, first with the previous default-wing policy and then with sharing.
 It asserts the accepted load survives airborne and ground starts and restart.
 The battery scenario is `qmc-wing-loadout`. This probe requires imported media
 but no display; do not point it at a shared profile.
+
+### Missile motor calibration and prediction cost
+
+The offline `missile_energy_ranges LOCAL_JT_DIRECTORY --fit-pair` example
+prints candidate fuel fractions, drag and both anchor residuals; it never
+writes runtime data. An optional comma-separated source list limits the fit.
+The default sweep prints physical and seeker-valid ranges including the
+500-foot deck case. Conditions and data provenance live in the
+[missile energy data](formats/missile-energy-data.md) and
+[baseline](baselines/missile-energy.md).
+
+The release `missile_energy_cost PACK TICKS THEATER moving WEAPON STATIONS`
+example accepts `--natural` for real AI launch clients, `--big` for 23+ AI,
+and `--spec` for the historical missile comparison. Without `--natural` it
+uses Hold, eight AI and sixteen replenished synthetic missiles; jettisoned
+tanks do not count toward those sixteen. The alive guard applies to that
+injected fixture, while natural fights retain real damage and casualties.

@@ -57,7 +57,7 @@ fn player_roll(roll: &live::DecoyRoll) -> DecoyRoll {
         draw: Some(tore_sim::ai::Draw {
             site: Some("decoy roll"),
             location: std::panic::Location::caller(),
-            bound: 100,
+            bound: u32::from(roll.bound),
             value: u32::from(roll.roll),
             offset: 0,
             threshold: Some(u32::from(roll.threshold)),
@@ -173,6 +173,32 @@ mod tests {
     }
 
     #[test]
+    fn fine_chaff_chances_keep_their_units_in_recordings() {
+        for (value, succeeded) in [(129, true), (130, false)] {
+            let roll = player_roll(&live::DecoyRoll {
+                aircraft: 0,
+                projectile: 12,
+                kind: live::EffectKind::Chaff,
+                device: 9,
+                susceptibility: 50,
+                effectiveness: 35,
+                threshold: 130,
+                bound: 10000,
+                roll: value,
+                decoyed: succeeded,
+            });
+            let draw = roll.draw.unwrap();
+            assert_eq!(draw.bound, 10000);
+            assert_eq!(draw.passed(), Some(succeeded));
+            let event = super::super::why::decoyed_event(&roll, Some(1));
+            assert_eq!(
+                event.num(tore_replay::vocab::field::ROLL_BOUND),
+                Some(10000.)
+            );
+            assert_eq!(event.num(tore_replay::vocab::field::THRESHOLD), Some(130.));
+        }
+    }
+    #[test]
     fn a_players_roll_reads_as_the_ai_rolls_do() {
         let roll = player_roll(&live::DecoyRoll {
             aircraft: 0,
@@ -182,6 +208,7 @@ mod tests {
             susceptibility: 70,
             effectiveness: 60,
             threshold: 42,
+            bound: 100,
             roll: 17,
             decoyed: true,
         });

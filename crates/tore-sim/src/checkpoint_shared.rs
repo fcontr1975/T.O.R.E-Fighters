@@ -345,6 +345,7 @@ crate::checkpoint_struct!(GunTarget {
 crate::checkpoint_enum!(crate::combat::missiles::Rules {
     Compatibility = 0,
     Spec = 1,
+    Energy = 2,
 });
 
 // A pilot's controls, as an AI actor last flew them (`AiActor::last_input`,

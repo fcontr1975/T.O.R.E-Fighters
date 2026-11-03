@@ -8,6 +8,11 @@
 > the original's internals, it is out of date.
 > <!-- tore-header v2 -->
 
+Energy rules use the shared [physical decoy and episode contract](missile-energy.md#countermeasure-contract).
+The recovered controls, ammunition and dispenser schedule below remain; the
+per-device fitted evaluation describes the preserved earlier weapon rules.
+The hit-time jammer and damage asymmetry are unchanged by energy flight.
+
 Research and implementation, 2026-09-26. Build: reviewed FA.EXE 1.02F, SHA-256
 `e31560c2a6d6adb4aa1493f0308f6ae5640f67a4e886dbdf5887489e6e99244c`. Evidence
 is static disassembly. Nothing was run and no retail session was observed.

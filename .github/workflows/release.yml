@@ -12,6 +12,16 @@ on:
     branches:
       - 'release-test/**'
   workflow_dispatch:
+    inputs:
+      skip_macos:
+        description: 'Skip the macOS jobs, when the Mac runner is in use'
+        type: boolean
+        required: false
+        default: false
+      version:
+        description: 'Build version for a test package (e.g. 0.2.2-rc.1); empty uses git describe'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -28,11 +38,7 @@ jobs:
         # on older distributions. There is no 32-bit Windows package since
         # 2026-10-25 (John). An entry may still name a `target` to cross-build;
         # such a job skips the dedicated server.
-        include:
-          - os: macos-14
-          - os: macos-15-intel
-          - os: ubuntu-22.04
-          - os: windows-2022
+        include: ${{ fromJSON(inputs.skip_macos && '[{"os":"ubuntu-22.04"},{"os":"windows-2022"}]' || '[{"os":"macos-14"},{"os":"macos-15-intel"},{"os":"ubuntu-22.04"},{"os":"windows-2022"}]') }}
     # TORE_SELF_HOSTED, a repository variable, lists the platforms that run on
     # the project's own machines instead of GitHub's (docs/CI-RUNNERS.md).
     runs-on: ${{ contains(vars.TORE_SELF_HOSTED, matrix.os) && fromJSON(format('["self-hosted","tore-{0}"]', matrix.os)) || matrix.os }}
@@ -101,9 +107,13 @@ jobs:
           fi
       - name: Stamp the build version
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             version="${GITHUB_REF_NAME#v}"
+          elif [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
           else
             version="$(git describe --tags --always)"
           fi
@@ -176,16 +186,16 @@ jobs:
       # WiX 3.14 install on the windows-2022 image alongside WixUIExtension.
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tools/package/package-linux.sh
+        run: tools/package/package-linux.sh --version "$TORE_BUILD_VERSION"
       # The script requires a bundle seal and strict signature verification
       # both before packaging and inside the mounted DMG. Any failure stops CI.
       - name: Package and verify ad-hoc signatures (macOS)
         if: runner.os == 'macOS'
-        run: tools/package/package-macos.sh
+        run: tools/package/package-macos.sh --version "$TORE_BUILD_VERSION"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: tools/package/package-windows.ps1
+        run: tools/package/package-windows.ps1 -Version $env:TORE_BUILD_VERSION
 
       - name: Upload packages
         uses: actions/upload-artifact@v7
@@ -262,7 +272,7 @@ jobs:
 
   release:
     needs: package
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && !inputs.skip_macos
     runs-on: ubuntu-24.04
     permissions:
       contents: write

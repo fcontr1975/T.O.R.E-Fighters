@@ -336,6 +336,41 @@ fn a_taken_plane_keeps_its_flight_stores_and_damage() {
     assert_consistent(&world);
 }
 
+/// Refitting the same number of stores while a human holds an AI plane
+/// changes its picture when it goes back, even if its configuration reuses
+/// the old map entry's address. The render cache must not keep the old shape.
+#[test]
+fn a_refitted_plane_given_back_draws_its_new_stores() {
+    let mut world = armed_mission();
+    for shape in ["SYNTH-A.SH", "SYNTH-B.SH"] {
+        world.take_plane(SeatId(1), WING_LEAD).unwrap();
+        let own = world.combat.state.ownship(1).unwrap();
+        let mut config = own.configuration().clone();
+        let side = own.side;
+        config.stations[0].weapon.source = "SYNTH.JT".into();
+        config.stations[0].weapon.shape = Some(shape.into());
+        config.stations[0].count = 1;
+        config.stations[0].rack.location = 4;
+        config.hardpoint_slots = vec![Some(0)];
+        world.combat.state.remove_ownship(1);
+        world
+            .combat
+            .state
+            .add_ownship(live::Ownship::new(1, side, config, true).unwrap())
+            .unwrap();
+        world.give_back_plane(SeatId(1)).unwrap();
+        fly(&mut world, &[0], 1);
+        let drawn = world
+            .combat
+            .render_snapshot()
+            .targets
+            .iter()
+            .find(|p| p.id == 1)
+            .unwrap();
+        assert_eq!(drawn.stores[0].shape.as_deref(), Some(shape));
+    }
+}
+
 /// A plane a human gives back keeps the same, and the AI flies it on.
 #[test]
 fn a_plane_given_back_keeps_its_flight_stores_and_damage() {

@@ -231,7 +231,11 @@ crate::checkpoint_struct!(GroundLook {
 
 // The type facts the ground pages read of a ground object.
 type GroundListing = super::GroundListing;
-crate::checkpoint_struct!(GroundListing { flags, max_visible });
+crate::checkpoint_struct!(GroundListing {
+    flags,
+    max_visible,
+    team,
+});
 
 type ParkedSite = super::ParkedSite;
 crate::checkpoint_struct!(ParkedSite {
@@ -461,6 +465,7 @@ crate::checkpoint_struct!(RangeEstimate {
     station,
     target,
     mode,
+    minimum,
     maximum,
     favorable,
 });
@@ -536,6 +541,8 @@ crate::checkpoint_struct!(Ownship {
     release_readiness,
     cockpit,
     mounted,
+    heat,
+    energy_hit,
     bore_observation,
     mounted_key,
     range_estimate,
@@ -547,6 +554,7 @@ crate::checkpoint_struct!(Ownship {
     sight_hold,
     friendlies,
     painted_by,
+    spotted_teams,
     harm_cue,
     emitters,
     missile_threats,
@@ -581,6 +589,7 @@ impl Checkpoint for State {
             weapon_rules,
             ownships,
             projectiles,
+            ended_missile_threats,
             targets,
             ownship_rows,
             actor_support,
@@ -593,6 +602,18 @@ impl Checkpoint for State {
             sound_events,
             smoke,
             devices,
+            energy_devices,
+            energy_seed,
+            energy_predictions,
+            energy_predictions_enabled,
+            measure_prediction_cost: _,
+            prediction_cpu_clock: _,
+            prediction_cpu_cost_ns: _,
+            prediction_cost_ns: _,
+            prediction_request_ns: _,
+            prediction_request_cpu_ns: _,
+            prediction_gate_samples: _,
+            prediction_player_samples: _,
             // Why-record: the releases for a recording, drained by the host.
             device_log: _,
             // Why-record: the decoy rolls for a recording, drained by the host.
@@ -637,6 +658,7 @@ impl Checkpoint for State {
         weapon_rules.save(s, None)?;
         ownships.save(s, None)?;
         projectiles.save(s, None)?;
+        ended_missile_threats.save(s, None)?;
         targets.save(s, None)?;
         ownship_rows.save(s, None)?;
         actor_support.save(s, None)?;
@@ -649,6 +671,10 @@ impl Checkpoint for State {
         sound_events.save(s, None)?;
         smoke.save(s, None)?;
         devices.save(s, None)?;
+        energy_devices.save(s, None)?;
+        energy_seed.save(s, None)?;
+        energy_predictions.save(s, None)?;
+        energy_predictions_enabled.save(s, None)?;
         debris.save(s, None)?;
         ledger.save(s, None)?;
         target_jammer.save(s, None)?;
@@ -698,6 +724,7 @@ impl Checkpoint for State {
             weapon_rules,
             ownships,
             projectiles: Checkpoint::load(l, None)?,
+            ended_missile_threats: Checkpoint::load(l, None)?,
             targets: Checkpoint::load(l, None)?,
             ownship_rows: Checkpoint::load(l, None)?,
             actor_support: Checkpoint::load(l, None)?,
@@ -710,6 +737,18 @@ impl Checkpoint for State {
             sound_events: Checkpoint::load(l, None)?,
             smoke: Checkpoint::load(l, None)?,
             devices: Checkpoint::load(l, None)?,
+            energy_devices: Checkpoint::load(l, None)?,
+            energy_seed: Checkpoint::load(l, None)?,
+            energy_predictions: Checkpoint::load(l, None)?,
+            energy_predictions_enabled: Checkpoint::load(l, None)?,
+            measure_prediction_cost: false,
+            prediction_cpu_clock: None,
+            prediction_cpu_cost_ns: None,
+            prediction_cost_ns: 0,
+            prediction_request_ns: 0,
+            prediction_request_cpu_ns: 0,
+            prediction_gate_samples: [0; 3],
+            prediction_player_samples: [0; 3],
             device_log: VecDeque::<DeviceNote>::new(),
             decoy_log: VecDeque::<DecoyRoll>::new(),
             ground_bursts: Vec::new(),

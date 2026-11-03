@@ -7,7 +7,11 @@
 //! core can use it. The geometry functions are plain functions of numbers, so
 //! every rule can be tested with synthetic bounds and runways.
 
-use crate::terrain::Terrain;
+pub mod availability;
+pub mod distance_table;
+pub mod seed_retry;
+
+use crate::{mission::Situation, terrain::Terrain};
 use tore_sim::{
     ai::airfield::AirfieldAnchors,
     airport::{ApproachEnd, Runway},
@@ -626,20 +630,40 @@ pub struct MissionLayout {
     /// target and is kept, and the enemy group alone turns toward Red's
     /// start, as on a ground start (agent decision, 2026-10-10).
     pub held_heading: bool,
+    /// The creator's situation as it applies here: the mission's for an
+    /// airborne start whose enemy the separation places, neutral when the
+    /// player starts on the ground or a ground target placed the enemy.
+    pub situation: Situation,
+}
+
+/// The situation a start honours: an airborne start with no ground target
+/// placing the enemy. Elsewhere it means nothing and the start is neutral
+/// (agent decision, 2026-10-28: a parked wing cannot be on anyone's tail,
+/// and a target's template already decides where the enemy waits).
+pub fn effective_situation(situation: Situation, ground_start: bool, placed: bool) -> Situation {
+    if ground_start || placed {
+        Situation::Neutral
+    } else {
+        situation
+    }
 }
 
 impl MissionLayout {
     /// Plan a mission around `start`, the player's pose before any ground
     /// placement (a ground start takes the leader's runway slot instead).
-    /// `group` is every enemy aircraft's offset from the enemy placement
-    /// point ([`crate::ai_wings::enemy_group_offsets`]).
+    /// `wings` are the mission's wings; the enemy ones are kept on the map
+    /// ([`crate::ai_wings::enemy_group_offsets`]) where `situation` puts
+    /// them ([`effective_situation`]).
     pub fn plan(
         world: &Terrain,
         start: &tore_sim::flight::State,
         ground: Option<GroundLayout>,
-        group: &[[f64; 2]],
+        wings: &[tore_sim::ai::launch::WingLaunch],
         separation_ft: f64,
+        situation: Situation,
     ) -> Self {
+        let situation =
+            effective_situation(situation, ground.is_some(), world.surface.starts.is_some());
         let (reference, heading) = match &ground {
             Some(g) => ([g.slots[0][0], g.slots[0][2]], g.heading),
             None => ([start.position[0], start.position[2]], start.yaw),
@@ -658,7 +682,13 @@ impl MissionLayout {
                     requested_ft: distance_ft,
                 }
             }
-            None => aim_into_map(reference, heading, separation_ft, group, map_bounds(world)),
+            None => aim_into_map(
+                reference,
+                heading + situation_bearing(situation),
+                separation_ft,
+                &crate::ai_wings::enemy_group_offsets(wings, situation),
+                map_bounds(world),
+            ),
         };
         let held_heading = ground.is_none() && world.surface.starts.is_some();
         Self {
@@ -671,6 +701,7 @@ impl MissionLayout {
             enemy_ground: None,
             enemy,
             held_heading,
+            situation,
         }
     }
 
@@ -691,6 +722,7 @@ impl MissionLayout {
                 0.
             },
             runway_slots: self.ground.as_ref().map(GroundLayout::offsets),
+            situation: self.situation,
         }
     }
 
@@ -703,6 +735,16 @@ impl MissionLayout {
                 self.enemy.requested_ft / FEET_PER_NM
             )
         })
+    }
+}
+
+/// The bearing of the enemy group's placement point from the player's
+/// heading, radians clockwise: ahead, or behind in a disadvantage.
+pub fn situation_bearing(situation: Situation) -> f64 {
+    if situation == Situation::Disadvantage {
+        std::f64::consts::PI
+    } else {
+        0.
     }
 }
 
@@ -976,6 +1018,7 @@ mod placement_tests {
             player_turn: aim.turn,
             enemy: aim,
             held_heading: false,
+            situation: Situation::Neutral,
         };
         let plan = airborne.spawn_plan();
         assert_eq!(plan.enemy_turn, 0.);
@@ -991,6 +1034,7 @@ mod placement_tests {
             player_turn: 0.,
             enemy: EnemyAim::straight(5. * FEET_PER_NM),
             held_heading: false,
+            situation: Situation::Neutral,
         };
         assert!(parked.notice().is_none());
         let parked = MissionLayout {
@@ -1002,9 +1046,120 @@ mod placement_tests {
         assert_eq!(plan.runway_slots.unwrap(), ground.offsets());
         // Planning from the runway uses the leader's slot and runway heading.
         let start = tore_sim::flight::State::new(&crate::test_support::profile(), [0.; 3]).unwrap();
-        let planned = MissionLayout::plan(&world, &start, Some(ground), &[], 1000.);
+        let planned =
+            MissionLayout::plan(&world, &start, Some(ground), &[], 1000., Situation::Neutral);
         assert_eq!(planned.player_turn, 0.);
         assert_eq!(planned.enemy, EnemyAim::straight(1000.));
+    }
+
+    /// Each enemy aircraft's start for `situation`, seen from a player
+    /// starting near the north edge of a 60 by 60 cell map facing north:
+    /// the player's turned heading, and every enemy's position and heading.
+    fn situation_starts(situation: Situation) -> (f64, Vec<([f64; 3], f64)>, MapBounds) {
+        use crate::ai_wings::mission_spawns;
+        use tore_sim::attitude::Basis;
+        let mut world = crate::test_support::terrain();
+        world.theater.cols = 60;
+        world.theater.rows = 60;
+        let bounds = map_bounds(&world);
+        let mut start =
+            tore_sim::flight::State::new(&crate::test_support::profile(), [0.; 3]).unwrap();
+        start.position = [30. * 8192., 9000., bounds.max[1] - 5. * FEET_PER_NM];
+        start.yaw = 0.;
+        let mut spec =
+            crate::mission::MissionSpec::new("UKR", tore_formats::aircraft::AircraftId::F18);
+        spec.wings[3].count = 3;
+        spec.wings[4].count = 2;
+        spec.wings[5].count = 5;
+        let wings = spec.wing_launches().unwrap();
+        let layout =
+            MissionLayout::plan(&world, &start, None, &wings, 20. * FEET_PER_NM, situation);
+        assert_eq!(layout.situation, situation);
+        assert!(!layout.enemy.shortened());
+        let heading = start.yaw + layout.player_turn;
+        let basis = Basis::new(heading, 0., 0.);
+        let enemies = mission_spawns(&wings, &layout.spawn_plan())
+            .into_iter()
+            .filter(|spawn| spawn.opposing)
+            .map(|spawn| {
+                let (position, basis) = spawn.pose(start.position, basis);
+                (position, basis.forward[0].atan2(basis.forward[2]))
+            })
+            .collect();
+        (heading, enemies, bounds)
+    }
+
+    /// Degrees of `angle` folded into -180 to 180.
+    fn degrees(angle: f64) -> f64 {
+        (angle.to_degrees() + 540.).rem_euclid(360.) - 180.
+    }
+
+    #[test]
+    fn the_situation_puts_the_enemy_ahead_head_on_ahead_going_away_or_behind() {
+        // (situation, the enemy lead's bearing from the player's nose, the
+        // enemy's heading relative to the player's).
+        for (situation, bearing, heading) in [
+            (Situation::Neutral, 0., 180.),
+            (Situation::Advantage, 0., 0.),
+            (Situation::Disadvantage, 180., 0.),
+        ] {
+            let (player, enemies, bounds) = situation_starts(situation);
+            let start = [30. * 8192., bounds.max[1] - 5. * FEET_PER_NM];
+            let (lead, _) = enemies[0];
+            let to = [lead[0] - start[0], lead[2] - start[1]];
+            assert!((to[0].hypot(to[1]) - 20. * FEET_PER_NM).abs() < 1e-6);
+            assert!(
+                degrees(to[0].atan2(to[1]) - player - f64::to_radians(bearing)).abs() < 1e-6,
+                "{situation:?}: the lead bears {} from the nose",
+                degrees(to[0].atan2(to[1]) - player)
+            );
+            for (position, own) in &enemies {
+                assert!(
+                    degrees(own - player - f64::to_radians(heading)).abs() < 1e-6,
+                    "{situation:?}: heading {}",
+                    degrees(own - player)
+                );
+                assert!(
+                    bounds.contains(position[0], position[2]),
+                    "{situation:?} off the map"
+                );
+            }
+            // Five miles from the north edge, 20 miles ahead or behind does
+            // not fit facing north: the whole scene turned.
+            if situation != Situation::Disadvantage {
+                assert!(
+                    degrees(player).abs() > 30.,
+                    "{situation:?} kept heading north"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ground_start_or_a_placed_enemy_is_neutral_whatever_the_situation() {
+        for situation in Situation::ALL {
+            assert_eq!(
+                effective_situation(situation, true, false),
+                Situation::Neutral
+            );
+            assert_eq!(
+                effective_situation(situation, false, true),
+                Situation::Neutral
+            );
+            assert_eq!(effective_situation(situation, false, false), situation);
+        }
+        let world = airfield(6000.);
+        let ground = ground_layout(&world, RUNWAY, 1).unwrap();
+        let start = tore_sim::flight::State::new(&crate::test_support::profile(), [0.; 3]).unwrap();
+        let planned = MissionLayout::plan(
+            &world,
+            &start,
+            Some(ground),
+            &[],
+            1000.,
+            Situation::Disadvantage,
+        );
+        assert_eq!(planned.spawn_plan().situation, Situation::Neutral);
     }
 }
 #[cfg(test)]

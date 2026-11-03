@@ -38,6 +38,7 @@ pub use record::DecoyRoll;
 mod release;
 mod reports;
 mod strike;
+mod strike_reach;
 mod takeover;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -70,7 +71,7 @@ use tore_sim::{
     sensors::{self, Observable, Sensors},
 };
 
-use crate::{WorldResult, resources::ResourceSource, terrain::Terrain};
+use crate::{WorldResult, mission::Situation, resources::ResourceSource, terrain::Terrain};
 use tore_sim::flight;
 
 fn terrain_visible(from: Vector, to: Vector, ground: &dyn Fn(f64, f64) -> f64) -> bool {
@@ -101,7 +102,10 @@ pub const PLAYER_ID: u32 = 0;
 /// 512 ft spacing, level with the player. Friendly wing 1 occupies slots
 /// behind the player. Wings 2 and 3 start 4096 ft behind and respectively
 /// 4096 ft left and right. Enemy leaders start at the selected separation,
-/// with wings 2 and 3 offset 4096 ft left and right, facing the player.
+/// with wings 2 and 3 offset 4096 ft left and right. The creator's situation
+/// ([`Situation`]) decides where and which way: ahead facing the player
+/// (neutral), ahead flying away from it (advantage) or behind it flying the
+/// player's heading (disadvantage).
 /// Original Quick Mission spawn geometry is unknown. These offsets make the
 /// selected allies nearby instead of placing them in the enemy group.
 ///
@@ -113,7 +117,11 @@ pub const PLAYER_ID: u32 = 0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MissionSpawn {
     pub offset: Vector,
+    /// The member flies for the enemy side.
     pub opposing: bool,
+    /// The member starts facing back toward the player's group: its heading
+    /// is the player's turned half a circle (an enemy in a neutral start).
+    pub head_on: bool,
     /// Clockwise rotation about the reference point, radians.
     pub turn: f64,
     /// Departure order when this member starts on the runway.
@@ -136,7 +144,7 @@ impl MissionSpawn {
         });
         let heading = yaw
             + self.turn
-            + if self.opposing {
+            + if self.head_on {
                 std::f64::consts::PI
             } else {
                 0.0
@@ -155,6 +163,10 @@ pub struct SpawnPlan {
     /// Runway slots for the player's wing as [right, forward] offsets from
     /// the player's slot, leader first. `None` is an airborne start.
     pub runway_slots: Option<Vec<[f64; 2]>>,
+    /// Who is on whose tail: where the airborne enemy wings start and which
+    /// way they face. Always neutral when the layout placed the enemy by a
+    /// ground target or the player starts on the ground.
+    pub situation: Situation,
 }
 
 impl SpawnPlan {
@@ -164,6 +176,7 @@ impl SpawnPlan {
             separation_ft,
             enemy_turn: 0.0,
             runway_slots: None,
+            situation: Situation::Neutral,
         }
     }
 }
@@ -198,6 +211,7 @@ pub fn mission_spawns_for(
                     return MissionSpawn {
                         offset: [*right, 0.0, *forward],
                         opposing,
+                        head_on: false,
                         turn: 0.0,
                         runway_order: Some(slot),
                         with_player: true,
@@ -214,17 +228,35 @@ pub fn mission_spawns_for(
                     2 => 4096.0,
                     _ => 0.0,
                 };
-                MissionSpawn {
-                    offset: if opposing {
-                        [lateral - offset[0], 0.0, plan.separation_ft - offset[2]]
-                    } else {
+                // An enemy facing the player mirrors its formation; one
+                // flying the player's heading keeps it, its wingmen trailing
+                // toward the player (advantage) or away (disadvantage).
+                let (offset, head_on) = match (opposing, plan.situation) {
+                    (false, _) => (
                         [
                             lateral + offset[0],
                             0.0,
                             offset[2] - if wing.wing.index == 0 { 0.0 } else { 4096.0 },
-                        ]
-                    },
+                        ],
+                        false,
+                    ),
+                    (true, Situation::Neutral) => (
+                        [lateral - offset[0], 0.0, plan.separation_ft - offset[2]],
+                        true,
+                    ),
+                    (true, Situation::Advantage) => (
+                        [lateral + offset[0], 0.0, plan.separation_ft + offset[2]],
+                        false,
+                    ),
+                    (true, Situation::Disadvantage) => (
+                        [lateral + offset[0], 0.0, offset[2] - plan.separation_ft],
+                        false,
+                    ),
+                };
+                MissionSpawn {
+                    offset,
                     opposing,
+                    head_on,
                     turn: if opposing { plan.enemy_turn } else { 0.0 },
                     runway_order: None,
                     with_player: player_wing,
@@ -235,14 +267,25 @@ pub fn mission_spawns_for(
 }
 
 /// Every enemy aircraft's offset from the enemy group's placement point, as
-/// [right, forward] in the player's frame with the enemy straight ahead. The
-/// placement point itself is always included, so the map check never passes
-/// an empty group.
-pub fn enemy_group_offsets(wings: &[WingLaunch]) -> Vec<[f64; 2]> {
-    let mut offsets: Vec<[f64; 2]> = mission_spawns(wings, &SpawnPlan::airborne(0.0))
+/// [right, forward] in the frame whose forward axis points from the player to
+/// that point: straight ahead of the player, or straight behind it in a
+/// disadvantage. The placement point itself is always included, so the map
+/// check never passes an empty group.
+pub fn enemy_group_offsets(wings: &[WingLaunch], situation: Situation) -> Vec<[f64; 2]> {
+    let plan = SpawnPlan {
+        situation,
+        ..SpawnPlan::airborne(0.0)
+    };
+    // Behind the player the frame is the player's turned half a circle.
+    let sign = if situation == Situation::Disadvantage {
+        -1.0
+    } else {
+        1.0
+    };
+    let mut offsets: Vec<[f64; 2]> = mission_spawns(wings, &plan)
         .into_iter()
         .filter(|spawn| spawn.opposing)
-        .map(|spawn| [spawn.offset[0], spawn.offset[2]])
+        .map(|spawn| [sign * spawn.offset[0], sign * spawn.offset[2]])
         .collect();
     if !offsets.is_empty() && !offsets.contains(&[0.0, 0.0]) {
         offsets.push([0.0, 0.0]);
@@ -577,10 +620,12 @@ pub(crate) fn station_specs_loaded(
         // The reviewed default inventory owns the record used at release.
         spec.debit = u32::from(w.burst.actual_rounds_per_game).max(1);
         // A rocket pod's weight is the full pod's: each rocket takes its share.
+        // The same carried mass as a player's loadout (`carried_weight_lb`),
+        // so one loadout weighs the same under the AI and a human.
         spec.external_round_lbs = if station.internal || w.source == "SUU16.JT" {
             0.0
         } else {
-            f64::from(w.weight.max(0)) / f64::from(live::pod_rounds(w))
+            w.carried_weight_lb() / f64::from(live::pod_rounds(w))
         };
         // Fitted: one representative projectile per release, as in
         // the player live adapter. The source ammunition debit remains separate.
@@ -631,7 +676,19 @@ fn hovers(flight: &flight::State) -> bool {
 
 /// Jet throttle is a heat input. Rotor collective is not engine heat; retain
 /// the existing observation (including a handoff's engine snapshot).
-fn aircraft_heat(flight: &flight::State, previous: seeker::Heat) -> seeker::Heat {
+pub(crate) fn energy_heat(flight: &flight::State, previous: seeker::Heat) -> seeker::Heat {
+    if hovers(flight) {
+        seeker::Heat::Engine {
+            on: flight.engine,
+            throttle: 1.,
+            afterburner: false,
+        }
+    } else {
+        aircraft_heat(flight, previous)
+    }
+}
+
+pub(crate) fn aircraft_heat(flight: &flight::State, previous: seeker::Heat) -> seeker::Heat {
     if hovers(flight) {
         previous
     } else {
@@ -745,6 +802,18 @@ pub struct AiWings {
     fault_random: tore_sim::ai::DecisionRandom,
     /// Projectile ids already turned into threat reports.
     seen_projectiles: BTreeSet<u32>,
+    /// How far each kind of surface missile may be launched at a
+    /// helicopter (its threat rings), worked out once per kind: a fixed
+    /// function of the records, never checkpointed.
+    rotor_reach: crate::surface::rotor_reach::RotorReach,
+    /// Each guided store's time of flight to a ground target (a
+    /// helicopter's stand-off advance), by record and whether the energy
+    /// rules fly it: a fixed function of the record, never checkpointed.
+    flight_times: BTreeMap<(String, bool), Option<tore_sim::ai::strike::FlightTimes>>,
+    /// The answers on guided shots from farther out a striker plans a
+    /// stand-off release with (John, 2026-10-29), by record, launch band and
+    /// range step: a fixed function of the record, never checkpointed.
+    shot_cache: std::sync::Arc<strike_reach::ShotCache>,
     /// Projectile id to the actor that fired it, for B47 attribution. The
     /// player's shots are absent; the bridge remembers its own launchers.
     ai_shots: BTreeMap<u32, u32>,
@@ -928,6 +997,8 @@ pub struct Departure {
 /// What the AI needs to know about the theater's airfields at launch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Airfields {
+    /// Map bounds used to clip creator CAP regions. Setup, retained on restore.
+    pub patrol_bounds: Option<[[f64; 2]; 2]>,
     pub runways: Vec<HomeRunway>,
     /// Present when the player's wing starts on the ground.
     pub departure: Option<Departure>,
@@ -971,6 +1042,7 @@ impl Airfields {
             }
         }
         Self {
+            patrol_bounds: None,
             runways,
             departure,
             enemy_departure: None,
@@ -980,6 +1052,13 @@ impl Airfields {
     /// [`from_scene`](Self::from_scene) with each runway's airfield points.
     pub fn from_world(world: &Terrain, departure: Option<Departure>) -> Self {
         let mut fields = Self::from_scene(&world.airport_scene, departure);
+        fields.patrol_bounds = Some([
+            [0., 0.],
+            [
+                (world.theater.cols - 1) as f64 * 8192.,
+                (world.theater.rows - 1) as f64 * 8192.,
+            ],
+        ]);
         for runway in &mut fields.runways {
             runway.view.anchors = world.airfield_anchors.get(&runway.view.object).copied();
         }
@@ -1418,6 +1497,9 @@ impl AiWings {
             handed_tasking: Default::default(),
             fault_random: tore_sim::ai::DecisionRandom::seeded(0xfa17),
             seen_projectiles: BTreeSet::new(),
+            rotor_reach: Default::default(),
+            flight_times: BTreeMap::new(),
+            shot_cache: Default::default(),
             ai_shots: BTreeMap::new(),
             ejection_events: Vec::new(),
             chatter: Vec::new(),
@@ -2157,11 +2239,13 @@ impl AiWings {
         self.decoy_rolls.clear();
         self.weapon_rules = state.weapon_rules;
         self.mission
-            .set_missiles(if state.weapon_rules == Rules::Spec {
+            .set_missiles(if state.weapon_rules.uses_seeker() {
                 state.missile_snapshots(&human_launchers(state, &humans))
             } else {
                 Vec::new()
             });
+        self.mission
+            .end_missile_threats(state.ended_missile_threats());
         let ceiling = self
             .ground_ceiling
             .get_or_insert_with(|| std::sync::Arc::new(world.ground_ceiling()));
@@ -2188,6 +2272,7 @@ impl AiWings {
         gunship::step(self, state, &ground);
         // Aircraft on the researched flight model roll on runways and feel
         // the wind; legacy airborne actors keep the terrain-only surface.
+        self.prepare_energy_launches(state);
         let output = self.advance_on_ground(
             objects,
             &mut state.targets,
@@ -2517,7 +2602,11 @@ impl AiWings {
         let terrain_clear = |from, to| {
             ceiling.is_some_and(|c| c.clear_above(from, to)) || terrain_visible(from, to, ground)
         };
-        for projectile in state.projectiles.iter().filter(|p| p.age <= 30) {
+        for projectile in state
+            .projectiles
+            .iter()
+            .filter(|p| p.age <= 30 && p.threatening())
+        {
             let weapon = state.weapon(projectile);
             let gun = live::is_gun(weapon);
             if gun && !projectile.tracer {
@@ -3138,7 +3227,11 @@ impl AiWings {
             target.position = f.position;
             target.velocity = f.velocity;
             target.basis = Basis::new(f.yaw, f.pitch, f.bank);
-            target.heat = aircraft_heat(f, target.heat);
+            target.heat = if self.weapon_rules == Rules::Energy {
+                energy_heat(f, target.heat)
+            } else {
+                aircraft_heat(f, target.heat)
+            };
             target.radar_emitting = f.radar;
             target.on_ground = f.research.as_ref().is_some_and(|r| r.on_ground);
             target.wreck_power = f.wreck_power(target.wreck_power.engine_count.max(1));
@@ -3267,7 +3360,7 @@ impl AiWings {
             self.dropped_launches += event.projectiles;
             return 0;
         };
-        let profile = (self.weapon_rules == Rules::Spec)
+        let profile = (self.weapon_rules.uses_seeker())
             .then(|| missiles::Profile::for_weapon(weapon))
             .flatten();
         let guidance = profile.map(|profile| {
@@ -3315,7 +3408,9 @@ impl AiWings {
                 owner: event.actor,
                 weapon: Some(weapon.clone()),
                 guidance: guidance.clone(),
-                motion: profile.map(|_| Motion::launch(weapon, launch_velocity, origin[1])),
+                motion: profile.map(|_| {
+                    Motion::launch_rules(weapon, launch_velocity, origin[1], self.weapon_rules)
+                }),
                 guidance_ticks: profile.map(|p| p.guidance_ticks),
                 age: 0,
                 incoming,
@@ -3337,6 +3432,112 @@ impl AiWings {
             emitted += 1;
         }
         emitted
+    }
+
+    /// Missile kinematics are supplied by combat's bounded prediction service.
+    /// This changes neither the defense controller nor the dispense schedule.
+    fn prepare_energy_launches(&mut self, state: &mut live::State) {
+        for actor in self.mission.actors_mut() {
+            let id = actor.id();
+            let launcher = crate::combat::launcher(actor.flight());
+            let observed = actor
+                .current_target()
+                .and_then(|id| actor.sensors()?.observation(id))
+                .map(|o| seeker::Observation {
+                    id: o.id,
+                    position: o.position,
+                    velocity: o.velocity,
+                    quality: 1.,
+                    range: missiles::length(missiles::sub(o.position, launcher.position)),
+                    off_axis: 0.,
+                });
+            for station in actor.stations_mut() {
+                let Some(w) = self.weapons.get(&(id, station.station.0)) else {
+                    continue;
+                };
+                if !station.guided || w.movement.fuel_t <= w.movement.ignite_t {
+                    continue;
+                }
+                let mut mount = launcher;
+                mount.position = std::array::from_fn(|i| {
+                    launcher.position[i]
+                        + launcher.basis.right[i] * station.mount[0]
+                        + launcher.basis.up[i] * station.mount[1]
+                        + launcher.basis.forward[i] * station.mount[2]
+                });
+                if state.weapon_rules == Rules::Energy {
+                    station.energy_target = Some(None);
+                    station.maximum_range_ft = None;
+                    if let Some(zone) = &mut station.employment_zone {
+                        zone.maximum_range = i32::MAX;
+                    }
+                    if let Some(o) = observed {
+                        state.request_energy_solution(
+                            id,
+                            usize::from(station.station.0),
+                            w,
+                            mount,
+                            o,
+                        );
+                        if state
+                            .energy_solution(id, usize::from(station.station.0), w, mount, o)
+                            .is_some()
+                        {
+                            station.energy_target = Some(Some(o.id));
+                        }
+                    }
+                } else if station.energy_target.take().is_some() {
+                    station.maximum_range_ft = Some(f64::from(w.seeker.zones[1].maximum_range));
+                    if let Some(zone) = &mut station.employment_zone {
+                        zone.maximum_range = w.seeker.zones[1].maximum_range;
+                    }
+                }
+            }
+            if state.weapon_rules == Rules::Energy
+                && let Some(config) = self.configs.get(&id)
+                && let Some(cockpit) = state.strike_cockpit(id)
+                && cockpit.armed
+                && let Some(w) = config.stations.get(cockpit.selected).map(|s| &s.weapon)
+                && w.movement.fuel_t > w.movement.ignite_t
+                && tore_sim::combat::guided::kind(w).is_some()
+            {
+                let station = cockpit.selected;
+                // The already-owned laser/sight point, not a hidden aircraft.
+                let kind = tore_sim::combat::guided::kind(w).unwrap();
+                let point = if kind == tore_sim::combat::missiles::Guidance::Laser {
+                    cockpit.laser.point
+                } else {
+                    match cockpit.target {
+                        Some(live::StrikeTarget::Point(point)) => Some(point),
+                        Some(live::StrikeTarget::Object(target)) => state
+                            .targets
+                            .iter()
+                            .find(|t| t.id == target)
+                            .map(|t| t.position),
+                        None => None,
+                    }
+                };
+                if let Some(point) = point {
+                    state.request_energy_solution(
+                        id,
+                        station,
+                        w,
+                        launcher,
+                        seeker::Observation {
+                            id: u32::MAX,
+                            position: point,
+                            velocity: state.guided_point_velocity(
+                                id,
+                                tore_sim::combat::guided::kind(w).unwrap(),
+                            ),
+                            quality: 1.,
+                            range: missiles::length(missiles::sub(point, launcher.position)),
+                            off_axis: 0.,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn realise_device(
@@ -3378,6 +3579,17 @@ impl AiWings {
             // The number this device was given, which each roll below is
             // against.
             let device = state.devices.released();
+            if state.weapon_rules == Rules::Energy {
+                state.energy_devices.effectiveness(
+                    event.actor,
+                    match event.class {
+                        SeekerClass::Infrared => missiles::decoys::Kind::Flare,
+                        SeekerClass::Radar => missiles::decoys::Kind::Chaff,
+                    },
+                    effectiveness,
+                );
+                continue;
+            }
             // The seeker and decoy chance of each round, from the weapon it
             // carries, so no particular ownship is needed.
             let seekers: Vec<(u8, u8)> = state
@@ -3781,6 +3993,7 @@ mod tests {
             separation_ft: 60_000.,
             enemy_turn: std::f64::consts::FRAC_PI_2,
             runway_slots: Some(vec![[0., 0.], [40., -250.], [-40., -500.]]),
+            situation: Situation::Neutral,
         };
         let spawns = mission_spawns(&wings, &plan);
         assert_eq!(spawns.len(), 5);
@@ -3803,9 +4016,74 @@ mod tests {
         assert_eq!(straight[0].runway_order, None);
         // The map check sees every enemy aircraft relative to its placement
         // point.
-        let group = enemy_group_offsets(&wings);
+        let group = enemy_group_offsets(&wings, Situation::Neutral);
         assert_eq!(group, [[0., 0.], [-512., 512.]]);
-        assert!(enemy_group_offsets(&ground_wings()[..2]).is_empty());
+        assert!(enemy_group_offsets(&ground_wings()[..2], Situation::Neutral).is_empty());
+    }
+
+    #[test]
+    fn the_situation_turns_and_places_the_enemy_formation() {
+        use crate::mission::Situation;
+        let wings = ground_wings();
+        let player = [0., 9000., 0.];
+        let north = Basis::new(0., 0., 0.);
+        let separation = 30_000.;
+        for (situation, lead_z, wingman, faces_north) in [
+            // Head-on: ahead, wingman farther away, facing south.
+            (
+                Situation::Neutral,
+                separation,
+                [-512., separation + 512.],
+                false,
+            ),
+            // On the enemy's tail: ahead, its wingman trailing toward us.
+            (
+                Situation::Advantage,
+                separation,
+                [512., separation - 512.],
+                true,
+            ),
+            // The enemy on ours: behind, its wingman trailing farther back.
+            (
+                Situation::Disadvantage,
+                -separation,
+                [512., -separation - 512.],
+                true,
+            ),
+        ] {
+            let plan = SpawnPlan {
+                situation,
+                ..SpawnPlan::airborne(separation)
+            };
+            let spawns = mission_spawns(&wings, &plan);
+            let enemy: Vec<_> = spawns.iter().filter(|s| s.opposing).collect();
+            assert_eq!(enemy.len(), 2);
+            let (lead, basis) = enemy[0].pose(player, north);
+            assert_eq!([lead[0], lead[2]], [0., lead_z], "{situation:?}");
+            assert_eq!(
+                enemy[1].offset,
+                [wingman[0], 0., wingman[1]],
+                "{situation:?}"
+            );
+            assert_eq!(basis.forward[2] > 0.9, faces_north, "{situation:?}");
+            // Friendly spawns never change with the situation.
+            assert!(spawns.iter().filter(|s| !s.opposing).all(|s| !s.head_on));
+            // The map check sees the same group from its placement point,
+            // in the frame that points from the player to it.
+            let group = enemy_group_offsets(&wings, situation);
+            let sign = if situation == Situation::Disadvantage {
+                -1.
+            } else {
+                1.
+            };
+            for spawn in &enemy {
+                let relative = [sign * spawn.offset[0], sign * (spawn.offset[2] - lead_z)];
+                assert!(
+                    group.contains(&relative),
+                    "{situation:?}: {relative:?} in {group:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3887,6 +4165,7 @@ mod tests {
         let pad = runway_view(7, [0., 30., 3000.]);
         let field = runway_view(9, [0., 10., 30_000.]);
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![HomeRunway {
                 view: field,
                 friendly: true,
@@ -3936,6 +4215,7 @@ mod tests {
             separation_ft: 60_000.,
             enemy_turn: 0.,
             runway_slots: Some(runway_slots.clone()),
+            situation: Situation::Neutral,
         };
         let spawns = mission_spawns_for(&wings, &plan, false);
         assert_eq!(spawns.len(), 5);
@@ -3949,6 +4229,7 @@ mod tests {
         let departure_runway = runway_view(7, [0., 30., 3000.]);
         let slots = vec![[0., 30., 1100.], [40., 30., 850.], [-40., 30., 600.]];
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![HomeRunway {
                 view: departure_runway,
                 friendly: true,
@@ -3992,6 +4273,7 @@ mod tests {
         let red_runway = runway_view(8, [0., 10., 90_000.]);
         let slots = vec![[0., 10., 88_000.], [40., 10., 87_750.]];
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![
                 HomeRunway {
                     view: runway_view(7, [0., 30., 3000.]),
@@ -4045,6 +4327,7 @@ mod tests {
         let departure_runway = runway_view(7, [0., 30., 3000.]);
         let slots = vec![[0., 30., 1100.], [40., 30., 850.], [-40., 30., 600.]];
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![
                 HomeRunway {
                     view: departure_runway,
@@ -5336,6 +5619,7 @@ mod tests {
         use tore_sim::ai::route::FuelState;
         let runway = runway_view(9, [0., 10., 2_400_000.]);
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![HomeRunway {
                 view: runway,
                 friendly: true,
@@ -5417,6 +5701,7 @@ mod tests {
     fn fuel_wings(home_ft: f64) -> (AiWings, Vec<live::Target>) {
         let runway = runway_view(9, [0., 10., home_ft]);
         let airfields = Airfields {
+            patrol_bounds: None,
             runways: vec![HomeRunway {
                 view: runway,
                 friendly: true,

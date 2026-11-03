@@ -61,6 +61,24 @@ impl Access {
         }
     }
 }
+/// The internal fuel after a click on the fuel row: up a tenth of the tanks
+/// and, from full, round to a tenth; or, backward, down a tenth and, from
+/// the lowest, round to full.
+fn turn_fuel(load: &Loadout, forward: bool) -> f64 {
+    let full = load.internal_capacity_lbs;
+    let tenth = full * 0.1;
+    if forward {
+        if load.fuel_lbs >= full {
+            tenth
+        } else {
+            (load.fuel_lbs + tenth).min(full)
+        }
+    } else if load.fuel_lbs <= tenth + 1e-6 {
+        full
+    } else {
+        (load.fuel_lbs - tenth).max(tenth)
+    }
+}
 fn row(label: String) -> MenuNode {
     MenuNode {
         label,
@@ -328,12 +346,7 @@ impl Menu {
                     Err(e) => self.message = Some(e.to_string()),
                 }
             } else if index == order.len() {
-                candidate.fuel_lbs = if candidate.fuel_lbs >= candidate.internal_capacity_lbs {
-                    candidate.internal_capacity_lbs * 0.1
-                } else {
-                    (candidate.fuel_lbs + candidate.internal_capacity_lbs * 0.1)
-                        .min(candidate.internal_capacity_lbs)
-                };
+                candidate.fuel_lbs = turn_fuel(&candidate, true);
             } else if let Some(&station) = order.get(index) {
                 self.open_station(station, data, spec);
                 return Outcome::Click;
@@ -343,6 +356,32 @@ impl Menu {
                 Ok(()) => self.load = candidate,
                 Err(e) => self.message = Some(e.to_string()),
             }
+        }
+        self.refresh();
+        Outcome::Click
+    }
+    /// The right button on a row: the Internal fuel row steps back a tenth,
+    /// wrapping from the lowest to full, as the left button steps up and
+    /// wraps from full to a tenth. The station rows open a list, the
+    /// aircraft and bottom buttons are commands; none of them turn.
+    fn select_back(
+        &mut self,
+        index: usize,
+        data: &BTreeMap<String, Vec<u8>>,
+        spec: &MissionSpec,
+    ) -> Outcome {
+        if self.widget.root == 1 || self.picker.is_some() {
+            return Outcome::None;
+        }
+        if index != self.load.station_display_order().len() {
+            return Outcome::None;
+        }
+        self.message = None;
+        let mut candidate = self.load.clone();
+        candidate.fuel_lbs = turn_fuel(&candidate, false);
+        match self.check(&candidate, data, spec) {
+            Ok(()) => self.load = candidate,
+            Err(e) => self.message = Some(e.to_string()),
         }
         self.refresh();
         Outcome::Click
@@ -649,6 +688,19 @@ impl Menu {
         let event = self.widget.pointer(&self.shell(), &LOOK, point, down);
         self.event(event, data, spec)
     }
+    /// The right button, which turns the fuel row back.
+    pub fn right_pointer(
+        &mut self,
+        point: Option<(f64, f64)>,
+        down: bool,
+        data: &BTreeMap<String, Vec<u8>>,
+        spec: &MissionSpec,
+    ) -> Outcome {
+        match self.widget.right_pointer(&self.shell(), &LOOK, point, down) {
+            Some(index) => self.select_back(index, data, spec),
+            None => Outcome::None,
+        }
+    }
     pub fn preview_aircraft(&mut self) {
         if self.tree.len() > 1 {
             self.show_tab(1);
@@ -939,6 +991,28 @@ impl crate::App {
             return crate::menu::Action::None;
         };
         let outcome = menu.key(key, &self.theater_resources, spec);
+        self.respawn_outcome(outcome)
+    }
+    /// The right button over the respawn menu: the fuel row turns back.
+    pub(crate) fn respawn_right_pointer(
+        &mut self,
+        point: Option<(f64, f64)>,
+        down: bool,
+    ) -> crate::menu::Action {
+        if self.respawn_brief_open() {
+            return crate::menu::Action::None;
+        }
+        let Some(spec) = self.net.as_ref().and_then(|s| s.client.spec()) else {
+            return crate::menu::Action::None;
+        };
+        let Some(menu) = self
+            .net_flight
+            .as_mut()
+            .and_then(|f| f.respawn_menu.as_mut())
+        else {
+            return crate::menu::Action::None;
+        };
+        let outcome = menu.right_pointer(point, down, &self.theater_resources, spec);
         self.respawn_outcome(outcome)
     }
     pub(crate) fn respawn_pointer(
@@ -1436,6 +1510,50 @@ mod tests {
             menu.done(&data, &spec),
             Outcome::Done(AircraftId::Ac130, _)
         ));
+    }
+    #[test]
+    fn the_fuel_row_turns_up_on_a_click_and_down_on_a_right_click_wrapping_both_ways() {
+        let (data, spec) = setup();
+        let mut menu = Menu::new(
+            AircraftId::F18,
+            vec![],
+            &data,
+            &spec,
+            RevivalWeapons::Guns,
+            |_| false,
+        )
+        .unwrap();
+        let row = menu.load.station_display_order().len();
+        let full = menu.load.internal_capacity_lbs;
+        let tenth = full * 0.1;
+        menu.load.fuel_lbs = tenth;
+        // Down from the lowest wraps to full, then a tenth at a time.
+        assert!(matches!(
+            menu.select_back(row, &data, &spec),
+            Outcome::Click
+        ));
+        assert!((menu.load.fuel_lbs - full).abs() < 1e-6);
+        menu.select_back(row, &data, &spec);
+        assert!((menu.load.fuel_lbs - (full - tenth)).abs() < 1e-6);
+        // Up goes to full and wraps to the lowest.
+        menu.select(row, &data, &spec);
+        assert!((menu.load.fuel_lbs - full).abs() < 1e-6);
+        menu.select(row, &data, &spec);
+        assert!((menu.load.fuel_lbs - tenth).abs() < 1e-6);
+        // A part tenth steps down no lower than a tenth.
+        menu.load.fuel_lbs = tenth * 1.5;
+        menu.select_back(row, &data, &spec);
+        assert!((menu.load.fuel_lbs - tenth).abs() < 1e-6);
+        // The station rows, the aircraft list and the buttons do not turn.
+        let fuel = menu.load.fuel_lbs;
+        assert!(matches!(menu.select_back(0, &data, &spec), Outcome::None));
+        assert!(matches!(
+            menu.select_back(row + 1, &data, &spec),
+            Outcome::None
+        ));
+        assert_eq!(menu.load.fuel_lbs, fuel);
+        menu.widget.show_tab(1);
+        assert!(matches!(menu.select_back(row, &data, &spec), Outcome::None));
     }
     #[test]
     fn respawn_overlay_store_cycles_keep_the_host_loading_rules() {

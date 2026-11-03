@@ -111,30 +111,66 @@ fn target_pose_kept(
     }
 }
 
-/// An AI aircraft's drawn stores as last worked out, with what they were
-/// worked out from: the loadout (by identity) and the stations' loads.
+/// An AI aircraft's drawn stores and the inputs they were built from.
+/// Configurations can be replaced at the same address during a handoff, so
+/// addresses and aggregate counts cannot identify the drawn loadout.
 struct StoresEntry {
-    identity: (usize, AircraftId, usize, usize, u64),
+    config: live::Configuration,
     loads: Vec<crate::snapshot::StationStores>,
     poses: Arc<Vec<crate::snapshot::StorePose>>,
 }
 impl StoresEntry {
-    /// Where the loadout lives, which aircraft it is, how many stations and
-    /// tanks it has, and the total of their counts: a loadout that was
-    /// replaced or edited reads as another.
-    fn identity(config: &live::Configuration) -> (usize, AircraftId, usize, usize, u64) {
-        (
-            std::ptr::from_ref(config) as usize,
-            config.aircraft,
-            config.stations.len(),
-            config.tanks.len(),
-            config
-                .stations
-                .iter()
-                .map(|station| u64::from(station.count))
-                .chain(config.tanks.iter().map(|tank| u64::from(tank.quantity)))
-                .sum(),
-        )
+    /// Compares every loadout input read by `snapshot::store_poses_of`.
+    /// The unchanged path compares borrowed fields without building poses.
+    fn matches(
+        &self,
+        config: &live::Configuration,
+        loads: &[crate::snapshot::StationStores],
+    ) -> bool {
+        let old = &self.config;
+        self.loads == loads
+            && old.hardpoint_slots == config.hardpoint_slots
+            && old.stations.len() == config.stations.len()
+            && old.stations.iter().zip(&config.stations).all(|(a, b)| {
+                a.mount == b.mount
+                    && a.rack == b.rack
+                    && a.count == b.count
+                    && a.weapon.source == b.weapon.source
+                    && a.weapon.shape == b.weapon.shape
+                    && live::pod_rounds(&a.weapon) == live::pod_rounds(&b.weapon)
+            })
+            && old.tanks.len() == config.tanks.len()
+            && old.tanks.iter().zip(&config.tanks).all(|(a, b)| {
+                a.hardpoint == b.hardpoint
+                    && a.mount == b.mount
+                    && a.rack == b.rack
+                    && a.quantity == b.quantity
+                    && a.store.as_ref().map(|s| s.tank.fuel_weight)
+                        == b.store.as_ref().map(|s| s.tank.fuel_weight)
+            })
+    }
+
+    fn cached(
+        stored: &mut BTreeMap<u32, Self>,
+        id: u32,
+        config: &live::Configuration,
+        loads: Vec<crate::snapshot::StationStores>,
+    ) -> Arc<Vec<crate::snapshot::StorePose>> {
+        if let Some(entry) = stored.get(&id)
+            && entry.matches(config, &loads)
+        {
+            return entry.poses.clone();
+        }
+        let poses = Arc::new(crate::snapshot::store_poses_of(config, &loads));
+        stored.insert(
+            id,
+            Self {
+                config: config.clone(),
+                loads,
+                poses: poses.clone(),
+            },
+        );
+        poses
     }
 }
 
@@ -291,6 +327,10 @@ pub struct Combat {
     /// The mission's ground targets that have a combat row (the surface's
     /// 0x80 objects), for the target window's objective line. Setup.
     surface_targets: std::collections::BTreeSet<u32>,
+    /// The hidden shoulder-fired SAM teams: the surface's teams that are no
+    /// mission target, marked on their listings whenever the scene's targets
+    /// are registered (T.O.R.E opinionated, John 2026-10-29). Setup.
+    ground_teams: std::collections::BTreeSet<u32>,
     /// The contact volume weapons meet for each scene object whose differs
     /// from its shape's box: a runway's pavement ([`weapon_contact`]). Setup.
     weapon_boxes: BTreeMap<u32, tore_sim::airport::OrientedBox>,
@@ -670,6 +710,15 @@ impl Combat {
             crate::ai_wings::outcome::ground_targets(&terrain.surface, &self.state)
                 .into_iter()
                 .collect();
+        self.ground_teams = terrain
+            .surface
+            .arsenal
+            .units
+            .iter()
+            .filter(|arms| arms.team && !self.surface_targets.contains(&arms.unit.0))
+            .map(|arms| arms.unit.0)
+            .collect();
+        mark_teams(&mut self.state, &self.ground_teams);
         Ok(())
     }
     /// Registers `scene`'s objects as combat targets with the sides the last
@@ -697,6 +746,7 @@ impl Combat {
         for (parked, _) in &self.parked {
             staged.add_parked_aircraft(parked)?;
         }
+        mark_teams(&mut staged, &self.ground_teams);
         self.state = staged;
         self.airport_objects = scene.objects.clone();
         self.weapon_boxes = weapon_boxes;
@@ -736,6 +786,7 @@ impl Combat {
             live::GroundListing {
                 flags: object.type_flags,
                 max_visible: object.max_visible.clamp(0, i32::from(u16::MAX)) as u16,
+                team: false,
             },
         );
         Ok(())
@@ -796,11 +847,14 @@ impl Combat {
         ))
     }
     fn with_state(
-        state: live::State,
+        mut state: live::State,
         contrail_offsets: Vec<Vector>,
         range: bool,
         initial_ammo: Option<Vec<u16>>,
     ) -> Self {
+        // New worlds select the approved energy rules. The lower-level State
+        // constructor remains Spec for historical tools and unmarked tapes.
+        state.weapon_rules = tore_sim::combat::missiles::Rules::Energy;
         Self {
             contrail_offsets,
             contrail_sortie: 0,
@@ -818,6 +872,7 @@ impl Combat {
             surface: Default::default(),
             parked: Vec::new(),
             surface_targets: Default::default(),
+            ground_teams: Default::default(),
             weapon_boxes: BTreeMap::new(),
             triggers: BTreeMap::new(),
             ownship_contrails: BTreeMap::new(),
@@ -946,24 +1001,7 @@ impl Combat {
             // another.
             let mut stored = ai_stores.lock().unwrap_or_else(|e| e.into_inner());
             for (id, config, loads) in ai_station_stores(wings) {
-                let identity = StoresEntry::identity(config);
-                let entry = match stored.get(&id) {
-                    Some(entry) if entry.identity == identity && entry.loads == loads => {
-                        entry.poses.clone()
-                    }
-                    _ => {
-                        let poses = Arc::new(crate::snapshot::store_poses_of(config, &loads));
-                        stored.insert(
-                            id,
-                            StoresEntry {
-                                identity,
-                                loads,
-                                poses: poses.clone(),
-                            },
-                        );
-                        poses
-                    }
-                };
+                let entry = StoresEntry::cached(&mut stored, id, config, loads);
                 if let Ok(index) = actors.binary_search_by_key(&id, |actor| actor.id) {
                     actors[index].stores = Some(entry);
                 }
@@ -1171,8 +1209,8 @@ impl Combat {
                 position: p.position,
                 previous: p.previous,
                 direction: p.direction,
-                target: p.target,
-                incoming: p.incoming.is_some(),
+                target: p.target.filter(|_| p.threatening()),
+                incoming: p.incoming.is_some() && p.threatening(),
                 speed_f8: p.speed_f8,
                 powered: self.state.motor_powered_with(weapon, p),
             };
@@ -1754,6 +1792,7 @@ impl Combat {
         self.last_launcher = Some(l);
         self.terrain_tti.clear();
         let weapon_rules = self.state.weapon_rules;
+        let energy_seed = self.state.energy_seed();
         let friendly_fire = self.state.friendly_fire;
         let host = if self.open {
             self.state = live::State::open_mission();
@@ -1773,6 +1812,7 @@ impl Combat {
             Some(aircraft)
         };
         self.state.weapon_rules = weapon_rules;
+        self.state.set_energy_seed(energy_seed);
         self.state.friendly_fire = friendly_fire;
         if weapon_rules == tore_sim::combat::missiles::Rules::Compatibility {
             self.record_tape("compatibility-weapons", l);
@@ -1818,6 +1858,7 @@ impl Combat {
             let contact = self.weapon_boxes.get(&object.id).copied();
             Self::register_airport_object(&mut self.state, object, contact, side, look)?;
         }
+        mark_teams(&mut self.state, &self.ground_teams);
         for (parked, _) in &self.parked {
             self.state.add_parked_aircraft(parked)?;
         }
@@ -2036,7 +2077,11 @@ impl Combat {
                 self.last_launcher = Some(l);
                 self.record_tape(if held { "fire" } else { "tick" }, l);
             }
+            let energy = self.state.weapon_rules == tore_sim::combat::missiles::Rules::Energy;
             if let Some(own) = self.state.ownship_mut(aircraft) {
+                if energy {
+                    own.heat = crate::ai_wings::energy_heat(s, own.heat);
+                }
                 own.note_loaded();
             }
             if s.airburst()
@@ -2284,6 +2329,58 @@ impl Combat {
 mod tests {
     use super::*;
 
+    #[test]
+    fn inert_body_remains_visible_without_incoming_or_target_cues() {
+        let (mut combat, flight) = fixtures::loaded([500, 3]);
+        combat.state.weapon_rules = tore_sim::combat::missiles::Rules::Energy;
+        let own = combat.own_id();
+        combat.state.own_mut().selected = 1;
+        let l = launcher(&flight);
+        combat.state.command(own, live::Command::Incoming, l);
+        let p = &mut combat.state.projectiles[0];
+        // The rendering fixture's named missile starts as a gun record.
+        // Give this capability test an actual synthetic guided weapon.
+        let w = p.weapon.as_mut().unwrap();
+        w.source = "AIM120.JT".into();
+        w.flags = 0x1204f;
+        w.seeker.signature = 3;
+        p.target = Some(own);
+        p.motion = Some(tore_sim::combat::missiles::Motion::launch_rules(
+            p.weapon.as_ref().unwrap(),
+            [0., 0., -1000.],
+            p.position[1],
+            tore_sim::combat::missiles::Rules::Energy,
+        ));
+        assert!(
+            !combat
+                .cockpit_readout(own, l, None, None)
+                .unwrap()
+                .rwr
+                .inbound
+                .is_empty()
+        );
+        let p = &mut combat.state.projectiles[0];
+        p.motion
+            .as_mut()
+            .unwrap()
+            .energy
+            .as_mut()
+            .unwrap()
+            .flight
+            .defeated = true;
+        assert!(
+            combat
+                .cockpit_readout(own, l, None, None)
+                .unwrap()
+                .rwr
+                .inbound
+                .is_empty()
+        );
+        let picture = combat.snapshot(own, &flight, None);
+        assert_eq!(picture.projectiles.len(), 1);
+        assert!(!picture.projectiles[0].incoming);
+        assert_eq!(picture.projectiles[0].target, None);
+    }
     #[test]
     fn an_airborne_start_is_raised_clear_but_an_ai_helicopter_starts_at_its_own_height() {
         // The 5,000 ft floor above sea level and the 1,000 ft above the
@@ -2614,6 +2711,7 @@ pub mod fixtures {
             surface: Default::default(),
             parked: Vec::new(),
             surface_targets: Default::default(),
+            ground_teams: Default::default(),
             weapon_boxes: BTreeMap::new(),
             tape: None,
             last_launcher: None,
@@ -3205,3 +3303,19 @@ mod checkpoint;
 #[path = "combat_wire.rs"]
 mod wire;
 pub use wire::{WirePicture, WirePilot};
+
+/// Marks the hidden shoulder-fired teams' listings
+/// ([`live::GroundListing::team`]); every other listing is left as it is.
+fn mark_teams(state: &mut live::State, teams: &std::collections::BTreeSet<u32>) {
+    for id in teams {
+        if let Some(listing) = state.ground_listing(*id) {
+            state.set_ground_listing(
+                *id,
+                live::GroundListing {
+                    team: true,
+                    ..listing
+                },
+            );
+        }
+    }
+}

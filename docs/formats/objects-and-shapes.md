@@ -458,7 +458,7 @@ after). Positions of every placed object are unchanged.
 **The rule.** Every ground object, surface unit, man, wreck, ruin and parked
 aircraft stands with the lowest point of its drawn shape (faces, lines and sprites,
 at the size it is drawn) on the ground. Only runways and pavement (their
-pavement plane), bridges and roads (the map's height at their origin) and
+pavement plane), roads (the map's height at their origin) and
 ships (their waterline, the origin) keep their authored rule. A presentation
 scale-up, such as the far-man boost, grows from the feet and never sinks into
 the ground. One module decides and applies it, `tore_world::grounding`
@@ -469,6 +469,19 @@ also sets the contact, collision and hit box), moving units, wrecks and
 ruins, the men's sprites and parked aircraft. Never ground an object any
 other way. (The city fill cuts its kit pieces base-centred, at the lowest
 point of their faces, the same rule.)
+
+**Bridges** use the bottom of their complete shape and a shared support
+corridor through `grounding::bridges`. Connected spans retain one datum,
+including their destroyed copies. Sloping crossings now fill the physical
+bank supports and grade the outward terrain approaches; a painted shadow
+does not make a foundation across the river. The [bridge specification](../spec/bridges.md)
+records the fitted grouping, terrain grading and sampling constants.
+
+Vehicle X/Z placement is checked before grounding, using per-type footprint
+limits and a bounded nearest-valid search after airport replacement. The
+[surface placement policy](../spec/surface-defenses.md#jitter) defines that search
+and how unresolved equipment is retained. The shared grounding below still
+supplies every final vertical pose.
 
 **Objective sites on slopes (nr-objg, 2026-10-14).** The complete shape,
 including line endpoints, supplies the footing. Solid contact bounds use
@@ -485,6 +498,8 @@ contact box. `grounding::points` still supplies the complete drawn geometry
 for footing and slope lift. Weapons, aircraft object collisions and roof
 contact use the resulting solid box. Line primitives have no solid thickness:
 bridge cables, crane rigging and antenna frames do not inflate the box.
+For bridge placements, the reviewed flat colour-6 shadow decal is excluded
+from solid bounds too; it still participates in drawing and bottom footing.
 Actual polygon towers still count. A frame can stand on the ground while its
 solid body and contact box begin above it. No line geometry is removed from
 the drawing or grounding calculation. This restores pre-ccba1db2 local
@@ -499,7 +514,7 @@ cell and shared with `Scenery::build_mesh`; height queries interpolate the
 same stored float coordinates that drawing uploads. Per-cell 256 ft buckets
 index nearby triangles for frequent ground queries. Existing level airport
 planes constrain foundations that touch them. `Terrain::placement_stance`
-keeps runway, bridge/road and ship datum queries on imported heights, so a
+keeps runway, road and ship datum queries on imported heights, so a
 nearby skirt cannot move an authored support plane. Source T2 bytes remain
 unchanged. Ground ceilings include raised foundations. Overlapping foundations
 merge before selecting their height, avoiding source-order-dependent steps.
@@ -518,7 +533,8 @@ for nonqualifying flat shapes, reach beyond `SLOPE_LIFT_MAX_REACH_FT` (400 ft),
 or a lift leaving more than `SLOPE_LIFT_MAX_GAP_FT` (30 ft) of air under points
 within `BOTTOM_BAND_FT` (1 ft) of the bottom. Broad flat bases now qualify for
 foundations instead of being deliberately left cut into a hill. Map-tied
-bridges and roads, runway pavement and ship waterlines keep their exceptions.
+roads, runway pavement and ship waterlines keep their exceptions. Bridges
+use the separate shared support rule linked above.
 
 The fallback thresholds come from the 2026-10-14 site audit's `reach` and
 `gap`: the largest
@@ -701,7 +717,7 @@ variant when it has one, else its shape's damage branch, else a generated
 ruin (`scenery/rubble.rs`: the intact shape split into small triangles that
 sink to 6 to 30 percent of its height by a fixed function of each point,
 the fallen level pieces partly charred; fitted, agent decision) for anything
-that burns, else (pavement, a bridge end, a rock) its intact look. The
+that burns or is a bridge END, else (pavement or a rock) its intact look. The
 branch is drawn with `Shape::with_export_state`; it stands on its own lowest
 point like the variants. What a player sees is in
 [destroyed looks](../spec/surface-defenses.md#destroyed-looks).

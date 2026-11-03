@@ -217,6 +217,13 @@ fn listing_text(event: RendezvousEvent, master: &str) -> String {
         RendezvousEvent::Refused(text) => {
             format!("Broadcasting: the Internet Lobby refused the listing: {text}")
         }
+        RendezvousEvent::MasterAddress { from, to, why } => format!(
+            "Broadcasting: the Internet Lobby at {master}: now trying {to} instead of {from} ({})",
+            why.text()
+        ),
+        RendezvousEvent::SendFailed { to, error } => {
+            format!("Broadcasting: cannot send to the Internet Lobby at {to}: {error}")
+        }
         RendezvousEvent::MappingTested(mapping) => format!(
             "Broadcasting: the router test says {}",
             match mapping {

@@ -33,8 +33,8 @@ impl Host {
         config.time_limit = round.time_limit;
         config.validate().map_err(|e| e.to_string())?;
         let settings = crate::settings::Store::from_config(&config);
-        let spec = king::with_settings(round.spec, &settings);
-        let (world, _) = self.build(&spec).map_err(|e| e.to_string())?;
+        let mut spec = king::with_settings(round.spec, &settings);
+        let (world, _) = self.build_seeded(&mut spec).map_err(|e| e.to_string())?;
         validate(&spec, &world)
     }
 
@@ -69,8 +69,9 @@ impl Host {
                 config.validate().map_err(|e| e.to_string())?;
                 let settings = crate::settings::Store::from_config(&config);
                 let spec = king::with_settings(round.spec, &settings);
-                let spec = with_surface_seed(spec, self.session_id, self.number.wrapping_add(1));
-                let (world, manifest) = self.build(&spec).map_err(|e| e.to_string())?;
+                let mut spec =
+                    with_surface_seed(spec, self.session_id, self.number.wrapping_add(1));
+                let (world, manifest) = self.build_seeded(&mut spec).map_err(|e| e.to_string())?;
                 sequence.validate(&spec, &world)?;
                 self.config = config;
                 self.settings = settings;

@@ -436,6 +436,10 @@ impl Datagrams for GamePort {
         self.socket.send_datagram(to, datagram)
     }
 
+    fn can_send_to(&self, to: SocketAddr) -> bool {
+        self.socket.can_send_to(to)
+    }
+
     fn recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
         loop {
             let Some((length, from)) = self.socket.recv_datagram(buf)? else {
@@ -1027,6 +1031,13 @@ fn forward_listing(
             }
             RendezvousEvent::LookupFailed(why) => {
                 log::warn!("Host: cannot find the Internet Lobby at {master}: {why}");
+            }
+            RendezvousEvent::MasterAddress { from, to, why } => log::info!(
+                "Host: the Internet Lobby at {master}: now trying {to} instead of {from} ({})",
+                why.text()
+            ),
+            RendezvousEvent::SendFailed { to, error } => {
+                log::warn!("Host: cannot send to the Internet Lobby at {to}: {error}");
             }
             other => log::info!("Host: Internet Lobby: {other:?}"),
         }

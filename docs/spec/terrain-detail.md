@@ -83,7 +83,8 @@ provide the actual launcher and missile geometry; the host selects it without
 calling the retail load-count callback. This is visual scenery only. Scenery
 animation, live weapon inventory and autonomous operation are not added.
 
-The existing destruction rule still removes a destroyed body. Complete original
+Destroyed scenery follows the [surface destruction rules](surface-defenses.md#destroyed-looks),
+including the [bridge branches and corrected footing](bridges.md). Complete original
 damage-state appearance, distance-dependent model selection and unresolved
 runtime decal slots are not claimed by this static scenery expansion.
 

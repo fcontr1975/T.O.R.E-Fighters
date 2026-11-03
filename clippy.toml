@@ -1,0 +1,9 @@
+# The game's GPU setup is named in the log before each driver call
+# (crates/tore-app/src/gpu_setup.rs), and every player-reachable instance uses the
+# chosen graphics API (crates/tore-app/src/graphics_api.rs). Tests may allow these.
+disallowed-methods = [
+    { path = "wgpu::Device::create_shader_module", reason = "use crate::gpu_setup::shader_module, so a crash log can name it" },
+    { path = "wgpu::Device::create_render_pipeline", reason = "use crate::gpu_setup::render_pipeline, so a crash log can name it" },
+    { path = "wgpu::Device::create_compute_pipeline", reason = "use crate::gpu_setup::compute_pipeline, so a crash log can name it" },
+    { path = "wgpu::Instance::new", reason = "use crate::graphics_api::instance, so the player's choice applies" },
+]

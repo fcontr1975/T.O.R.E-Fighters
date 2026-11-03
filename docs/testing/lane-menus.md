@@ -31,7 +31,7 @@ for size and blankness, and were also looked at by the agent that wrote them.
 
 | Scenarios | What they do |
 | --- | --- |
-| `menus-validate-creator` | `--validate-creator`: loadouts for all 14 aircraft including every removed-store case, then the creator matrix, the render sweep and the input fuzz (below) |
+| `menus-validate-creator` | `--validate-creator`: loadouts for all 37 selectable identities including every removed-store case, then the creator matrix, the render sweep and the input fuzz (below) |
 | `airport-allegiance` | `--airport-allegiance` (slice AL1): for every base theater, for Blue and for Redfor, the ground-start fields the creator offers and its default, each checked against the built world (the side's own or neutral, never the other side's; the creator's owner matches the imported allegiance; `start ground auto` and the AI's home runway from the map's middle and corners pick no enemy field). The summary must read `16 theaters, blue none: TVIET, red none: -, 0 problems` ([allegiance](../spec/airports.md#allegiance)); the Falklands' San Carlos, a STOL strip, is a Blue ground start since 2026-10-11 ([STOL runways](../spec/airports.md#stol-runways)) |
 | `merged-airport-audit` | `--airfield-audit --merged`: all 84 base-theater pairs, source and merged positions, terrain picture IDs, flat and dry pavement, bounds, centerline clearance, four ground-start slots, 19 AI pavement routes and old-ID redirects. Requires `fields=84 problems=0`. |
 | `airfield-taxi-audit` | `--airfield-audit` (slice CL-AP): every AI ground route of all 1,028 redrawn runway objects of the 75 layouts on the drawn pavement, every runway end reachable from parking, every runway line (the ILS) on a drawn runway. The summary must read `75 theaters, N airfields, 1028 runway objects, N routes, 0 problems` ([audit](../formats/redrawn-airports.md#audit)) |
@@ -57,6 +57,16 @@ for size and blankness, and were also looked at by the agent that wrote them.
 
 `--validate-creator` (`TORE_CREATOR_STAGE=loadouts|matrix|render` runs one part):
 
+- **Loadout drags** (`ordnance.rs`): catalog removal and refill, followed by
+  transfers from the first external weapon row to compatible rows on the same
+  page for every selectable aircraft. Each case starts with an empty destination.
+  A transfer involving a paired point must move two stores, or leave the entire
+  load unchanged if either end cannot supply or accept two. A successful transfer
+  preserves the total quantity of the moved weapon, its identity and every other
+  station's load, plus fuel and tanks. The destination's configured weapon and
+  maximum may change. Catalog refill and old-save migration are separate actions
+  and are not subject to transfer conservation. Cross-page cases are reported as
+  skipped because their cards cannot receive the same drag.
 - **Matrix** (`quick_mission/matrix.rs`): about 11,500 setups started through the same
   steps a flown mission takes (the creator's own refusal check, the wing launch,
   ground layout, layout plan, altitude check, combat build, flight restart, AI wing

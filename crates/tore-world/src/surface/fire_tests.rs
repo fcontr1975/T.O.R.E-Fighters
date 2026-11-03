@@ -357,6 +357,7 @@ fn placed(id: u32, resource: &str, class: u16, x: f64, z: f64, skill: i32) -> Pl
         battery: None,
         loads: Vec::new(),
         npc: SAM_NPC,
+        team: false,
     };
     Placed { unit, arms }
 }

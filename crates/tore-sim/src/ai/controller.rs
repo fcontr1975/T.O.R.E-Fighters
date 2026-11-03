@@ -248,6 +248,8 @@ pub struct DefenseMotion {
     /// "Helicopter defence"): flown at maximum speed, not corner speed, which
     /// sinks a helicopter.
     pub rotorcraft: bool,
+    /// Turn cold at maximum dry speed instead of corner speed.
+    pub extend: bool,
 }
 
 /// A launch warning delivered to this actor and nobody else (B47).
@@ -322,6 +324,8 @@ pub struct StationView {
     pub employment_fit: Option<f64>,
     pub minimum_range_ft: f64,
     pub maximum_range_ft: Option<f64>,
+    /// Energy-model permission for this target; Some(None) is pending or unreachable.
+    pub energy_target: Option<Option<u32>>,
     /// All-aspect flag and nominal IR seeker reach, absent for other stores.
     pub infrared_envelope: Option<(bool, f64)>,
     pub requires_radar: bool,
@@ -388,7 +392,11 @@ impl StationView {
                 .forward,
                 direction,
             );
-            crate::combat::missiles::seeker::infrared_quality(
+            (if self.energy_target.is_some() {
+                crate::combat::missiles::seeker::energy_infrared_quality
+            } else {
+                crate::combat::missiles::seeker::infrared_quality
+            })(
                 all_aspect,
                 nominal,
                 target.infrared_strength,
@@ -412,7 +420,8 @@ impl StationView {
             range,
             error,
         } = self.mount_geometry(own, target);
-        let permitted = self.infrared_fit(origin, target)
+        let permitted = self.energy_target.is_none_or(|id| id == Some(target.id))
+            && self.infrared_fit(origin, target)
             && range >= self.minimum_range_ft
             && self.maximum_range_ft.is_none_or(|max| range <= max)
             && self.employment_limit_deg.is_none_or(|limit| error <= limit)
@@ -440,7 +449,8 @@ impl StationView {
             range_ft: range,
             error_deg: error,
             below_minimum_range: !(range >= self.minimum_range_ft),
-            beyond_maximum_range: !self.maximum_range_ft.is_none_or(|max| range <= max),
+            beyond_maximum_range: self.energy_target.is_some_and(|id| id != Some(target.id))
+                || !self.maximum_range_ft.is_none_or(|max| range <= max),
             beyond_angle_limit: !self.employment_limit_deg.is_none_or(|limit| error <= limit),
             outside_zone: !self.infrared_fit(origin, target)
                 || !self.employment_zone.is_none_or(|zone| {
@@ -1339,6 +1349,11 @@ impl Controller {
                 // A helicopter's break keeps its strike speed (slice HF1).
                 let speed = super::helicopter_defense::strike_speed(&frame.own.limits);
                 (SpeedRequest::Explicit(speed), speed)
+            } else if defense.extend {
+                (
+                    SpeedRequest::Explicit(frame.own.limits.maximum),
+                    frame.own.limits.maximum,
+                )
             } else {
                 (SpeedRequest::Corner, frame.own.limits.corner)
             };
@@ -3830,6 +3845,7 @@ mod tests {
                     employment_fit: Some(1.0),
                     minimum_range_ft: 0.0,
                     maximum_range_ft: Some(40000.0),
+                    energy_target: None,
                     infrared_envelope: None,
                     requires_radar: false,
                     requires_sensor: false,
@@ -4319,6 +4335,7 @@ mod tests {
                 heading_deg: 90.,
                 pitch_deg: -4.,
                 rotorcraft,
+                extend: false,
             }));
             let motion = c.step(&scene.frame(0, own())).unwrap().motion.unwrap();
             assert_eq!(motion.speed, speed, "rotorcraft {rotorcraft}");

@@ -13,6 +13,32 @@ def scenario(**kw):
     return battery.Scenario(name="t", lane="ai", args=[], **kw)
 
 
+class ProfileTests(unittest.TestCase):
+    def test_inherited_recordings_never_enter_a_scenario(self):
+        from unittest.mock import patch
+
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "source"
+                dest = Path(folder) / "work" / "data"
+                (source / "replays").mkdir(parents=True)
+                (source / "replays" / "old.tore-replay").write_text("finished")
+                (source / "replays" / "old.partial").write_text("unfinished")
+                (source / "import").mkdir()
+                (source / "import" / "fixture").write_text("synthetic import")
+                (source / "settings.conf").write_text("settings")
+                if fallback:
+                    with patch.object(battery.subprocess, "run", side_effect=OSError):
+                        battery.clone_profile(source, dest)
+                else:
+                    battery.clone_profile(source, dest)
+                self.assertFalse((dest / "replays").exists())
+                self.assertEqual((dest / "import" / "fixture").read_text(), "synthetic import")
+                self.assertEqual((dest / "settings.conf").read_text(), "settings")
+                self.assertEqual((source / "replays" / "old.tore-replay").read_text(), "finished")
+                self.assertEqual((source / "replays" / "old.partial").read_text(), "unfinished")
+
+
 class JudgeTests(unittest.TestCase):
     def judge(self, s, output, code=0, timed_out=False):
         with tempfile.TemporaryDirectory() as d:
@@ -24,6 +50,11 @@ class JudgeTests(unittest.TestCase):
     def test_exit_code_and_timeout(self):
         self.assertTrue(self.judge(scenario(), "", code=101))
         self.assertIn("timed out", self.judge(scenario(timeout=5), "", code=None, timed_out=True)[0])
+
+    def test_detector_can_accept_either_reported_or_clean_exit(self):
+        for code in (0, 1):
+            self.assertEqual(self.judge(scenario(expect_exit=None), "", code=code), [])
+        self.assertTrue(self.judge(scenario(expect_exit=None), "", code=None, timed_out=True))
 
     def test_generic_problems(self):
         self.assertTrue(self.judge(scenario(), "thread 'main' panicked at src/x.rs:1"))

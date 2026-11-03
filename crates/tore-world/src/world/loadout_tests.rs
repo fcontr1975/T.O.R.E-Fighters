@@ -180,6 +180,81 @@ fn a_loadout_the_page_would_not_allow_is_refused_with_its_reason() {
 }
 
 #[test]
+fn a_migrated_single_is_kept_for_editing_but_noninteractive_combat_refuses_overweight() {
+    use tore_sim::combat::loadout::Loadout;
+    let map = resources();
+    let mut player = aircraft_type::AircraftType::load(&map, AircraftId::F18).unwrap();
+    // Turn the synthetic missile point into paired fuselage carriage.
+    let point = &mut player.profile.hardpoints[4];
+    point.location = 1;
+    point.flags |= 4;
+    point.position[0] = 12;
+    let mut base = Loadout::new(&player.profile, |name| Ok(map[name].clone())).unwrap();
+    let slot = base.configuration.hardpoint_slots[4].unwrap();
+    base.quantities[slot] = 1;
+    let weight = f64::from(base.configuration.stations[slot].weapon.weight);
+    assert!(weight > 0.);
+    base.maximum_lbs = base.total_lbs() + weight / 2.;
+    let saved = LoadoutSpec::of(&base);
+    let migrated = saved.apply(base, &map, None).unwrap();
+    assert_eq!(migrated.quantities[slot], 2);
+    migrated.validate_for_editing().unwrap();
+    let error = match crate::combat::Combat::with_loadout(&player, &migrated) {
+        Ok(_) => panic!("overweight noninteractive start succeeded"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(
+        error,
+        "This plane is too heavy to take off. Remove stores or fuel."
+    );
+}
+
+#[test]
+fn a_lobby_request_names_pairing_only_when_an_odd_paired_count_is_the_cause() {
+    let map = resources();
+    let mut player = aircraft_type::AircraftType::load(&map, AircraftId::F18).unwrap();
+    // The synthetic missile point as paired fuselage carriage.
+    let point = &mut player.profile.hardpoints[4];
+    point.location = 1;
+    point.flags |= 4;
+    point.position[0] = 12;
+    let base = tore_sim::combat::loadout::Loadout::new(&player.profile, |name| {
+        map.get(name)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other(format!("missing {name}")))
+    })
+    .unwrap();
+    let slot = base.configuration.hardpoint_slots[4].unwrap();
+    assert_eq!(base.store_pairs(slot).step(1), 2);
+    let check = |load: &LoadoutSpec| {
+        load.check_for_plane(&player.profile, &map, false)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    };
+    let standard = LoadoutSpec::of(&base);
+    assert_eq!(check(&standard), Ok(()));
+    let mut single = standard.clone();
+    single.stations[slot].quantity = 1;
+    assert_eq!(
+        check(&single),
+        Err("Paired stores must be loaded in pairs.".into())
+    );
+    let mut odd_layout = standard.clone();
+    odd_layout.stations[slot].count = 3;
+    assert_eq!(
+        check(&odd_layout),
+        Err("Paired stores must be loaded in pairs.".into())
+    );
+    // An even count the point cannot take is not a pairing problem.
+    let mut wide = standard.clone();
+    wide.stations[slot].count = 2_000;
+    assert_eq!(
+        check(&wide),
+        Err("Loadout capacity must match the current loadout.".into())
+    );
+}
+
+#[test]
 fn plane_loadouts_are_refused_where_they_do_not_belong() {
     let mut spec = spec();
     spec.plane_loadouts.insert(1, light());

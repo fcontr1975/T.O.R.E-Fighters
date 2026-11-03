@@ -8,11 +8,12 @@
 
 use super::{
     BriefedKind, BriefedTarget, Channels, DefenseFacts, FighterThreat, GroundPicture, GroundTrack,
-    KnownDefense, SeenGround, ThreatPicture,
+    KnownDefense, SeenGround, ThreatPicture, Unmasked,
 };
 
 crate::checkpoint_struct!(DefenseFacts {
     missile_reach_ft,
+    rotor_reach_ft,
     gun_reach_ft,
     radar,
     working,
@@ -84,6 +85,8 @@ crate::checkpoint_struct!(FighterThreat {
 
 crate::checkpoint_struct!(ThreatPicture { defenses, fighters });
 
+crate::checkpoint_struct!(Unmasked { id, tick });
+
 crate::checkpoint_struct!(GroundPicture {
     role,
     objective,
@@ -94,4 +97,5 @@ crate::checkpoint_struct!(GroundPicture {
     seen,
     briefed,
     threats,
+    unmasked,
 });

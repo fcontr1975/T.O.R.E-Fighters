@@ -37,6 +37,9 @@ pub enum Seating {
 /// the names they are read with.
 #[derive(Default)]
 pub struct Hooks<'a> {
+    /// Diagnostic probes may inspect retained invalid placements. Never enabled
+    /// by the creator, server, lobby or a normal flight.
+    pub inspect_invalid_placement: bool,
     /// The player's aircraft type, when the caller has loaded it already (the
     /// game loads it with its drawn half).
     pub player: Option<Arc<AircraftType>>,
@@ -109,6 +112,14 @@ impl World {
             target.as_ref(),
             area.as_ref(),
         )?;
+        if let Some(problem) = mission_layout::availability::surface_problem(
+            &terrain.surface,
+            spec.separation_nm,
+            matches!(spec.start, Start::Airborne { .. }),
+            hooks.inspect_invalid_placement,
+        ) {
+            return Err(problem.into());
+        }
         let player = match hooks.player.clone() {
             Some(player) => player,
             None => load_type(resources, spec.player())?,
@@ -205,10 +216,14 @@ impl World {
             &terrain,
             &start,
             ground_layout,
-            &ai_wings::enemy_group_offsets(&wings),
+            &wings,
             spec.separation_feet(),
+            spec.situation,
         )
         .with_enemy_ground(enemy_layout);
+        if layout.enemy.shortened() {
+            return Err(mission_layout::availability::distance_problem(spec.separation_nm).into());
+        }
         let ground = f64::from(terrain.height(start.position[0] as f32, start.position[2] as f32));
         // Only aircraft that start in the air need the altitude to clear the
         // ground; parked wingmen do not.
@@ -243,6 +258,7 @@ impl World {
         combat.add_scene_targets(&terrain)?;
         // The King's friendly fire (stage F phase 2): kept across every
         // restart of combat.
+        combat.state.set_energy_seed(u64::from(spec.surface_seed));
         if !spec.friendly_fire {
             combat.state.friendly_fire = tore_sim::combat::live::FriendlyFire::Off;
         }

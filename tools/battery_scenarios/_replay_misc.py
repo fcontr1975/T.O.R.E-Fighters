@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 SNAPSHOT_STATES = [
     "normal", "hover", "pressed", "help", "pref", "multi", "notice",
-    "controls", "controls-keyboard", "controls-mouse", "controls-head", "controls-search", "controls-search-keys",
+    "controls", "controls-keyboard", "controls-mouse", "controls-head", "controls-search", "controls-search-keys", "controls-inv",
     "graphics", "sound", "replays", "replays-settings", "replays-delete",
     "locate", "locate-importing", "locate-done", "locate-starting",
 ]

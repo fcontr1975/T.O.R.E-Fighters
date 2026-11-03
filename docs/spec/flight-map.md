@@ -110,7 +110,10 @@ unclassified ground objects, vessels, AAA and SAMs rather than inventing a type.
 Visually identified surface objects use their imported names where available.
 Unknown contacts do not expose aircraft identity, object name or allegiance.
 Lost contacts disappear at the next simulation step. Destroyed objects retain a
-marker only while detected, marked DESTROYED.
+marker only while detected, marked DESTROYED. Since 0.2.2 a hidden shoulder-fired
+SAM team reaches the map only once this pilot has spotted it
+([hidden shoulder-fired teams](air-to-ground.md#hidden-shoulder-fired-teams);
+T.O.R.E opinionated, John 2026-10-29).
 
 Surface units known by sight show what they are: a visually identified SAM or
 AAA unit, tank, truck, radar or ship takes the `MCICONS.PIC` symbol of its kind

@@ -32,6 +32,13 @@ pub struct Prepared {
     /// The trial build, for `--check` and for counting the aircraft. The host
     /// builds its own.
     pub world: World,
+    pub placement_initial_seed: u32,
+    pub placement_preview_seed: u32,
+    pub placement_attempts: usize,
+    /// The log line when the mission's `separation-nm` was not one the
+    /// creator offers for its theater, target and start, and moved
+    /// (`distance_table::adjust`).
+    pub distance_note: Option<String>,
 }
 
 /// The default configuration file in a data folder.
@@ -182,6 +189,7 @@ pub fn prepare(options: &Options, data_dir: &Path) -> Result<Prepared, String> {
                 rotation.entries.len(),
                 prepared.spec.summary()
             ));
+            report.extend(prepared.distance_note.clone());
             report.extend(crate::rotation::effective_settings(&entry.config));
             report.extend(crate::check::defense_report(&prepared.world));
             if i == rotation.current {
@@ -239,10 +247,21 @@ pub fn build_shared(
     settings
         .apply(&config.settings)
         .map_err(|e| e.to_string())?;
-    let spec = tore_session::host::sequence::configured_spec(spec, &settings);
-    let (world, manifest) = {
-        let reads = ResourceReads::new(&resources);
-        let world = World::new(&spec, &reads, Seating::Open).map_err(|error| {
+    let mut spec = tore_session::host::sequence::configured_spec(spec, &settings);
+    // The fixed table, checked without loading terrain: a distance the
+    // creator would not offer moves as the creator moves it, and says so.
+    let distance_note = tore_world::mission_layout::distance_table::adjust(&mut spec)
+        .map(|moved| tore_world::mission_layout::distance_table::adjust_notice(&spec, moved));
+    let placement_initial_seed = spec.surface_seed;
+    let mut preview = spec.clone();
+    let ((world, manifest), placement_attempts) =
+        tore_world::mission_layout::seed_retry::build(&mut preview, |candidate| {
+            let reads = ResourceReads::new(&resources);
+            let world =
+                World::new(candidate, &reads, Seating::Open).map_err(|error| error.to_string())?;
+            Ok((world, reads.manifest()))
+        })
+        .map_err(|error| {
             let hint = if spec.ground_runway().is_some() {
                 " (`start ground` takes a runway number from --check)"
             } else {
@@ -253,9 +272,7 @@ pub fn build_shared(
                 config.mission.display()
             )
         })?;
-        (world, reads.manifest())
-    };
-    validate_world(&config, &spec, &world)?;
+    validate_world(&config, &preview, &world)?;
     Ok(Prepared {
         rotation: None,
         rotation_report: Vec::new(),
@@ -265,6 +282,10 @@ pub fn build_shared(
         resources,
         manifest,
         world,
+        placement_initial_seed,
+        placement_preview_seed: preview.surface_seed,
+        placement_attempts,
+        distance_note,
     })
 }
 
@@ -587,6 +608,27 @@ pub mod tests {
         );
         fs::write(dir.join("server.conf"), "open-planes 0 3\n").unwrap();
         assert!(prepare(&Options::default(), &dir).is_ok());
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn check_preview_uses_the_same_bounded_seed_policy_as_runtime() {
+        use tore_world::test_support::surface::{
+            placement_retry_resources, spec_with_target, target,
+        };
+        let (resources, chosen) = placement_retry_resources(0);
+        let spec = spec_with_target(&target("QUCITY", 0, 3, 0));
+        let dir = scratch("preview-placement-seed");
+        let prepared = build(Config::defaults(&dir), &dir, spec, resources).unwrap();
+        assert_eq!(
+            prepared.spec.surface_seed, 0,
+            "runtime must still draw its first seed"
+        );
+        assert_eq!(prepared.placement_preview_seed, chosen);
+        assert_eq!(prepared.placement_initial_seed, 0);
+        assert!(prepared.placement_attempts > 1 && prepared.placement_attempts <= 16);
+        let lines = crate::check::report(&prepared).join("\n");
+        assert!(lines.contains(&format!("Surface placement seed {chosen} selected")));
+        assert!(lines.contains("preview"));
         let _ = fs::remove_dir_all(dir);
     }
 }

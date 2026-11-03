@@ -44,6 +44,8 @@ pub struct HudSample {
     pub guidance: bool,
     pub in_range: bool,
     pub hit: u8,
+    /// Feet. Zero preserves the decoded minimum in older recordings.
+    pub min_ft: f64,
     /// Feet. Zero means no maximum was estimated.
     pub max_ft: f64,
     pub band_min: f64,
@@ -72,6 +74,7 @@ impl Default for HudSample {
             guidance: false,
             in_range: false,
             hit: 0,
+            min_ft: 0.,
             max_ft: 0.,
             band_min: 0.,
             band_max: 0.,
@@ -98,6 +101,7 @@ impl HudSample {
             || self.in_range != other.in_range
             || self.radar != other.radar
             || self.hit.abs_diff(other.hit) >= HIT_STEP
+            || stepped(self.min_ft, other.min_ft, RANGE_STEP_FT)
             || stepped(self.max_ft, other.max_ft, RANGE_STEP_FT)
             || stepped(self.band_min, other.band_min, RANGE_STEP_FT)
             || stepped(self.band_max, other.band_max, RANGE_STEP_FT)
@@ -123,6 +127,7 @@ impl HudSample {
             .with(field::GUIDANCE, self.guidance)
             .with(field::IN_RANGE, self.in_range)
             .with("hit", i64::from(self.hit))
+            .with(field::MIN_FT, self.min_ft)
             .with(field::MAX_FT, self.max_ft)
             .with(field::BAND_MIN, self.band_min)
             .with(field::BAND_MAX, self.band_max)
@@ -164,6 +169,7 @@ impl HudSample {
             guidance: event.flag(field::GUIDANCE).unwrap_or(false),
             in_range: event.flag(field::IN_RANGE).unwrap_or(false),
             hit: u8_of(event, "hit"),
+            min_ft: event.num(field::MIN_FT).unwrap_or(0.),
             max_ft: event.num(field::MAX_FT).unwrap_or(0.),
             band_min: event.num(field::BAND_MIN).unwrap_or(0.),
             band_max: event.num(field::BAND_MAX).unwrap_or(0.),
@@ -514,6 +520,7 @@ mod tests {
             guidance: true,
             in_range: true,
             hit: 40,
+            min_ft: 500.,
             max_ft: 36_000.,
             band_min: 2_000.,
             band_max: 18_000.,
@@ -600,6 +607,7 @@ mod tests {
         assert_eq!(back.rounds, 2);
         assert_eq!(back.hit, 40);
         assert!((back.max_ft - 36_000.).abs() < 1.);
+        assert!((back.min_ft - 500.).abs() < 1.);
         assert!((back.mount[2] - 4.).abs() < 0.01);
         let seen = track.sight(4, 10).unwrap();
         assert!(seen.gunship);

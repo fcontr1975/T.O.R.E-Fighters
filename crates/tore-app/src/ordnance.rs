@@ -483,8 +483,10 @@ impl Ordnance {
             return self.edit_loadout(|load| {
                 if one {
                     let capacity = load.capacity(slot, &load.configuration.stations[slot].weapon);
-                    if direction > 0 && i32::from(load.quantities[slot]) < capacity {
-                        load.quantities[slot] += 1;
+                    // One store, or one pair on a paired station.
+                    let step = load.store_pairs(slot).step(1);
+                    if direction > 0 && i32::from(load.quantities[slot]) + step <= capacity {
+                        load.quantities[slot] += step as u16;
                     }
                     load.refresh_equipment()
                 } else {
@@ -1757,7 +1759,13 @@ fn card(
     c.text(font, &name, x, y + 25, None);
     if catalog {
         let font = &sprites["WPNBLUE"];
-        c.text(font, &format!("{} lbs", w.weight), x, y + 37, None);
+        c.text(
+            font,
+            &format!("{:.0} lbs", w.carried_weight_lb()),
+            x,
+            y + 37,
+            None,
+        );
         let guidance = guidance(w);
         c.text(
             font,
@@ -1997,14 +2005,11 @@ pub fn validate_tanks(
     {
         return Err("F14 tank probe source differs from the reviewed 2 x F250 contract".into());
     }
-    for quantity in 0..=2 {
+    for quantity in [0, 2] {
         let mut draft = standard.clone();
         draft.clear_tanks()?;
         if quantity > 0 {
             draft.select_tank(slot, store.clone())?;
-            for _ in quantity..2 {
-                draft.change_tank(slot, -1)?;
-            }
         }
         draft.validate()?;
         let accepted = LoadoutSpec::of(&draft);
@@ -2031,6 +2036,35 @@ pub fn validate_tanks(
             draft.total_lbs()
         );
     }
+    let mut edited = standard.clone();
+    edited.change_tank(slot, -1)?;
+    if edited.configuration.tanks[slot].quantity != 0 {
+        return Err("F14 tank minus must remove the pair".into());
+    }
+    edited.change_tank(slot, 1)?;
+    if edited.configuration.tanks[slot].quantity != 2 {
+        return Err("F14 tank plus must restore the pair".into());
+    }
+    let mut single = LoadoutSpec::of(&standard);
+    single
+        .tanks
+        .as_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|tank| tank.hardpoint == 5)
+        .unwrap()
+        .quantity = 1;
+    let migrated = single.apply(standard.clone(), data, None)?;
+    migrated.validate()?;
+    if migrated.configuration.tanks[slot].quantity != 2
+        || migrated.external_fuel_lbs() != 3300.
+        || migrated.tank_shell_lbs() != 396.
+    {
+        return Err("F14 saved single tank did not become the full pair".into());
+    }
+    println!(
+        "F14 saved single tank: 1 to 2, external 3300 shells 396; pair editing and migration passed"
+    );
     let mut fuel = tore_sim::aircraft_systems::Fuel::new(standard.configuration.external_fuel_lbs);
     let mut internal = standard.fuel_lbs;
     fuel.consume(&mut internal, 3300.);
@@ -2463,6 +2497,51 @@ pub fn designator_sources(
         .collect())
 }
 
+/// Check an isolated weapon drag into an empty destination. Catalog refills
+/// and saved-load migration happen before this snapshot and can change totals.
+fn check_station_transfer(
+    before: &Loadout,
+    after: &Loadout,
+    source: usize,
+    target: usize,
+) -> AppResult<u16> {
+    use tore_world::mission::LoadoutSpec;
+    let weapon = &before.configuration.stations[source].weapon;
+    let capacity = before.capacity(target, weapon) as u16;
+    let paired = before.store_pairs(source).step(1) == 2 || before.store_pairs(target).step(1) == 2;
+    let available = before.quantities[source].min(capacity);
+    let moved = if paired {
+        if available >= 2 { 2 } else { 0 }
+    } else {
+        let step = match capacity {
+            301.. => 100,
+            101..=300 => 10,
+            _ => 1,
+        };
+        available.min(step)
+    };
+    let mut expected = LoadoutSpec::of(before);
+    if expected.stations[target].quantity != 0 {
+        return Err("station transfer probe needs an empty weapon destination".into());
+    }
+    if moved > 0 {
+        expected.stations[source].quantity -= moved;
+        expected.stations[target] = tore_world::mission::StationLoad {
+            weapon: weapon.source.clone(),
+            count: capacity,
+            quantity: moved,
+        };
+    }
+    let actual = LoadoutSpec::of(after);
+    if actual != expected || (after.total_lbs() - before.total_lbs()).abs() > 0.01 {
+        return Err(format!(
+            "station transfer mismatch: {} {} slots {source}->{target}, expected {moved} moved; expected {expected:?}, got {actual:?}",
+            before.aircraft.label(), weapon.source,
+        ).into());
+    }
+    Ok(moved)
+}
+
 fn validate_dragging(load: &Loadout, data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
     let mut ui = Ordnance::new(load.clone(), data)?;
     let mut pixels = vec![0; crate::menu::WIDTH * crate::menu::HEIGHT * 4];
@@ -2493,30 +2572,58 @@ fn validate_dragging(load: &Loadout, data: &BTreeMap<String, Vec<u8>>) -> AppRes
         return Err("catalog drop did not empty the imported station".into());
     }
     source_catalog_drag(&mut ui, source, weapon, &mut pixels)?;
-    if let Some(target) =
-        (0..load.quantities.len()).find(|i| *i != source && load.capacity(*i, weapon) > 0)
+    // Isolate weapon conservation from deliberate replacement of a tank.
+    ui.loadout.clear_tanks()?;
+    let filled = ui.loadout.clone();
+    let mut checked = 0;
+    let mut skipped = 0;
+    for target in (0..load.quantities.len())
+        .filter(|i| *i != source && (1..32767).contains(&load.capacity(*i, weapon)))
     {
+        ui.loadout = filled.clone();
         ui.loadout.quantities[target] = 0;
-        let before = ui.loadout.quantities[source];
+        ui.loadout.refresh_equipment()?;
+        let before = ui.loadout.clone();
         let from = source_station_point(&mut ui, source, &mut pixels)?;
         let source_page = ui.station_page;
         let to = source_station_point(&mut ui, target, &mut pixels)?;
-        // Display order can put two compatible stations on different pages.
-        // Only the visible page has hit targets, so the transfer is checked
-        // when both cards are showing and skipped otherwise.
+        // Only the visible page has hit targets. Report skipped pairs rather
+        // than allowing the first cross-page target to end the aircraft's sweep.
         if ui.station_page != source_page {
-            return Ok(());
+            skipped += 1;
+            continue;
         }
         ui.pointer(Some(from));
         ui.down();
         ui.pointer(Some(to));
         ui.up();
-        if ui.loadout.quantities[target] == 0
-            || ui.loadout.quantities[source] + ui.loadout.quantities[target] != before
-        {
-            return Err("station transfer did not conserve imported ammunition".into());
-        }
+        let moved = check_station_transfer(&before, &ui.loadout, source, target)?;
+        let row = |slot| {
+            load.configuration
+                .hardpoint_slots
+                .iter()
+                .position(|candidate| *candidate == Some(slot))
+                .unwrap()
+        };
+        println!(
+            "station transfer {} {}: row {} (paired={}) -> row {} (paired={}, capacity={}): [{}, 0] -> [{}, {}], moved={moved}; passed",
+            load.aircraft.selection_key(),
+            weapon.source,
+            row(source),
+            before.store_pairs(source).step(1) == 2,
+            row(target),
+            before.store_pairs(target).step(1) == 2,
+            before.capacity(target, weapon),
+            before.quantities[source],
+            ui.loadout.quantities[source],
+            ui.loadout.quantities[target],
+        );
+        checked += 1;
     }
+    println!(
+        "{}: {checked} station transfers checked, {skipped} cross-page transfers skipped",
+        load.aircraft.label()
+    );
     Ok(())
 }
 
@@ -2610,7 +2717,7 @@ fn validate_removed_stores(
                 .iter()
                 .zip(&quantities)
                 .filter(|(s, _)| !s.internal && s.weapon.source != "SUU16.JT")
-                .map(|(s, n)| f64::from(s.weapon.weight.max(0)) * f64::from(*n))
+                .map(|(s, n)| s.weapon.carried_weight_lb() * f64::from(*n))
                 .sum::<f64>()
                 + f64::from(combat.state.own().configuration().external_equipment_lbs);
             if (flight.payload_lbs - external).abs() > 0.5 {
@@ -3389,6 +3496,66 @@ mod tests {
         assert_eq!(ui.loadout.quantities, [0, 0, 500]);
         assert!(ui.selected.is_none());
     }
+    #[test]
+    fn creator_transfer_check_accepts_pair_refusals_and_successful_drags() {
+        for (source_pair, target_pair, supply, capacity, expected) in [
+            (false, true, 1, 2, [1, 0, 500]), // Su-35's single to a pair.
+            (true, false, 2, 1, [2, 0, 500]),
+            (false, false, 1, 1, [0, 1, 500]),
+            (false, true, 2, 2, [0, 2, 500]),
+            (true, false, 4, 3, [2, 2, 500]),
+            (true, true, 4, 4, [2, 2, 500]),
+        ] {
+            let mut ui = fixture();
+            for (slot, paired) in [(0, source_pair), (1, target_pair)] {
+                let station = &mut ui.loadout.configuration.stations[slot];
+                station.rack.location = 4;
+                station.rack.paired = paired;
+                station.mount = [8., -2., 0.];
+            }
+            ui.loadout.quantities[0] = supply;
+            ui.loadout.hardpoints[1].count = capacity;
+            let before = ui.loadout.clone();
+            let mut pixels = vec![0; WIDTH * HEIGHT * 4];
+            let from = source_station_point(&mut ui, 0, &mut pixels).unwrap();
+            let to = source_station_point(&mut ui, 1, &mut pixels).unwrap();
+            drag(&mut ui, from, to);
+            assert_eq!(ui.loadout.quantities, expected);
+            assert_eq!(
+                check_station_transfer(&before, &ui.loadout, 0, 1).unwrap(),
+                expected[1]
+            );
+        }
+    }
+
+    #[test]
+    fn creator_transfer_check_rejects_loss_duplication_wrong_identity_and_unrelated_edits() {
+        let before = fixture().loadout;
+        let mut after = before.clone();
+        after.transfer(0, 1).unwrap();
+        assert_eq!(check_station_transfer(&before, &after, 0, 1).unwrap(), 1);
+        for quantities in [[0, 1, 500], [2, 1, 500], [1, 1, 499], [2, 0, 500]] {
+            let mut bad = after.clone();
+            bad.quantities = quantities.to_vec();
+            assert!(check_station_transfer(&before, &bad, 0, 1).is_err());
+        }
+        let mut wrong_weapon = after.clone();
+        wrong_weapon.configuration.stations[1].weapon.source = "OTHER.JT".into();
+        assert!(check_station_transfer(&before, &wrong_weapon, 0, 1).is_err());
+        let mut changed_fuel = after;
+        changed_fuel.fuel_lbs -= 1.;
+        assert!(check_station_transfer(&before, &changed_fuel, 0, 1).is_err());
+
+        let mut single = before;
+        single.quantities[0] = 1;
+        single.configuration.stations[1].rack.paired = true;
+        single.configuration.stations[1].rack.location = 4;
+        single.configuration.stations[1].mount = [8., -2., 0.];
+        assert_eq!(check_station_transfer(&single, &single, 0, 1).unwrap(), 0);
+        let mut split = single.clone();
+        split.quantities = vec![0, 1, 500];
+        assert!(check_station_transfer(&single, &split, 0, 1).is_err());
+    }
     const AIM9M_WORDS: &str = "Not everyone has the AIM-9M: Hawk's game has no AIM-9M.";
     #[test]
     fn the_lobbys_page_refuses_a_weapon_in_a_gap_and_single_players_never_asks() {
@@ -3762,6 +3929,58 @@ mod tests {
         ui.loadout.quantities[2] = 498;
         drag(&mut ui, (400., 145.), (400., 145.));
         assert_eq!(ui.loadout.quantities, [4, 0, 499]);
+    }
+    #[test]
+    fn loaded_station_click_adds_a_whole_pair_on_every_two_sided_carrier() {
+        for location in [
+            4,
+            5,
+            1,
+            tore_sim::combat::hardpoints::TUNNEL_BYTE,
+            tore_sim::combat::hardpoints::MAGAZINE_BYTE,
+        ] {
+            let mut ui = fixture();
+            let station = &mut ui.loadout.configuration.stations[0];
+            station.rack = tore_sim::combat::hardpoints::Rack {
+                location,
+                paired: true,
+                ..Default::default()
+            };
+            station.mount = [8., -2., 0.];
+            assert_eq!(ui.loadout.quantities, [2, 0, 500]);
+            drag(&mut ui, (500., 145.), (500., 145.));
+            assert_eq!(ui.loadout.quantities, [4, 0, 500]);
+            drag(&mut ui, (500., 145.), (500., 145.));
+            assert_eq!(ui.loadout.quantities, [4, 0, 500], "never past capacity");
+            ui.loadout.validate().unwrap();
+        }
+    }
+    #[test]
+    fn a_saved_single_restores_as_an_overweight_pair_until_the_player_adjusts_it() {
+        let mut ui = fixture();
+        let station = &mut ui.loadout.configuration.stations[0];
+        station.rack.location = 1;
+        station.rack.paired = true;
+        station.mount = [3., -2., 0.];
+        ui.loadout.quantities[0] = 1;
+        let weight = f64::from(station.weapon.weight);
+        assert!(weight > 0.);
+        ui.loadout.maximum_lbs = ui.loadout.total_lbs() + weight / 2.;
+        let saved = tore_world::mission::LoadoutSpec::of(&ui.loadout);
+        let restored = saved
+            .apply(ui.loadout.clone(), &BTreeMap::new(), None)
+            .unwrap();
+        restored.validate_for_editing().unwrap();
+        assert_eq!(restored.quantities[0], 2);
+        assert!(restored.total_lbs() > restored.maximum_lbs);
+        ui.loadout = restored;
+        assert_eq!(ui.activate(7), Action::Click);
+        assert_eq!(
+            ui.message.as_deref(),
+            Some("This plane is too heavy to take off. Remove stores or fuel.")
+        );
+        ui.loadout.change(0, -1);
+        assert_eq!(ui.activate(7), Action::MissionFly);
     }
     #[test]
     fn ordnance_sounds_follow_successful_edits_and_not_failed_or_empty_actions() {

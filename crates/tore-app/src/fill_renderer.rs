@@ -30,6 +30,7 @@
 //! cull shader); a knock-down rewrites only the changed records.
 //! Buildings within the separate shadow distance cast their box into the
 //! shadow maps at Med, High and Ultra.
+use crate::gpu_setup::NamedSteps as _;
 
 #[path = "fill_blocks.rs"]
 pub mod blocks;
@@ -472,7 +473,7 @@ fn shadow_pipelines(
     ];
     std::array::from_fn(|cascade| {
         let entry = format!("fill_shadow_vertex{cascade}");
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("City fill shadow casters"),
             layout: Some(&lighting.caster_layout),
             vertex: wgpu::VertexState {
@@ -565,7 +566,7 @@ fn pipelines(
                 buffers: &[wgpu::VertexBufferLayout<'_>],
                 fragment: &str,
                 bias: i32| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -748,7 +749,7 @@ impl FillRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let module = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("City fill cull"),
             source: wgpu::ShaderSource::Wgsl(include_str!("fill_cull.wgsl").into()),
         });
@@ -784,7 +785,7 @@ impl FillRenderer {
             push_constant_ranges: &[],
         });
         let compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&layout),
                 module: &module,
@@ -966,6 +967,7 @@ impl FillRenderer {
         origin: [f64; 3],
         size: [u32; 2],
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Cities);
         let fill = &self.art.fill;
         // Knocked-down buildings: rewrite only the records whose flags
         // changed since the last upload.
@@ -1075,6 +1077,7 @@ impl FillRenderer {
         encoder: &mut wgpu::CommandEncoder,
         bind: &wgpu::BindGroup,
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Cities);
         if !self.prepared || self.shadow_nm <= 0. {
             return;
         }
@@ -1084,6 +1087,7 @@ impl FillRenderer {
             pass.set_bind_group(0, bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.shadows.slice(..));
+            crate::frame_log::count(crate::frame_log::Count::CityDraws, 1);
             pass.draw_indirect(&self.args, offset);
         });
     }
@@ -1091,6 +1095,7 @@ impl FillRenderer {
     /// Draws the prepared view: far boxes, then each piece's solid art and
     /// texture details, all indirect.
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, bind: &'a wgpu::BindGroup) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Cities);
         if !self.prepared {
             return;
         }
@@ -1100,6 +1105,7 @@ impl FillRenderer {
         let p = &self.pipelines;
         pass.set_pipeline(&p.far);
         pass.set_vertex_buffer(1, self.boxes.slice(..));
+        crate::frame_log::count(crate::frame_log::Count::CityDraws, 1);
         pass.draw_indirect(&self.args, 2 * pieces * 16);
         let passes = if self.fading {
             [&p.solid_fade, &p.decal_fade]
@@ -1112,6 +1118,7 @@ impl FillRenderer {
                 let first = u64::from(self.art.piece_table[p * 8]) * 32;
                 if !range[kind].is_empty() && first < self.full.size() {
                     pass.set_vertex_buffer(1, self.full.slice(first..));
+                    crate::frame_log::count(crate::frame_log::Count::CityDraws, 1);
                     pass.draw_indirect(&self.args, (2 * p as u64 + kind as u64) * 16);
                 }
             }
@@ -1152,13 +1159,14 @@ impl FillRenderer {
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(clippy::disallowed_methods)]
+pub(crate) mod tests {
     use super::*;
     use tore_world::city::{self, CityFill};
 
     /// One box-shaped kit piece, `half` feet each way and `height` tall, at
     /// each `(x, z)` on flat ground, its full detail mesh the far box.
-    fn synthetic(at: &[(i32, i32)], half: i64, height: i64) -> FillArt {
+    pub(crate) fn synthetic(at: &[(i32, i32)], half: i64, height: i64) -> FillArt {
         let piece = city::kit::Piece {
             source: "T.OT".into(),
             shape: "T.SH".into(),

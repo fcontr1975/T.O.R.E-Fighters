@@ -606,26 +606,38 @@ pub(crate) fn prepare_mission(
 > {
     progress.stage(Stage::Mission);
     let mut models = Vec::new();
-    let mut load = |id| -> tore_world::WorldResult<Arc<tore_world::aircraft_type::AircraftType>> {
-        let model = crate::aircraft::Airframe::load(resources, id)?;
-        let kind = Arc::clone(&model.kind);
-        models.push(model);
-        Ok(kind)
-    };
     let font = crate::ordnance::label_font();
     let label = crate::ordnance::weapon_label(resources, &font);
-    let built = crate::world::World::build(
-        spec,
-        resources,
-        crate::world::Seating::SinglePlayer,
-        &mut crate::world::Hooks {
-            player: Some(player),
-            load: Some(&mut load),
-            weapon_label: Some(&label),
-            ground_variation: None,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    // The creator no longer builds the layout before OK: a seed whose
+    // layout cannot place every vehicle, or leaves a target's Blue start no
+    // room for the distance, gives way to the next, as a host's does
+    // (`seed_retry`). Nearly every flight builds its first seed.
+    let mut accepted = spec.clone();
+    let (built, _) = tore_world::mission_layout::seed_retry::build(&mut accepted, |candidate| {
+        // A refused attempt's models go with it: the view's models follow
+        // the built combat's order.
+        models.clear();
+        let mut load =
+            |id| -> tore_world::WorldResult<Arc<tore_world::aircraft_type::AircraftType>> {
+                let model = crate::aircraft::Airframe::load(resources, id)?;
+                let kind = Arc::clone(&model.kind);
+                models.push(model);
+                Ok(kind)
+            };
+        crate::world::World::build(
+            candidate,
+            resources,
+            crate::world::Seating::SinglePlayer,
+            &mut crate::world::Hooks {
+                inspect_invalid_placement: false,
+                player: Some(Arc::clone(&player)),
+                load: Some(&mut load),
+                weapon_label: Some(&label),
+                ground_variation: None,
+            },
+        )
+        .map_err(|e| e.to_string())
+    })?;
     progress.stage(Stage::Aircraft);
     let view = crate::combat_view::CombatView::with_models(
         &built.world.combat,

@@ -772,7 +772,8 @@ pub(super) fn ai_landing() -> Scenario {
         spec.wings[0].count = 3;
         spec.wings[3].count = 1;
         spec.wings[3].skill = Skill::Average;
-        spec.separation_nm = 300;
+        // Keep the enemy distant at a separation that actually fits this map.
+        spec.separation_nm = 150;
         spec.start = Start::Airborne {
             altitude_ft: 10_000,
         };

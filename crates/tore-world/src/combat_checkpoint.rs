@@ -133,6 +133,7 @@ impl Combat {
             // Setup: rebuilt from the surface with the scene.
             parked: _,
             surface_targets: _,
+            ground_teams: _,
             // Setup: rebuilt with the scene.
             weapon_boxes: _,
             surface,
@@ -200,6 +201,7 @@ impl Combat {
             ground_looks: _,
             parked: _,
             surface_targets: _,
+            ground_teams: _,
             weapon_boxes: _,
             surface: surface_slot,
             tape: _,

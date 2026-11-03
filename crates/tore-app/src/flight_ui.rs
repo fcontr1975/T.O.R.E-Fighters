@@ -252,13 +252,19 @@ pub const STABILITY_LEVEL: &str = "Stability level";
 pub const DEBUG_TAB: &str = "Debug";
 pub const AI_OBSERVATION_RATE: &str = "AI observation rate";
 pub const LEAN_AI_SENSORS: &str = "Lean AI sensors";
+pub const FRAME_LOG: &str = "Slow-frame log";
 pub const DEBUG_DEFAULTS: &str = "Back to defaults";
 /// What a joined game's Debug rows say: the host's settings govern the AI.
 pub const AI_TEST_LOCKED: &str = "The host's AI test settings apply in a joined game";
 /// The Debug rows, in order.
-const DEBUG_ROWS: [&str; 3] = [AI_OBSERVATION_RATE, LEAN_AI_SENSORS, DEBUG_DEFAULTS];
+const DEBUG_ROWS: [&str; 4] = [
+    AI_OBSERVATION_RATE,
+    LEAN_AI_SENSORS,
+    DEBUG_DEFAULTS,
+    FRAME_LOG,
+];
 /// The rows a joined game dims.
-const AI_TEST_ROWS: [&str; 3] = DEBUG_ROWS;
+const AI_TEST_ROWS: [&str; 3] = [AI_OBSERVATION_RATE, LEAN_AI_SENSORS, DEBUG_DEFAULTS];
 /// The name an observation rate is shown by.
 pub fn observation_rate_name(hz: u32) -> &'static str {
     match hz {
@@ -442,6 +448,27 @@ impl Default for FlightUi {
         }
     }
 }
+/// Whether a click on this row turns a value, so that a right click turns it
+/// back: the three rows with several values (Stability level, HUD colour, AI
+/// observation rate) and the two-state switches, which a right click flips as
+/// a left click does. The rows that choose one of a set (Damage, Enemy AI,
+/// Time) and the commands are not among them.
+fn turns_back(label: &str) -> bool {
+    matches!(
+        label,
+        STABILITY_LEVEL
+            | "HUD colour"
+            | AI_OBSERVATION_RATE
+            | LEAN_AI_SENSORS
+            | FRAME_LOG
+            | WEAPON_DIAGNOSTICS
+            | DEBUG_PANELS
+            | "HUD pitch ladder?"
+            | "Show cockpit?"
+            | "Large windows?"
+    ) || is_target_info(label)
+        || cheat_switch(&mut Default::default(), label).is_some()
+}
 /// The Cheat rows a session keeps: the three that change nothing but the
 /// player's own screen. Every other cheat changes the mission, which the
 /// server alone decides (John, 2026-09-30).
@@ -573,6 +600,7 @@ impl FlightUi {
         }
         let mut cheats = self.cheats;
         let on = match label {
+            FRAME_LOG => crate::frame_log::enabled(),
             WEAPON_DIAGNOSTICS => self.weapon_diagnostics,
             DEBUG_PANELS => self.debug_panels,
             _ if is_target_info(label) => self.target_info,
@@ -839,6 +867,15 @@ impl FlightUi {
             "Brighten HUD" => {
                 self.brightness = (self.brightness + 16).min(256);
                 self.message(format!("HUD {}/33", (self.brightness + 256) / 16 + 1));
+                Command::Click
+            }
+            FRAME_LOG => {
+                crate::frame_log::toggle();
+                self.message(if crate::frame_log::enabled() {
+                    "Slow-frame log: on (50 ms), send this session's log"
+                } else {
+                    "Slow-frame log: off"
+                });
                 Command::Click
             }
             AI_OBSERVATION_RATE | LEAN_AI_SENSORS | DEBUG_DEFAULTS => {
@@ -1277,6 +1314,69 @@ impl FlightUi {
                 Command::Click
             }
             Event::Select(index) => self.select(tree, index),
+        }
+    }
+    /// The right button on the menu: a row that takes values turns back to
+    /// its previous one, as the left button turns it to the next (the
+    /// Quick Mission creator's and the lobby's rule); any other row, tab or
+    /// button ignores it.
+    pub fn right_pointer(
+        &mut self,
+        tree: &[MenuNode],
+        point: Option<(f64, f64)>,
+        down: bool,
+    ) -> Command {
+        let (look, _) = self.look();
+        let Some(index) = self.pause.right_pointer(tree, look, point, down) else {
+            return Command::None;
+        };
+        let Some(node) = self.pause.rows(tree).get(index) else {
+            return Command::None;
+        };
+        if !node.children.is_empty() || !turns_back(&node.label) {
+            return Command::None;
+        }
+        let label = node.label.clone();
+        self.pause.focus = index;
+        self.activate_back(&label)
+    }
+    /// The previous value of a row that cycles forward on a click: Stability
+    /// level, HUD colour and the AI observation rate step back, wrapping; a
+    /// two-state row flips. Other rows do nothing.
+    pub fn activate_back(&mut self, label: &str) -> Command {
+        match label {
+            STABILITY_LEVEL => {
+                // Off, Damper, Attitude: back is two steps on.
+                self.stability = self.stability.next().next();
+                self.message(format!("Stability: {}", stability_name(self.stability)));
+                Command::Click
+            }
+            "HUD colour" => {
+                let colours = crate::cockpit_lighting::Lighting::COLOURS.len() as u8;
+                self.lighting.colour = (self.lighting.colour + colours - 1) % colours;
+                self.message(format!(
+                    "HUD {}",
+                    crate::cockpit_lighting::Lighting::COLOURS[usize::from(self.lighting.colour)]
+                ));
+                Command::Click
+            }
+            AI_OBSERVATION_RATE => {
+                if self.ai_test_locked {
+                    self.message(AI_TEST_LOCKED);
+                    return Command::Click;
+                }
+                let rates = tore_sim::ai::test_settings::OBSERVATION_RATES_HZ;
+                let at = rates
+                    .iter()
+                    .position(|hz| *hz == self.ai_test.observation_hz())
+                    .unwrap_or(0);
+                let hz = rates[(at + rates.len() - 1) % rates.len()];
+                self.ai_test = self.ai_test.with_observation_hz(hz).expect("a listed rate");
+                self.message(format!("AI test settings: {}", self.ai_test.describe()));
+                Command::Click
+            }
+            _ if turns_back(label) => self.activate(label, ""),
+            _ => Command::None,
         }
     }
     pub fn draw(&mut self, pixels: &mut [u8], font: &Font, tree: &[MenuNode]) {
@@ -2074,6 +2174,134 @@ mod tests {
         }
     }
 
+    /// A right click on `label` in the tab that holds it, through the menu.
+    fn right_click_row(ui: &mut FlightUi, tree: &[MenuNode], label: &str) -> Command {
+        let (tab, row) = tree
+            .iter()
+            .enumerate()
+            .find_map(|(t, node)| {
+                node.children
+                    .iter()
+                    .position(|n| n.label == label)
+                    .map(|r| (t, r))
+            })
+            .expect("a row with that label");
+        ui.pause.show_tab(tab);
+        let point = Some((200., 50. + row as f64 * 19. + 5.));
+        ui.right_pointer(tree, point, true);
+        ui.right_pointer(tree, point, false)
+    }
+    fn left_click_row(ui: &mut FlightUi, tree: &[MenuNode], label: &str) -> Command {
+        let (tab, row) = tree
+            .iter()
+            .enumerate()
+            .find_map(|(t, node)| {
+                node.children
+                    .iter()
+                    .position(|n| n.label == label)
+                    .map(|r| (t, r))
+            })
+            .expect("a row with that label");
+        ui.pause.show_tab(tab);
+        let point = Some((200., 50. + row as f64 * 19. + 5.));
+        ui.pointer(tree, point, true);
+        ui.pointer(tree, point, false)
+    }
+    #[test]
+    fn right_click_turns_the_cycling_rows_back_and_left_click_forward_wrapping() {
+        let mut t = tree();
+        t.push(MenuNode {
+            label: "Pref".into(),
+            shortcut: String::new(),
+            children: vec![],
+        });
+        add_authored_rows(&mut t);
+        add_debug_tab(&mut t);
+        let mut ui = FlightUi {
+            menu: true,
+            ..Default::default()
+        };
+
+        // Stability: Damper, then back to Off, then wrapping to Attitude.
+        assert_eq!(ui.stability, tore_input::StabilityLevel::Damper);
+        for want in [
+            tore_input::StabilityLevel::Off,
+            tore_input::StabilityLevel::Attitude,
+            tore_input::StabilityLevel::Damper,
+        ] {
+            assert_eq!(
+                right_click_row(&mut ui, &t, STABILITY_LEVEL),
+                Command::Click
+            );
+            assert_eq!(ui.stability, want);
+        }
+        assert_eq!(left_click_row(&mut ui, &t, STABILITY_LEVEL), Command::Click);
+        assert_eq!(ui.stability, tore_input::StabilityLevel::Attitude);
+        assert_eq!(*shown(&ui).last().unwrap(), "Stability: Attitude");
+
+        // HUD colour: GREEN, wrapping back to CYAN and round again.
+        assert_eq!(ui.lighting.colour, 0);
+        for want in [3, 2, 1, 0] {
+            right_click_row(&mut ui, &t, "HUD colour");
+            assert_eq!(ui.lighting.colour, want);
+        }
+        assert_eq!(*shown(&ui).last().unwrap(), "HUD GREEN");
+        for want in [1, 2, 3, 0] {
+            left_click_row(&mut ui, &t, "HUD colour");
+            assert_eq!(ui.lighting.colour, want);
+        }
+
+        // The AI observation rate: 60, then back to 120 and round to 20, 30
+        // and 40, and forward again round the other way.
+        for want in [120, 20, 30, 40, 60] {
+            right_click_row(&mut ui, &t, AI_OBSERVATION_RATE);
+            assert_eq!(ui.ai_test.observation_hz(), want);
+        }
+        for want in [40, 30, 20, 120, 60] {
+            left_click_row(&mut ui, &t, AI_OBSERVATION_RATE);
+            assert_eq!(ui.ai_test.observation_hz(), want);
+        }
+        // A joined game's host settings stay as they are.
+        ui.lock_ai_test(true);
+        let before = ui.ai_test;
+        right_click_row(&mut ui, &t, AI_OBSERVATION_RATE);
+        assert_eq!(ui.ai_test, before);
+        assert_eq!(*shown(&ui).last().unwrap(), AI_TEST_LOCKED);
+    }
+    #[test]
+    fn right_click_flips_two_state_rows_and_leaves_choices_and_commands_alone() {
+        let mut t = tree();
+        t.push(MenuNode {
+            label: "Pref".into(),
+            shortcut: String::new(),
+            children: vec![],
+        });
+        add_authored_rows(&mut t);
+        let mut ui = FlightUi {
+            menu: true,
+            ..Default::default()
+        };
+        assert_eq!(right_click_row(&mut ui, &t, DEBUG_PANELS), Command::Click);
+        assert!(ui.debug_panels);
+        right_click_row(&mut ui, &t, DEBUG_PANELS);
+        assert!(!ui.debug_panels);
+        // A command row, and the End mission row, take no right click.
+        assert_eq!(right_click_row(&mut ui, &t, "End mission"), Command::None);
+        assert!(ui.menu);
+        // Only a press and release on one row count.
+        ui.pause.show_tab(1);
+        let on = Some((200., 50. + 1. * 19. + 5.));
+        ui.right_pointer(&t, on, true);
+        let off = Some((200., 50. + 0. * 19. + 5.));
+        assert_eq!(ui.right_pointer(&t, off, false), Command::None);
+        assert!(!ui.debug_panels);
+        // The tab strip and the bottom buttons ignore the right button.
+        for point in [(30., 10.), (30., 455.)] {
+            ui.right_pointer(&t, Some(point), true);
+            assert_eq!(ui.right_pointer(&t, Some(point), false), Command::None);
+        }
+    }
+
     /// E3: the Easy flight physics row follows the imported Cheat rows,
     /// toggles mid-flight, survives Restart and is the server's in a session.
     #[test]
@@ -2795,5 +3023,10 @@ mod tests {
         assert!(menu.iter().any(|node| node.label == DEBUG_TAB));
         assert_eq!(session_refusal(AI_OBSERVATION_RATE), None);
         assert_eq!(session_refusal(LEAN_AI_SENSORS), None);
+        assert_eq!(session_refusal(FRAME_LOG), None);
+        let mut ui = FlightUi::default();
+        ui.lock_ai_test(true);
+        assert!(!ui.pause.dim.iter().any(|label| label == FRAME_LOG));
+        assert!(turns_back(FRAME_LOG));
     }
 }

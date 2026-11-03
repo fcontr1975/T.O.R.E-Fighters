@@ -24,6 +24,15 @@ pub trait Datagrams {
     /// Receives one waiting datagram into `buf`, or `None` when none is
     /// waiting. A datagram longer than `buf` is cut to its length.
     fn recv_datagram(&mut self, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>>;
+
+    /// False when this socket has no way to send to `to` at all, for example
+    /// an IPv4-only socket and an IPv6 address: a host's listing then does
+    /// not pick that one of the master's addresses (0.2.2). True unless a
+    /// socket knows better.
+    fn can_send_to(&self, to: SocketAddr) -> bool {
+        let _ = to;
+        true
+    }
 }
 
 /// Errors that say nothing about this socket: a full send buffer, or Windows

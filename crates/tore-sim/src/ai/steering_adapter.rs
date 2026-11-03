@@ -54,6 +54,8 @@ pub struct ControlAdapter {
     /// A striker's attack handling this step (slice ST-T2); plain for every
     /// other motion.
     strike_handling: Handling,
+    /// Per-step defensive handling, cleared before every actor update.
+    defense: Option<(Experience, bool)>,
 }
 
 impl ControlAdapter {
@@ -62,6 +64,7 @@ impl ControlAdapter {
             last_requested: None,
             gun_aim: None,
             strike_handling: Handling::PLAIN,
+            defense: None,
         }
     }
 
@@ -74,6 +77,11 @@ impl ControlAdapter {
     /// pull ([`Handling::pull`]); everything else is plain.
     pub fn set_strike_handling(&mut self, handling: Handling) {
         self.strike_handling = handling;
+    }
+
+    /// Positive-G defense and optional IR heat reduction for this step only.
+    pub fn set_defense(&mut self, defense: Option<(Experience, bool)>) {
+        self.defense = defense;
     }
 
     pub fn strike_handling(&self) -> Handling {
@@ -119,6 +127,11 @@ impl ControlAdapter {
         finite(state.speed, "own speed must be finite")?;
         finite(state.throttle, "own throttle must be finite")?;
 
+        let g_limit = self.defense.map_or(g_limit, |(skill, _)| {
+            (g_limit * super::defense::load_fraction(skill))
+                .max(1.0)
+                .min(g_limit)
+        });
         let current = attitude(state)?;
         let speed = ScalarSpeed(state.speed);
 
@@ -151,7 +164,13 @@ impl ControlAdapter {
                     }
                     + self.gun_aim.map_or(0., |a| a.heading_rate);
                 let bank_limit = maximum_bank_deg
-                    .min(if intent.formation_flight { 60.0 } else { 75.0 })
+                    .min(if self.defense.is_some() {
+                        85.0
+                    } else if intent.formation_flight {
+                        60.0
+                    } else {
+                        75.0
+                    })
                     .min((1.0 / g_limit.max(1.0)).acos().to_degrees());
                 (state.speed.max(125.0) * rate / 32.174)
                     .atan()
@@ -245,13 +264,38 @@ impl ControlAdapter {
         // A roll and pull rolls at the aircraft's full roll rate: the B44
         // state rates halve it for maneuvering, too slow to roll inverted
         // and pull in a dive (slice ST-T2, fitted, agent).
-        let roll_authority = if pull.is_some() {
+        let roll_authority = if pull.is_some() || self.defense.is_some() {
             rates.roll_deg_per_s.max(effective.roll_deg_per_s)
         } else {
             effective.roll_deg_per_s
         };
-        let desired_roll = (bank_error / 0.7 - state.roll_rate * 0.5)
-            .clamp(-roll_authority.to_radians(), roll_authority.to_radians());
+        let desired_roll = if self.defense.is_some() {
+            if let Some(profile) = config.controls {
+                let axis = if state.research.is_some() {
+                    profile.hybrid_roll.unwrap_or(profile.roll)
+                } else {
+                    profile.roll
+                };
+                let stopping = state.roll_rate.powi(2)
+                    / (2.0 * f64::from(axis.deceleration).to_radians())
+                    + state.roll_rate.abs() * dt_s
+                    + 0.5_f64.to_radians();
+                if bank_error * state.roll_rate > 0.0 && bank_error.abs() <= stopping
+                    || bank_error.abs() < 0.5_f64.to_radians()
+                {
+                    0.0
+                } else {
+                    bank_error / 0.10
+                }
+            } else {
+                // Cancel the remaining roll of the aircraft's lag response,
+                // then close the bank error quickly without an inverted overshoot.
+                (bank_error - state.roll_rate * config.tuning.roll_response_seconds) / 0.10
+            }
+        } else {
+            bank_error / 0.7 - state.roll_rate * 0.5
+        }
+        .clamp(-roll_authority.to_radians(), roll_authority.to_radians());
         let roll_limit = if let Some(profile) = config.controls {
             let axis = if state.research.is_some() {
                 profile.hybrid_roll.unwrap_or(profile.roll)
@@ -346,7 +390,7 @@ impl ControlAdapter {
             .max(terrain_pitch_floor_deg.unwrap_or(-90.0))
             .clamp(-90.0, 90.0);
         let pitch_error = (pitch_goal - current.flight_path_pitch_deg).to_radians();
-        let desired_g = ((current.flight_path_pitch_deg.to_radians().cos()
+        let vertical_g = current.flight_path_pitch_deg.to_radians().cos()
             + state.speed
                 * (pitch_error
                     / if below_terrain_floor {
@@ -357,9 +401,24 @@ impl ControlAdapter {
                         3.0
                     }
                     + self.gun_aim.map_or(0., |a| a.pitch_rate))
-                / 32.174)
-            / state.bank.cos().max(0.25))
-        .clamp(low, g_limit.max(low));
+                / 32.174;
+        // Defense pulls to its skill limit once lift is on the turn side.
+        // Pitch feedback cannot reduce a committed break's lateral lift.
+        // Terrain recovery still takes priority.
+        let desired_g = if self.defense.is_some() {
+            if !below_terrain_floor && bank_request_deg.abs() >= 35.0 {
+                // Pull to the skill limit as soon as lift is on the turn side.
+                // Roll-in blends from 1 G to full pull over the first 30 degrees.
+                let lift_on_turn =
+                    (state.bank.to_degrees() * bank_request_deg.signum() / 30.0).clamp(0.0, 1.0);
+                (1.0 + (g_limit - 1.0) * lift_on_turn).clamp(0.0, g_limit.max(0.0))
+            } else {
+                (vertical_g / state.bank.cos().max(0.05)).clamp(0.0, g_limit.max(0.0))
+            }
+        } else {
+            (vertical_g / state.bank.cos().max(0.25)).clamp(low, g_limit.max(low))
+        };
+
         // The roll and pull asks for its own load, applied as the lift comes
         // onto its bank: none while the lift is more than 45 degrees off it,
         // so a roll-out does not pull the nose across the track.
@@ -391,6 +450,13 @@ impl ControlAdapter {
             }
             / regional.authority[0].max(0.01);
 
+        let cool_engine = self.defense.is_some_and(|(_, cool)| cool);
+        let throttle = throttle_command(state.throttle, speed, intent.speed, limits)?;
+        let throttle = if cool_engine && speed.0 >= limits.minimum.0 * 1.3 {
+            throttle.min(0.65)
+        } else {
+            throttle
+        };
         let input = PilotInput {
             pitch: if dt_s > 0.0 {
                 pitch_input.clamp(-1.0, 1.0)
@@ -406,13 +472,11 @@ impl ControlAdapter {
             // steering role, so the yaw axis is left alone.
             yaw: 0.0,
             throttle_rate: 0.0,
-            throttle: Some(throttle_command(
-                state.throttle,
-                speed,
-                intent.speed,
-                limits,
-            )?),
-            commands: vec![PilotCommand::Set(Switch::Burner, intent.afterburner)],
+            throttle: Some(throttle),
+            commands: vec![PilotCommand::Set(
+                Switch::Burner,
+                intent.afterburner && !cool_engine,
+            )],
             ..PilotInput::default()
         }
         .bounded();
@@ -711,6 +775,193 @@ mod tests {
                 dt_s,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn defensive_roll_brakes_before_crossing_ninety_degrees() {
+        use crate::models::handling::Profile;
+        use tore_formats::flight_model::normal_control::LoadedAxis;
+        for hybrid in [false, true] {
+            for direction in [-1.0, 1.0] {
+                for (rate, acceleration, deceleration) in
+                    [(225, 286, 571), (180, 214, 427), (345, 498, 996)]
+                {
+                    let mut model = state().import_model();
+                    let mut config = model.configuration().clone();
+                    config.controls = Some(Profile {
+                        roll: LoadedAxis {
+                            minimum: -rate,
+                            maximum: rate,
+                            acceleration,
+                            deceleration,
+                        },
+                        hybrid_roll: None,
+                        auxiliary: [LoadedAxis {
+                            minimum: 0,
+                            maximum: 0,
+                            acceleration: 200,
+                            deceleration: 400,
+                        }; 3],
+                    });
+                    model.set_configuration(config).unwrap();
+                    let mut s = State::from_model(model, [0.0, 3000.0, 0.0]);
+                    if hybrid {
+                        s.enable_research(1).unwrap();
+                    }
+                    s.yaw = 0.0;
+                    s.pitch = 0.0;
+                    s.bank = 0.0;
+                    s.speed = 850.0;
+                    s.velocity = [0.0, 0.0, s.speed];
+                    let mut adapter = ControlAdapter::new();
+                    adapter.set_defense(Some((Experience::Ace, false)));
+                    let mut command = intent(direction * 90.0, -5.0, s.speed);
+                    command.bank = Bank::Explicit((direction * 85.0) as i32);
+                    let mut peak = 0.0_f64;
+                    for _ in 0..960 {
+                        command.heading_deg = s.yaw.to_degrees() + direction * 90.0;
+                        let out = adapter
+                            .controls(
+                                &s,
+                                &command,
+                                &limits(),
+                                G_LIMIT,
+                                ROLL_LIMIT,
+                                85.0,
+                                None,
+                                crate::flight::DT,
+                            )
+                            .unwrap();
+                        s.step(&out.input, |_, _| 0.0);
+                        peak = peak.max(s.bank.to_degrees().abs());
+                        assert!(s.g >= 0.0 && !s.crashed);
+                    }
+                    assert!(
+                        peak <= 90.0,
+                        "hybrid={hybrid} direction={direction} rate={rate}: peak={peak}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn defensive_bank_pulls_positive_g_and_skill_changes_the_flown_turn() {
+        for hybrid in [false, true] {
+            let mut turns = Vec::new();
+            for skill in Experience::ALL {
+                let mut s = state();
+                if hybrid {
+                    s.enable_research(1).unwrap();
+                }
+                s.speed = 850.0;
+                s.velocity = [0.0, 0.0, s.speed];
+                let mut command = intent(120.0, -5.0, 850.0);
+                command.mode = CommandMode::OtherState;
+                let mut adapter = ControlAdapter::new();
+                adapter.set_defense(Some((skill, false)));
+                // This synthetic airframe has a 6 G row, not the generic
+                // test helper's 7 G request. Supply its actual loaded limit
+                // as the mission does, so clipping cannot erase skill differences.
+                let loaded_limit = 6.0 / (1.0 + (s.fuel + s.carried_lbs()) / 10000.0 * 0.4);
+                let pilot_limit = ai_g_limits(skill, loaded_limit, -3.0, false).0;
+                let mut peak_g = 0.0_f64;
+                for _ in 0..600 {
+                    let out = adapter
+                        .controls(
+                            &s,
+                            &command,
+                            &limits(),
+                            pilot_limit,
+                            ROLL_LIMIT,
+                            MAXIMUM_BANK,
+                            None,
+                            crate::flight::DT,
+                        )
+                        .unwrap();
+                    s.step(&out.input, |_, _| 0.0);
+                    assert!(s.g > 0.0, "{skill:?} hybrid={hybrid}: {} G", s.g);
+                    peak_g = peak_g.max(s.g);
+                }
+                let turn = heading_error_deg(0.0, s.yaw.to_degrees()).abs();
+                assert!(turn > 20.0, "{skill:?} hybrid={hybrid}: {turn} degrees");
+                let skill_limit = pilot_limit * super::super::defense::load_fraction(skill);
+                assert!(
+                    peak_g >= 0.95 * skill_limit,
+                    "{skill:?} hybrid={hybrid}: peak {peak_g} G, limit {skill_limit}"
+                );
+                assert!(!s.crashed);
+                turns.push(turn);
+            }
+            assert!(turns[3] > turns[0] * 1.3, "hybrid={hybrid}: {turns:?}");
+        }
+    }
+
+    #[test]
+    fn defensive_heat_reduction_preserves_low_speed_power_and_clears() {
+        let mut s = state();
+        s.speed = 850.0;
+        s.velocity = [0.0, 0.0, s.speed];
+        s.throttle = 1.0;
+        let command = intent(90.0, 0.0, 1000.0);
+        let mut adapter = ControlAdapter::new();
+        adapter.set_defense(Some((Experience::Ace, true)));
+        let run = |adapter: &mut ControlAdapter, s: &State| {
+            adapter
+                .controls(
+                    s,
+                    &command,
+                    &limits(),
+                    G_LIMIT,
+                    ROLL_LIMIT,
+                    MAXIMUM_BANK,
+                    None,
+                    crate::flight::DT,
+                )
+                .unwrap()
+        };
+        let cool = run(&mut adapter, &s);
+        assert_eq!(cool.input.throttle, Some(0.65));
+        assert!(
+            cool.input
+                .commands
+                .contains(&PilotCommand::Set(Switch::Burner, false))
+        );
+        s.speed = 250.0;
+        s.velocity = [0.0, 0.0, s.speed];
+        assert_eq!(run(&mut adapter, &s).input.throttle, Some(1.0));
+        adapter.set_defense(None);
+        assert_eq!(
+            run(&mut adapter, &s),
+            controls(&s, &command, crate::flight::DT)
+        );
+    }
+
+    #[test]
+    fn defensive_turn_yields_to_terrain_recovery() {
+        let mut s = state();
+        s.bank = 70.0_f64.to_radians();
+        s.pitch = -10.0_f64.to_radians();
+        s.velocity = crate::attitude::Basis::new(s.yaw, s.pitch, s.bank)
+            .forward
+            .map(|v| v * s.speed);
+        let command = intent(120.0, -5.0, s.speed);
+        let mut adapter = ControlAdapter::new();
+        adapter.set_defense(Some((Experience::Ace, false)));
+        let out = adapter
+            .controls(
+                &s,
+                &command,
+                &limits(),
+                G_LIMIT,
+                ROLL_LIMIT,
+                MAXIMUM_BANK,
+                Some(10.0),
+                crate::flight::DT,
+            )
+            .unwrap();
+        assert!(out.input.roll < 0.0);
+        assert!(out.input.pitch > 0.0);
     }
 
     #[test]

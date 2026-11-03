@@ -1,4 +1,5 @@
 //! Aircraft-forward cockpit and HUD with flat translation and directional fading.
+use crate::gpu_setup::NamedSteps as _;
 use crate::{
     attitude::{Basis, dot},
     camera::Camera,
@@ -154,11 +155,11 @@ fn hud_layout(size: [u32; 2], translation: [f32; 2], zoom: f32) -> [f32; 4] {
 }
 impl CockpitRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Directional cockpit"),
             source: wgpu::ShaderSource::Wgsl(include_str!("cockpit.wgsl").into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Cockpit and HUD projection"),
             layout: None,
             vertex: wgpu::VertexState {

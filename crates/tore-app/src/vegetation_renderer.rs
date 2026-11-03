@@ -1,6 +1,7 @@
 //! Cached vegetation impostors, legacy tufts and GPU-generated grass blades. Source shapes
 //! are rasterized once into indexed atlas pages. GPU culling compacts all
 //! visible species into one instance stream and one indirect draw. Not collidable.
+use crate::gpu_setup::NamedSteps as _;
 
 use crate::vegetation::{self, Inst, Patch, Placement, Species};
 use crate::vegetation_shapes::{FLOATS, Library, Look};
@@ -291,7 +292,7 @@ impl Renderer {
             meshes: &meshes,
         };
         let main = main_stream(device, &shared, capacity);
-        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let cull_shader = device.named_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Vegetation cull"),
             source: wgpu::ShaderSource::Wgsl(include_str!("vegetation_cull.wgsl").into()),
         });
@@ -301,7 +302,7 @@ impl Renderer {
             push_constant_ranges: &[],
         });
         let compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.named_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Vegetation cull"),
                 layout: Some(&compute_layout),
                 module: &cull_shader,
@@ -573,6 +574,7 @@ impl Renderer {
         origin: [f64; 3],
         size: [u32; 2],
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Vegetation);
         if self.repeat_frame && !self.suppressed {
             self.encode_cull(encoder);
             return;
@@ -953,6 +955,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         bind: &wgpu::BindGroup,
     ) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Vegetation);
         if !self.prepared || self.suppressed || self.trees_ft <= 0. || self.view.1 == 0 {
             return;
         }
@@ -962,11 +965,13 @@ impl Renderer {
             pass.set_bind_group(0, bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.shadow_drawn.slice(..));
+            crate::frame_log::count(crate::frame_log::Count::VegetationDraws, 1);
             pass.draw_indirect(&self.args, offset);
         });
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, bind: &'a wgpu::BindGroup) {
+        let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Vegetation);
         if !self.prepared {
             return;
         }
@@ -975,8 +980,10 @@ impl Renderer {
             pass.set_pipeline(&self.depth_pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_vertex_buffer(1, self.drawn.slice(..));
+            crate::frame_log::count(crate::frame_log::Count::VegetationDraws, 1);
             pass.draw_indirect(&self.args, 0);
             pass.set_pipeline(&self.pipeline);
+            crate::frame_log::count(crate::frame_log::Count::VegetationDraws, 1);
             pass.draw_indirect(&self.args, 0);
         }
         if self.grass_suppressed {
@@ -989,6 +996,7 @@ impl Renderer {
             pass.set_pipeline(&self.grass_pipeline);
             pass.set_vertex_buffer(0, self.patches.slice(..));
             for (range, tufts) in &self.rings {
+                crate::frame_log::count(crate::frame_log::Count::VegetationDraws, 1);
                 pass.draw(0..tufts * 6, range.clone());
             }
         }
@@ -1215,7 +1223,7 @@ fn render_pipelines(
                 buffers: &[wgpu::VertexBufferLayout],
                 depth: bool,
                 writes: bool| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -1316,7 +1324,7 @@ fn shadow_pipelines(
     ];
     std::array::from_fn(|cascade| {
         let entry = format!("veg_shadow_vertex{cascade}");
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.named_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Vegetation shadow casters"),
             layout: Some(&lighting.caster_layout),
             vertex: wgpu::VertexState {

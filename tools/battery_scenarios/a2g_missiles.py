@@ -293,8 +293,9 @@ def scenarios() -> list[Scenario]:
     site = run + ["VLA", "QVRDRI", "--surface-seed", "4", "--defenses", "3", "3", "--unit", STRAIGHT_FLUSH,
                   "--aircraft", "f4g", "--load", "AGM88", "--attack", "harm", "--from", "12", "--altitude", "15000",
                   "--speed", "450", "--seconds", "60"]
+    # Finite-energy subsonic cruise needs more than the former 90-second window.
     fleet = run + ["UKR", "QUSFLT", "--unit", KRIVAK, "--attack", "antiship", "--from", "15", "--altitude", "5000",
-                   "--speed", "450", "--seconds", "90"]
+                   "--speed", "450", "--seconds", "180"]
     return [
         Scenario(
             name="a2g-slam-shrike-as15", lane="flight",
@@ -357,8 +358,10 @@ def scenarios() -> list[Scenario]:
                             "--from", "4", "--altitude", "3000"], timeout=300),
                 Step(col + ["--aircraft", "av8", "--load", "AGM65G", "--attack", "maverick", "--designate", "ir",
                             "--from", "4", "--altitude", "2000"], timeout=300),
+                # View the column crosswise: the corrected bridge behind it is
+                # now a valid visual pick from the old northbound approach.
                 Step(col + ["--aircraft", "a10", "--load", "AGM65A", "--attack", "maverick", "--designate",
-                            "visual", "--from", "3", "--altitude", "2000"], timeout=300),
+                            "visual", "--from", "3", "--altitude", "2000", "--heading", "90"], timeout=300),
                 Step(col + ["--aircraft", "a10", "--load", "AGM65A", "--attack", "maverick",
                             "--from", "6", "--altitude", "3000"], timeout=300),
             ],

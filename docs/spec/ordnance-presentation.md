@@ -14,6 +14,13 @@ loadout interactions remain documented in the [ordnance contract](../formats/ord
 Store placement, fuel steps, launch validation, flight adapters and combat
 behaviour retain their existing contracts. Catalog visibility is specified below.
 
+All two-sided weapon and tank points now show the even maxima and change by
+pairs under the [even-paired-load rule](stores-on-pylons.md#even-paired-loads).
+Single points keep their existing quantities and steps. Restored singles become
+pairs; larger odd loads round down. Overweight saved loads remain open for adjustment, and Fly
+retains its existing refusal until the weight is fixed. Current multiplayer
+requests must already obey the rule.
+
 ## Catalog availability
 
 John requested this opinionated visibility rule on 2026-09-23: hide weapons

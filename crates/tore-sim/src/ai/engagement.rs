@@ -105,6 +105,8 @@ pub struct HostileEscort {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PatrolRegion {
+    /// Optional map rectangle: the patrol is its intersection with the circle.
+    pub clip: Option<[[f64; 2]; 2]>,
     pub center_ft: [f64; 3],
     pub radius_ft: f64,
 }
@@ -113,7 +115,9 @@ impl PatrolRegion {
     pub fn contains(self, position: [f64; 3]) -> bool {
         let dx = position[0] - self.center_ft[0];
         let dz = position[2] - self.center_ft[2];
-        self.radius_ft.is_finite()
+        self.clip.is_none_or(|[min, max]| {
+            (min[0]..=max[0]).contains(&position[0]) && (min[1]..=max[1]).contains(&position[2])
+        }) && self.radius_ft.is_finite()
             && self.radius_ft >= 0.
             && dx.mul_add(dx, dz * dz) <= self.radius_ft * self.radius_ft
     }
@@ -1205,6 +1209,7 @@ mod tests {
             None
         );
         cap.patrol = Some(PatrolRegion {
+            clip: None,
             center_ft: [0.; 3],
             radius_ft: 100.,
         });
@@ -1418,6 +1423,7 @@ mod tests {
 
         let mut cap = assignment(Role::CombatAirPatrol, Stance::EngageAssigned);
         cap.patrol = Some(PatrolRegion {
+            clip: None,
             center_ft: [0.; 3],
             radius_ft: 100.,
         });

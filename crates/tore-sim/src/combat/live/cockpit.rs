@@ -31,8 +31,8 @@
 //! (ST-T) draws. Opinionated (John, 2026-10-11) for the principle; the
 //! record layout and the target copy are agent decisions.
 use super::{
-    Configuration, Kept, Launcher, MAX_PROJECTILES, Ownship, Projectile, Readiness, Rules, Side,
-    State, Station, Target,
+    Configuration, Kept, Launcher, MAX_PROJECTILES, Ownship, Projectile, Readiness, Side, State,
+    Station, Target,
 };
 use crate::attitude::{Vector, dot};
 use crate::combat::delivery::{self, Delivery, DeliveryMode};
@@ -396,6 +396,9 @@ pub const GUIDED_LATE_SHARE: f64 = 0.05;
 /// reads it here and holds its release until the line clears, as it did
 /// when a blocked line cleared IN RNG.
 pub fn guided_due(sight: &GuidedSight) -> bool {
+    if let Some(hit) = sight.energy_intercept {
+        return hit && sight.in_reach && sight.advisory.is_none();
+    }
     let (Some(range), Some(bar), Some(reach)) =
         (sight.ground_range_ft, sight.release_range_ft(), sight.reach)
     else {
@@ -497,7 +500,7 @@ impl State {
         if self.projectiles.len() >= MAX_PROJECTILES {
             return Readiness::Capacity;
         }
-        match (self.weapon_rules == Rules::Spec)
+        match (self.weapon_rules.uses_seeker())
             .then(|| crate::combat::guided::kind(w))
             .flatten()
         {
@@ -617,7 +620,7 @@ impl State {
         ground: &impl Fn(f64, f64) -> f64,
     ) -> Option<GuidedSight> {
         let (side, cockpit) = self.cockpits_with(&self.ownships).get(aircraft)?;
-        super::guided::sight(
+        let sight = super::guided::sight(
             aircraft,
             side,
             cockpit,
@@ -629,7 +632,9 @@ impl State {
                 weather: &self.sensor_weather,
                 ground,
             },
-        )
+        )?;
+        let w = &config.stations.get(cockpit.selected)?.weapon;
+        Some(self.energy_guided_output(aircraft, cockpit.selected, w, *launcher, sight))
     }
 
     /// Whether the AI flying `aircraft` should release its selected store
@@ -880,7 +885,7 @@ impl State {
         if let Some(release) = bomb {
             direction = ballistics::BombMotion::new(release).direction(0.);
         }
-        let spec = self.weapon_rules == Rules::Spec;
+        let spec = self.weapon_rules.uses_seeker();
         // A guided air-to-ground weapon flies its own guidance on a motion,
         // never the legacy pursuit: its projectile target stays empty.
         let guided_kind = spec.then(|| crate::combat::guided::kind(w)).flatten();
@@ -911,10 +916,16 @@ impl State {
             guidance: r.guidance,
             guidance_ticks: spec.then(|| profile.map(|p| p.guidance_ticks)).flatten(),
             motion: if let Some(velocity) = guided_velocity {
-                Some(Motion::launch(w, velocity, position[1]))
+                Some(Motion::launch_rules(
+                    w,
+                    velocity,
+                    position[1],
+                    self.weapon_rules,
+                ))
             } else {
-                (spec && profile.is_some())
-                    .then(|| Motion::launch(w, launcher.velocity, position[1]))
+                (spec && profile.is_some()).then(|| {
+                    Motion::launch_rules(w, launcher.velocity, position[1], self.weapon_rules)
+                })
             },
             age: 0,
             incoming: r.incoming,

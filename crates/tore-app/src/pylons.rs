@@ -815,6 +815,7 @@ pub fn for_flown(
     art: &CombatArt,
     scenery: &crate::scenery::Scenery,
 ) -> Vec<f32> {
+    let _frame_log = crate::frame_log::span(crate::frame_log::Phase::Aircraft);
     let mut out = Vec::new();
     if !state.wreck_gone() {
         vertices(

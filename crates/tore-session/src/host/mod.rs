@@ -63,6 +63,8 @@ mod lobby;
 mod observe;
 #[cfg(test)]
 mod observe_tests;
+#[cfg(test)]
+mod placement_seed_tests;
 mod results;
 mod revive;
 mod score;
@@ -958,10 +960,22 @@ impl Host {
         // rule) come from the configuration's settings (stage F phase 2).
         let settings = crate::settings::Store::from_config(&config);
         let court = king::Court::new(&config, &spec);
-        let spec = king::with_settings(spec, &settings);
+        let mut spec = king::with_settings(spec, &settings);
+        // A distance the creator would not offer moves as it would there.
+        let distance_moved = tore_world::mission_layout::distance_table::adjust(&mut spec);
         let session_id = session_id(config.entropy);
-        let spec = with_surface_seed(spec, session_id, 1);
-        let (world, manifest) = build_world(&spec, &resources, config.contrail_puffs)?;
+        let mut spec = with_surface_seed(spec, session_id, 1);
+        let initial_seed = spec.surface_seed;
+        let ((world, manifest), placement_attempts) =
+            tore_world::mission_layout::seed_retry::build(&mut spec, |candidate| {
+                build_world(candidate, &resources, config.contrail_puffs).map_err(|error| {
+                    match error {
+                        HostError::Mission(text) => text,
+                        other => other.to_string(),
+                    }
+                })
+            })
+            .map_err(HostError::Mission)?;
         let mut server = Server::new(ServerConfig {
             protocol_version: PROTOCOL_VERSION,
             max_connections: config.max_players,
@@ -1038,6 +1052,10 @@ impl Host {
             recording_failed: false,
             config,
         };
+        if let Some(moved) = distance_moved {
+            host.log_distance(&host.spec.clone(), moved);
+        }
+        host.log_surface_seed(&host.spec.clone(), initial_seed, placement_attempts);
         if host.start_rule() == StartMode::Now {
             host.start_flying().map_err(HostError::Mission)?;
         } else {
@@ -2726,7 +2744,7 @@ impl Host {
         // The King's settings decide what the mission carries of them
         // (friendly fire, the loadout rule), whatever the text says.
         let spec = king::with_settings(spec, &self.settings);
-        let spec = with_surface_seed(spec, self.session_id, self.number.wrapping_add(1));
+        let mut spec = with_surface_seed(spec, self.session_id, self.number.wrapping_add(1));
         if !spec.plane_loadouts.is_empty() {
             return Err(
                 "A lobby's mission carries no loadouts: each player arms their own.".into(),
@@ -2736,7 +2754,7 @@ impl Host {
         if let Some(why) = self.mission_gap_refusal(&spec) {
             return Err(why);
         }
-        let (world, manifest) = self.build(&spec).map_err(|error| match error {
+        let (world, manifest) = self.build_seeded(&mut spec).map_err(|error| match error {
             HostError::Mission(text) => text,
             other => other.to_string(),
         })?;
@@ -4334,12 +4352,22 @@ impl Host {
         if self.sequence_mission() {
             return;
         }
-        let spec = self.spec.clone();
-        match self.build(&spec) {
+        let mut spec = self.spec.clone();
+        match self.build_seeded(&mut spec) {
             Ok((world, manifest)) => {
+                let seed_changed = self.spec.surface_seed != spec.surface_seed;
+                self.spec = spec;
                 self.world = world;
                 self.manifest = manifest;
                 self.spec_text = self.spec.to_text();
+                if seed_changed {
+                    self.number = self.number.wrapping_add(1);
+                    let mission = self.mission_message();
+                    let peers: Vec<_> = self.peers.keys().copied().collect();
+                    for peer in peers {
+                        self.send(peer, &mission);
+                    }
+                }
                 self.tracker = Tracker::new(&self.world);
                 self.revival = revive::Revivals::default();
                 self.gives.clear();

@@ -2393,6 +2393,7 @@ mod tests {
             battery: None,
             loads: vec![stock],
             npc: [4, 4, 4, 4],
+            team: false,
         });
         (surface, unit.0)
     }

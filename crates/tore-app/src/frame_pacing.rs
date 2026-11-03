@@ -122,6 +122,26 @@ impl Limit {
     }
 }
 
+/// The wait before drawing again after a frame whose surface gave no image
+/// (lost, outdated or timed out), for the `failures`-th such frame in a row:
+/// 16 ms, doubling to at most a quarter of a second. Such a frame never asks
+/// for its own redraw, so a surface that keeps failing cannot spin the loop.
+pub fn surface_retry(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(4);
+    Duration::from_millis(16 << doublings)
+}
+
+/// When to try drawing again after a frame whose surface gave no image: the
+/// `soonest` the frame rate and the window allow (None while it is hidden,
+/// which waits for it to show), but not before `retry` from `now`.
+pub fn after_surface_failure(
+    soonest: Option<Instant>,
+    retry: Duration,
+    now: Instant,
+) -> Option<Instant> {
+    soonest.map(|at| at.max(now + retry))
+}
+
 /// What the screen wants after the frame it just drew.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Want {
@@ -149,16 +169,21 @@ pub fn counted(want: Want, counter: bool) -> Want {
 /// (`next_frame`) instead of drawing at once. With the counter shown and a
 /// capped rate, an event (a moving mouse, a key) must not add frames to the
 /// ones the timer draws, or the counter would read above the cap. V-sync is
-/// paced by presentation and the uncapped limit has no cap to keep. Automated
-/// runs are never held.
+/// paced by presentation and the uncapped limit has no cap to keep. An
+/// unfocused window keeps its ten frames a second the same way: the pointer
+/// passing over it, or a menu redrawn for news, waits for the frame already
+/// due (at most [`UNFOCUSED`] away) rather than drawing extra ones; this needs
+/// no counter and holds under V-sync too. Automated runs are never held.
 pub fn too_soon(
     limit: Limit,
     counter: bool,
-    automated: bool,
+    window: Window,
     next_frame: Option<Instant>,
     now: Instant,
 ) -> bool {
-    counter && !automated && limit.period().is_some() && next_frame.is_some_and(|at| now < at)
+    let capped = counter && limit.period().is_some();
+    let away = !window.focused && limit != Limit::Off;
+    !window.automated && (capped || away) && next_frame.is_some_and(|at| now < at)
 }
 
 /// The window's state for pacing.
@@ -178,6 +203,9 @@ pub struct Pacer {
     due: Option<Instant>,
     /// When the last frame finished.
     last: Option<Instant>,
+    /// What [`Pacer::next`] chose after it: a time, or None to wait for an
+    /// event.
+    chosen: Option<Instant>,
 }
 
 impl Pacer {
@@ -191,6 +219,7 @@ impl Pacer {
         now: Instant,
     ) -> Option<Instant> {
         self.last = Some(now);
+        self.chosen = None;
         if window.hidden && !window.automated {
             self.due = None;
             return None;
@@ -223,7 +252,23 @@ impl Pacer {
                 }
             },
         };
-        Some(throttle(limit, window, at, now))
+        let at = throttle(limit, window, at, now);
+        self.chosen = Some(at);
+        Some(at)
+    }
+    /// How much of the time from `since` (when the last frame started) to
+    /// `now` the frame did not wait for by choice: the gap less the wait the
+    /// pacer asked for after it (until its timer, a throttle's slot, or, for
+    /// a view waiting on events, all of it). A slow frame or a loop that wakes
+    /// late shows here; an unfocused window's tenth of a second, a capped
+    /// rate's slot or a still picture's wait does not.
+    pub fn busy(&self, since: Instant, now: Instant) -> Duration {
+        let gap = now.saturating_duration_since(since);
+        let Some(last) = self.last.filter(|last| *last >= since) else {
+            return gap;
+        };
+        let until = self.chosen.map_or(now, |at| at.min(now));
+        gap.saturating_sub(until.saturating_duration_since(last))
     }
     /// The soonest an event may have a waiting view drawn again at `now`:
     /// at once, or when the frame rate or the unfocused rate next allows.
@@ -607,22 +652,116 @@ mod tests {
     }
 
     #[test]
-    fn a_redraw_request_waits_for_the_timer_only_under_a_cap_with_the_counter() {
+    fn a_redraw_request_waits_for_the_timer_under_a_cap_with_the_counter_or_unfocused() {
         let now = Instant::now();
         let soon = Some(now + ms(5));
+        let automated = Window {
+            automated: true,
+            ..FOCUSED
+        };
         for rate in [60, 100, 200] {
             let limit = Limit::Rate(rate);
-            assert!(too_soon(limit, true, false, soon, now));
+            assert!(too_soon(limit, true, FOCUSED, soon, now));
             // The slot has come, or nothing is scheduled: draw.
-            assert!(!too_soon(limit, true, false, soon, now + ms(5)));
-            assert!(!too_soon(limit, true, false, None, now));
+            assert!(!too_soon(limit, true, FOCUSED, soon, now + ms(5)));
+            assert!(!too_soon(limit, true, FOCUSED, None, now));
             // Hidden counter: requests are honoured as before.
-            assert!(!too_soon(limit, false, false, soon, now));
-            assert!(!too_soon(limit, true, true, soon, now));
+            assert!(!too_soon(limit, false, FOCUSED, soon, now));
+            assert!(!too_soon(limit, true, automated, soon, now));
         }
         for limit in [Limit::VSync, Limit::Off] {
-            assert!(!too_soon(limit, true, false, soon, now));
+            assert!(!too_soon(limit, true, FOCUSED, soon, now));
         }
+        // Unfocused, any limit but uncapped holds a request for the frame
+        // already due, counter or not; nothing due draws at once.
+        let away = Window {
+            focused: false,
+            ..FOCUSED
+        };
+        for limit in [Limit::VSync, Limit::Rate(60), Limit::Rate(200)] {
+            for counter in [false, true] {
+                assert!(too_soon(limit, counter, away, soon, now));
+                assert!(!too_soon(limit, counter, away, None, now));
+                assert!(!too_soon(limit, counter, away, soon, now + ms(5)));
+            }
+        }
+        assert!(!too_soon(Limit::Off, false, away, soon, now));
+        let scripted = Window {
+            automated: true,
+            ..away
+        };
+        assert!(!too_soon(Limit::VSync, false, scripted, soon, now));
+    }
+
+    #[test]
+    fn a_failing_surface_is_retried_with_a_growing_wait() {
+        let waits: Vec<_> = (1..=7).map(surface_retry).collect();
+        assert_eq!(waits, [16, 32, 64, 128, 256, 256, 256].map(ms));
+        let now = Instant::now();
+        // At the frame rate's slot, or the retry wait if that is later.
+        assert_eq!(
+            after_surface_failure(Some(now), ms(16), now),
+            Some(now + ms(16))
+        );
+        assert_eq!(
+            after_surface_failure(Some(now + UNFOCUSED), ms(16), now),
+            Some(now + UNFOCUSED)
+        );
+        // Hidden: wait until the window shows.
+        assert_eq!(after_surface_failure(None, ms(16), now), None);
+    }
+
+    #[test]
+    fn only_time_the_pacer_did_not_ask_for_counts_as_busy() {
+        let start = Instant::now();
+        let away = Window {
+            focused: false,
+            ..FOCUSED
+        };
+        // An unfocused flight frame takes 6 ms and waits the throttle's
+        // 100 ms: the next frame, woken 1 ms late, was busy for 7 ms only.
+        let mut pacer = Pacer::default();
+        let finished = start + ms(6);
+        let at = pacer
+            .next(Limit::VSync, Want::Live, away, finished)
+            .unwrap();
+        assert_eq!(at, finished + UNFOCUSED);
+        assert_eq!(pacer.busy(start, at + ms(1)), ms(7));
+        // A 150 ms frame with V-sync asks for the next at once: all busy.
+        let mut pacer = Pacer::default();
+        let finished = start + ms(150);
+        pacer.next(Limit::VSync, Want::Live, FOCUSED, finished);
+        assert_eq!(pacer.busy(start, finished + ms(2)), ms(152));
+        // A capped rate's slot is a chosen wait.
+        let mut pacer = Pacer::default();
+        pacer.next(Limit::Rate(60), Want::Live, FOCUSED, start);
+        let finished = start + ms(4);
+        let at = pacer
+            .next(Limit::Rate(60), Want::Live, FOCUSED, finished)
+            .unwrap();
+        assert_eq!(pacer.busy(start, at), ms(4));
+        // A still picture waits for events: the whole wait is chosen, and an
+        // event that comes before a timed slot ends it early.
+        let mut pacer = Pacer::default();
+        pacer.next(Limit::VSync, Want::Nothing, FOCUSED, start + ms(5));
+        assert_eq!(pacer.busy(start, start + ms(5_000)), ms(5));
+        pacer.next(
+            Limit::Rate(60),
+            Want::At(start + ms(900)),
+            FOCUSED,
+            start + ms(5),
+        );
+        assert_eq!(pacer.busy(start, start + ms(300)), ms(5));
+        // A hidden window waits for events too.
+        let hidden = Window {
+            hidden: true,
+            ..FOCUSED
+        };
+        pacer.next(Limit::VSync, Want::Live, hidden, start + ms(5));
+        assert_eq!(pacer.busy(start, start + ms(2_000)), ms(5));
+        // No frame paced since `since` (or none at all): the whole gap.
+        assert_eq!(Pacer::default().busy(start, start + ms(120)), ms(120));
+        assert_eq!(pacer.busy(start + ms(6), start + ms(120)), ms(114));
     }
 
     #[test]

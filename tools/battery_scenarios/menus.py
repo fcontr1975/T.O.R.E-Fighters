@@ -6,6 +6,7 @@ several window sizes) go through tools/agent-run.sh and are kept few.
 """
 import re
 import json
+import shutil
 from pathlib import Path
 
 from battery import Scenario, Step
@@ -20,7 +21,7 @@ NORMAL_STATES = [
     "respawn-aircraft-filtered", "respawn-station-scrolled", "respawn-station-filtered",
     "update-available", "update-focus", "updates-off",
     "normal", "hover", "pressed", "help", "pref", "multi", "notice", "controls", "controls-keyboard",
-    "controls-mouse", "controls-head", "controls-search", "controls-search-keys", "graphics", "graphics-middle",
+    "controls-mouse", "controls-head", "controls-search", "controls-search-keys", "controls-inv", "graphics", "graphics-middle",
     "graphics-bottom", "graphics-scale", "graphics-shadows", "sound",
     "replays", "replays-settings", "replays-delete", "locate", "locate-importing", "locate-done",
     "direct-help", "internet-help", "lobby-help", "lobby-internet", "lobby-internet-help", "lobby-internet-settings", "lobby-internet-players",
@@ -398,8 +399,43 @@ def wing_loadout_recording_problems(work: Path, output: str) -> list[str]:
     return problems
 
 
+def frame_log_check(work: Path, output: str) -> list[str]:
+    logs = sorted((work / "frame-logs").glob("*.log"))
+    if len(logs) != 1:
+        return [f"expected one diagnostic session, got {len(logs)}"]
+    text = logs[0].read_text()
+    problems = []
+    markers = ["Frame log enabled: threshold_ms=2.000", "Frame log enabled: threshold_ms=1.000",
+               "Session system:", "Slow frame:", "Frame log disabled",
+               "Frame log enabled: threshold_ms=50.000"]
+    at = 0
+    for marker in markers:
+        found = text.find(marker, at)
+        if found < 0:
+            problems.append(f"missing ordered frame-log marker: {marker}")
+        else:
+            at = found + len(marker)
+    for marker in ("screen=flight", "role=single", "compression=1", "gpu_previous_ms=",
+                   "simulation:", "submit:", "acquire:", "present:", "mirror_views:"):
+        if marker not in text:
+            problems.append(f"missing frame-log field: {marker}")
+    if "Slow frame:" in text.split("Frame log disabled")[-1].split("Frame log enabled:")[0]:
+        problems.append("slow-frame logging continued while disabled")
+    return problems
+
+
 def scenarios() -> list[Scenario]:
     out: list[Scenario] = []
+    out.append(Scenario(
+        name="menus-window-frame-log", lane="menus", window=True,
+        args=["--free-flight", "--no-audio", "--window-size", "960x720", "--frame-log", "1",
+              "--input-script", str(Path(__file__).parent / "scripts" / "frame-log.txt")],
+        env={"TORE_FRAME_LOG": "2", "TORE_LOG_DIR": "{work}/frame-logs", "TORE_SCRIPT_OUT": "{work}"},
+        timeout=180, expect=[r"Input script: exit"],
+        outputs=["debug-frame-log-off.ppm", "debug-frame-log-on.ppm"],
+        check_work=frame_log_check,
+        notes="CLI overrides environment; Escape Debug toggles slow-frame logging off and on through normal key handlers, with real session records.",
+    ))
     out.append(Scenario(
         name="qmc-wing-loadout", lane="menus",
         args=["--validate-wing-loadout", "{work}/wing-loadout", "--no-audio"],
@@ -419,13 +455,32 @@ def scenarios() -> list[Scenario]:
             r"derived stations F22N.PT: 2 extra tanks, 7920 lb fuel, 850 lb shells; feed, jettison, save and old load passed",
             r"derived stations MIG29.PT: 1 extra tanks, 2614 lb fuel, 281 lb shells; feed, jettison, save and old load passed",
             r"derived stations RAFALE.PT: 1 extra tanks, 3485 lb fuel, 374 lb shells; feed, jettison, save and old load passed",
-            r"F-16C wingtip AIM-120: two a load \(one a tip\), saved, restored and fired guided from each tip edge; every other tip store unchanged",
+            r"F-16C wingtip AIM-120: two a load \(one a tip\), saved, restored and fired guided from each tip edge; pair-sized editing checked",
             r"derived weapons F15.PT row 6: MK82.JT:3, MK84.JT:2, .*GBU12.JT:3, .*GBU38.JT:3",
             r"(?m)derived weapons F22.PT row 8: AIM9X.JT:4, AIM120.JT:4, AIM9M.JT:4, AIM9B.JT:4$",
             r"gun pod F4B.PT: row 3 takes one SUU-16 in place of AIM9B.JT x4; weight, 600 logical units \(1,200 rounds\), Tab, Guns only, save, lobby rule, firing from the pod's nose and jettison passed",
         ],
         notes="Derived Eagle, Falcon, Raptor, Fulcrum-C and Rafale C rows through normal selection, capacity, fuel, jettison, mission and profile saves, and old-load restoration; the F-4B's centreline SUU-16 gun pod (weight, rounds, Tab, Guns only, save, lobby rule, fired from its nose, jettisoned).",
     ))
+    out.append(
+        Scenario(
+            name="menus-ordnance-store-pairs",
+            lane="menus",
+            args=["--validate-ordnance", "--no-audio"],
+            expect=[
+                r"store-pair maximum: F18.PT row=5 AGM84A.JT 1->2",
+                r"store-pair maximum: F15.PT row=4 MK84.JT 3->2",
+                r"store-pair maximum: F22.PT row=7 MICA.JT 3->2",
+                r"store-pair overweight save: .*non-interactive start refused with existing weight message",
+                r"store-pair maximum: F18.PT row=6 AGM84A.JT 3->2",
+                r"store-pair maximum: F18.PT row=7 AGM84A.JT 3->2",
+                r"store-pair maximum: F18.PT row=7 AS16.JT 1->2",
+                r"store-pair audit: F16C.PT defaults, maxima, steps, saved loads and lobby checked",
+                r"ordnance audit: .* passed",
+            ],
+            notes="Issue 6: complete imported roster of even paired maxima, pair-sized edits, human/AI defaults, old odd save migration and strict lobby validation. Includes Harpoon 3 to 2 and Kickback 1 to 2.",
+        )
+    )
     out.append(
         Scenario(
             name="menus-ordnance-availability",
@@ -442,11 +497,11 @@ def scenarios() -> list[Scenario]:
             args=["--validate-tanks", "--aircraft", "f14", "--no-audio"],
             expect=[
                 r"F14 tank selection 0: internal 15741 external 0 shells 0 .*restart passed",
-                r"F14 tank selection 1: internal 15741 external 1650 shells 198 .*restart passed",
+                r"F14 saved single tank: 1 to 2, external 3300 shells 396; pair editing and migration passed",
                 r"F14 tank selection 2: internal 15741 external 3300 shells 396 .*restart passed",
                 r"F14 tanks: full selection, removal, empty shells, old defaults and accepted restart passed",
             ],
-            notes="Source F14 GAS quantities, mass, removal and accepted-load restart without a display.",
+            notes="F14 tank pairs: 0 or 2, full mass and fuel, pair-sized editing, old single migration and accepted-load restart without a display.",
         )
     )
     out.append(
@@ -467,10 +522,14 @@ def scenarios() -> list[Scenario]:
             lane="menus",
             args=["--validate-creator", "--no-audio"],
             timeout=3600,
-            expect=[r"creator matrix: \d+ setups started", r"removed stores passed"],
+            expect=[
+                r"creator matrix: \d+ setups started",
+                r"removed stores passed",
+                r"station transfer SU35\.PT AAML\.JT: row 5 \(paired=false\) -> row 6 \(paired=true, capacity=2\): \[1, 0\] -> \[1, 0\], moved=0; passed",
+            ],
             forbid=[r"PROBLEM"],
             check=no_ordnance_leak,
-            notes="Loadouts for every aircraft incl. removed stores, then the whole Quick Mission creator matrix.",
+            notes="Loadouts for every aircraft incl. removed stores and exact transfer conservation, including the Su-35 single-to-pair refusal, then the whole Quick Mission creator matrix.",
         )
     )
     out.append(
@@ -626,8 +685,29 @@ def scenarios() -> list[Scenario]:
                 check=menu_picture(),
             )
         )
+    out.append(
+        Scenario(
+            name="menus-snap-quick-target-ground-distances", lane="menus",
+            args=["--theater", "UKR", "--aircraft", "f18", "--ground-start", "2",
+                  "--ground-target", "QUCITY", "--defenses", "0", "0", "--surface-seed", "7",
+                  "--separation", "300", "--snapshot", "{work}/shot.ppm",
+                  "--snapshot-state", "field-17", "--no-audio"],
+            timeout=180,
+            expect=[r"quick-snapshot: start ground enabled-distances 1,2,5,10,20,50,75,100,150,200,300$", r"Menu preview:",
+                    r"creator map: BLUE START: ODESA at"],
+            check=menu_picture(),
+            then=[Step(args=("--theater", "UKR", "--aircraft", "f18", "--launch-quick-mission",
+                             "--ground-start", "2", "--ground-target", "QUCITY", "--defenses", "0", "0",
+                             "--surface-seed", "7", "--separation", "300", "--smoke-test", "--no-audio"),
+                       window=True, timeout=180),
+                  Step(args=("--theater", "UKR", "--aircraft", "f18", "--ground-start", "9",
+                             "--ground-target", "QUCITY", "--defenses", "0", "0", "--surface-seed", "7",
+                             "--snapshot", "{work}/explicit-airport.ppm", "--snapshot-state", "map", "--no-audio"), timeout=180)],
+            notes="An explicit ground-start snapshot applies its runway after its target. All distances stay selectable, and 300 nm launches with the target's ground-start override.",
+        )
+    )
     # The creator's Map (slice CL-R) on the Ukraine with a ground target, a
-    # Blue ground start at L'viv (airport 9) and Enemy Wing 1 parked at
+    # Blue ground start at L'viv (airport 8) and Enemy Wing 1 parked at
     # Donets'k (airport 5): both starts are named and the objective is an
     # area, built from the mission the creator would fly.
     for state in ("map", "map-lobby", "map-wide", "map-close"):
@@ -635,7 +715,7 @@ def scenarios() -> list[Scenario]:
             Scenario(
                 name=f"menus-snap-quick-{state}-ukr-target-ground",
                 lane="menus",
-                args=["--theater", "UKR", "--quick-mission", "--ground-start", "9", "--enemy-ground-start", "5",
+                args=["--theater", "UKR", "--quick-mission", "--ground-start", "8", "--enemy-ground-start", "5",
                       "--ground-target", "QUCITY", "--defenses", "2", "2", "--surface-seed", "12345",
                       "--snapshot", "{work}/shot.ppm", "--snapshot-state", state, "--no-audio"],
                 timeout=180,
@@ -789,7 +869,8 @@ def scenarios() -> list[Scenario]:
                     lane="menus",
                     args=["--separation", str(sep), "--theater", theater, "--probe-fight", "2:2", *probe],
                     timeout=300,
-                    expect=[r"AI probe totals:"],
+                    expect_exit=1 if sep == 300 else 0,
+                    expect=[r"Separation .* does not fit"] if sep == 300 else [r"AI probe totals:", rf"AI probe layout:.*enemy_nm={sep}\.0 requested_nm={sep}\.0"],
                     forbid=[r"OFF-MAP"],
                 )
             )
@@ -1029,6 +1110,18 @@ def scenarios() -> list[Scenario]:
                 outputs=["panel.ppm"],
             )
         )
+    priority = ["nice", "-n", "10"] if shutil.which("nice") else []
+    out.append(Scenario(
+        name="menus-window-graphics-runtime", lane="menus", window=True,
+        args=["--smoke-test", "--no-audio"], timeout=600,
+        env={"CARGO_BUILD_JOBS": "8"},
+        then=[Step([*priority, "cargo", "test", "--locked", "-p", "tore-app",
+                    "gpu_runtime_graphics_changes_keep_sun_and_spotting_valid",
+                    "--", "--ignored", "--nocapture", "--test-threads=1"],
+                   app=False, timeout=600)],
+        expect=[r"1 passed; 0 failed"],
+        notes="Runtime MSAA transitions with sun visibility, spotting, scale, shadows and resized views under GPU validation.",
+    ))
     # Every graphics option value, and the preview and panel switches, in a
     # real window.
     for option in (

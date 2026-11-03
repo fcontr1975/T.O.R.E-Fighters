@@ -97,6 +97,17 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
 mod tests {
     use super::*;
     #[test]
+    fn clearing_inert_inbound_cues_stops_the_launch_warning_immediately() {
+        for (inbound, tone) in [
+            ([true, false], Tone::RadarInbound),
+            ([false, true], Tone::InfraredInbound),
+        ] {
+            let mut warnings = Warnings::default();
+            assert_eq!(warnings.step(100, inbound, &[], false), Some(tone));
+            assert_eq!(warnings.step(101, [false; 2], &[], false), None);
+        }
+    }
+    #[test]
     fn lock_warnings_last_four_quarter_steps_past_the_last_refresh() {
         let mut w = Warnings::default();
         let none = [false; 2];

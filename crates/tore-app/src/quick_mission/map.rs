@@ -17,7 +17,6 @@ use tore_sim::ai::launch::Side;
 use tore_sim::sensors::FEET_PER_NAUTICAL_MILE as NMI;
 use tore_world::ai_wings::AiFlightModel;
 use tore_world::mission::MissionSpec;
-use tore_world::surface::layout::Variation;
 use tore_world::terrain::Terrain;
 use tore_world::world::{Hooks, Seating, World};
 
@@ -31,9 +30,9 @@ pub const OBJECTIVE_OFFSET_NM: f64 = 2.5;
 /// A wing that starts within this many nm of the side's start is not drawn
 /// again. `fitted` (agent decision, slice CL-R, 2026-10-11).
 const SAME_PLACE_NM: f64 = 3.;
-/// Said on the lobby's map, where the host draws the target's layout when the
-/// flight starts.
-pub const LOBBY_MAP_NOTE: &str = "The host places the target when the flight starts. The area is around the target's retail spot, and the starts may move with it.";
+/// Said on the lobby map, which uses the creator's audited placement.
+pub const LOBBY_MAP_NOTE: &str =
+    "The host keeps this mission's checked placement. The target area is approximate.";
 
 /// The open map: the mission's terrain, what it shows, its view and font.
 pub struct Planning {
@@ -221,9 +220,7 @@ impl QuickMission {
     }
 
     /// The mission the map shows for the draft as it stands now, and whether
-    /// it is the lobby's or the read-only view's (where the host draws the
-    /// target's layout when the flight starts, so the map shows its retail
-    /// spot).
+    /// it is the lobby's or the read-only view's. Both keep the audited seed.
     ///
     /// Single player draws the flight's seed now, as OK would, and OK keeps
     /// it, so the flight flies the layout the map shows.
@@ -248,7 +245,7 @@ impl QuickMission {
         spec.ai_flight_model = AiFlightModel::Standard;
         let lobby = self.lobby || self.view.is_some();
         if spec.lays_out_surface() {
-            spec.surface_seed = if lobby { 0 } else { self.surface_seed };
+            spec.surface_seed = self.surface_seed;
         }
         Ok((spec, lobby))
     }
@@ -326,15 +323,11 @@ fn build(
     spec: &MissionSpec,
     lobby: bool,
 ) -> Result<Planning, String> {
-    let variation = (spec.ground_target.is_some() && lobby).then_some(Variation::OFF);
     let built = World::build(
         spec,
         resources,
         Seating::SinglePlayer,
-        &mut Hooks {
-            ground_variation: variation,
-            ..Hooks::default()
-        },
+        &mut Hooks::default(),
     )
     .map_err(|error| format!("The map could not be built: {error}"))?;
     let world = built.world;
@@ -372,8 +365,7 @@ fn plan_of(world: &World, spec: &tore_world::mission::MissionSpec, lobby: bool) 
 /// data, which every machine of a networked game builds the same, so the
 /// markup is the same on all of them, and in a replay.
 ///
-/// `lobby` says the host draws the target's layout when the flight starts, so
-/// the markup carries the lobby's note. `altitude_ft` is the creator's start
+/// `lobby` adds the checked-placement note to the markup. `altitude_ft` is the creator's start
 /// altitude, for the line under the plot; the flight has no such line.
 pub fn mission_plan(world: &World, lobby: bool, altitude_ft: Option<u32>) -> Plan {
     let mut plan = Plan::default();

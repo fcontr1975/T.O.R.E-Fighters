@@ -66,7 +66,11 @@ impl AiWings {
         // A fresh, visibly departing missile or tracer can reveal its shooter
         // only when that aircraft is independently observed. Hidden projectile
         // target IDs do not participate in this association.
-        for projectile in state.projectiles.iter().filter(|p| p.age <= 30) {
+        for projectile in state
+            .projectiles
+            .iter()
+            .filter(|p| p.age <= 30 && p.threatening())
+        {
             let weapon = state.weapon(projectile);
             let gun = live::is_gun(weapon);
             if gun && !projectile.tracer {

@@ -44,6 +44,7 @@ crate::checkpoint_struct!(HostileEscort {
 });
 
 crate::checkpoint_struct!(PatrolRegion {
+    clip,
     center_ft,
     radius_ft,
 });

@@ -31,7 +31,10 @@
 //! [`TypeInfo`]; nothing here assumes one.
 pub mod area;
 mod batteries;
+mod final_starts;
+pub mod footing;
 mod front;
+pub use final_starts::place as scene_starts;
 pub mod ground;
 mod sites;
 mod starts;
@@ -66,12 +69,17 @@ pub const VEHICLE_JITTER_DEG: i32 = 30;
 /// rotation about its centroid.
 pub const FLEET_SHIFT_FT: i64 = 6_000;
 pub const FLEET_TURN_DEG: i32 = 20;
+/// Bounded search for a valid fleet move within the existing shift/turn limits.
+pub const FLEET_CANDIDATES: usize = 128;
 /// Each ship after the fleet's move.
 pub const SHIP_JITTER_FT: i64 = 300;
 pub const SHIP_JITTER_DEG: i32 = 10;
 /// Candidates per jittered object; the first that stands wins, else the
 /// retail (or relocated) spot.
 pub const JITTER_CANDIDATES: usize = 8;
+/// Initial bounded ring search for support. Final footprint placement repairs
+/// an invalid fallback after airport replacement without removing equipment.
+pub const SUPPORT_CANDIDATES: usize = 128;
 /// A placed unit keeps this far, plus its own radius, from every runway.
 pub const RUNWAY_CLEARANCE_FT: i64 = 300;
 /// Land units stand where the four corner elevations span at most this many
@@ -384,10 +392,29 @@ pub(crate) fn stands(
         [at[0] - radius, at[1] + radius],
         [at[0] + radius, at[1] + radius],
     ];
-    if corners.iter().any(|c| ground.water(*c) != ship) {
+    if corners
+        .iter()
+        .any(|c| !ground.inside(*c, 0) || ground.water(*c) != ship)
+    {
         return false;
     }
-    if !ship && !ground.level(at, LEVEL_UNITS) {
+    // Preliminary conservative grade check. The completed scene applies the
+    // actual oriented footprint and the unit type's limit.
+    if !ship
+        && !footing::slope_ok(
+            ground,
+            Placed {
+                id: 0,
+                at,
+                heading: 0,
+                footprint: Footprint {
+                    min: [-radius, -radius],
+                    max: [radius, radius],
+                },
+            },
+            10,
+        )
+    {
         return false;
     }
     let runway = RUNWAY_CLEARANCE_FT + radius;
@@ -395,6 +422,27 @@ pub(crate) fn stands(
         || obstacles.fixed.iter().any(|o| o.within(at, radius))
         || ground.near_runway(at, runway)
         || obstacles.strips.iter().any(|o| o.within(at, runway)))
+}
+
+/// Occupied solid unit footprints for support placement. Pavement, roads and
+/// the invisible barrage controller are not bodies to avoid here.
+pub(crate) fn occupied<'a>(
+    units: impl Iterator<Item = &'a Unit>,
+    types: &mut dyn FnMut(&str) -> TypeInfo,
+) -> Vec<([i64; 2], i64)> {
+    units
+        .filter_map(|unit| {
+            let info = types(&unit.resource);
+            (!info.strip && !info.bridge_or_road && unit.resource != BARRAGE_ZONE)
+                .then_some((xz(unit.position), info.footprint.radius()))
+        })
+        .collect()
+}
+
+pub(crate) fn clear_of_units(at: [i64; 2], radius: i64, occupied: &[([i64; 2], i64)]) -> bool {
+    occupied
+        .iter()
+        .all(|(other, size)| distance2(at, *other) >= (radius + size).pow(2))
 }
 
 /// A point uniformly inside a disc of `radius` feet (rejection sampling).
@@ -590,6 +638,88 @@ fn commit(surface: &mut Surface, added: Vec<Added>) {
     }
     surface.units.sort_by_key(|unit| unit.id);
     surface.placements.sort_by_key(|(id, _)| *id);
+}
+
+/// Rebuild the front against the completed objective, before scene grounding.
+pub fn finish_layout(surface: &mut Surface, inputs: &mut Inputs<'_, '_>) {
+    rebuild_front(surface, inputs, true);
+}
+
+/// Recheck a repaired scene at another separation without repeating vehicle repair.
+/// The caller must restore the raw front first, including its fallback equipment.
+pub fn recheck_front(surface: &mut Surface, inputs: &mut Inputs<'_, '_>) {
+    rebuild_front(surface, inputs, false);
+}
+
+fn rebuild_front(surface: &mut Surface, inputs: &mut Inputs<'_, '_>, repair: bool) {
+    use super::IdRange;
+    let old_units: Vec<_> = surface
+        .units
+        .iter()
+        .filter(|u| u.id.range() == IdRange::FrontLine)
+        .cloned()
+        .collect();
+    let old_placements: Vec<_> = surface
+        .placements
+        .iter()
+        .filter(|(id, _)| id.range() == IdRange::FrontLine)
+        .cloned()
+        .collect();
+    surface.units.retain(|u| u.id.range() != IdRange::FrontLine);
+    surface
+        .placements
+        .retain(|(id, _)| id.range() != IdRange::FrontLine);
+    surface
+        .object_sides
+        .retain(|id, _| UnitId(*id).range() != IdRange::FrontLine);
+    surface
+        .layout_notes
+        .retain(|n| !n.starts_with("no front line:"));
+    if repair {
+        footing::repair(surface, inputs.ground, inputs.types);
+    }
+    surface.starts = starts::place(surface, inputs.ground);
+    let mut added = Vec::new();
+    let mut notes = Vec::new();
+    let fixed: Vec<_> = surface
+        .units
+        .iter()
+        .filter_map(|unit| {
+            let info = (inputs.types)(&unit.resource);
+            (!info.strip && !info.bridge_or_road && unit.resource != BARRAGE_ZONE).then_some(
+                Placed {
+                    id: unit.id.0,
+                    at: xz(unit.position),
+                    heading: unit.angles[0],
+                    footprint: info.footprint,
+                },
+            )
+        })
+        .collect();
+    front::add(
+        surface,
+        inputs,
+        &Obstacles {
+            fixed: &fixed,
+            strips: &[],
+        },
+        &mut added,
+        &mut notes,
+    );
+    if added.is_empty() && !old_units.is_empty() {
+        for u in &old_units {
+            surface.object_sides.insert(u.id.0, u.side);
+        }
+        surface.units.extend(old_units);
+        surface.placements.extend(old_placements);
+        notes.push(
+            "front clearance unresolved: retained original equipment after final-start recheck"
+                .into(),
+        );
+    } else {
+        commit(surface, added);
+    }
+    surface.layout_notes.extend(notes);
 }
 
 #[cfg(test)]

@@ -349,7 +349,11 @@ design drawn with the imported raster font. Every default is listed in the
   instruments, View, Communication and Game and menus. Click a group header to
   fold it. Each action has a primary and secondary input; click one to capture
   a replacement and operate the control. Axis rows also have an invert box and a
-  response curve button (1.0, 1.5, 2.0, 3.0). **Clear** removes the action's
+  response curve button (1.0, 1.5, 2.0, 3.0). The invert box has no label, so
+  resting the pointer on it for about half a second shows a small tooltip,
+  `INV: invert this axis`, below it (above on the last rows, clipped inside the
+  screen, never over the box; John, 2026-10-23). Moving off, clicking or
+  scrolling hides it. **Clear** removes the action's
   inputs on this device; Delete or Backspace clears only the focused input.
   Profile bindings for actions the screen does not list appear under
   **Other bindings**, where they can be cleared.
@@ -382,6 +386,20 @@ design drawn with the imported raster font. Every default is listed in the
   restores the selected device's defaults in the draft. **Back** or Esc discards
   anything not applied. Arrow keys, Tab, Page Up/Down and Enter navigate; a
   controller's D-pad, A and B do too, except while capturing.
+
+**Click to cycle** (John, 2026-10-23): on this screen a left click turns a value
+to its next one and a right click to the one before, as in the Quick Mission
+creator and the lobby's Settings. The response curve button wraps at both ends
+(1.0, 1.5, 2.0, 3.0, then 1.0; backward, 1.0 goes to 3.0). The invert box and
+the on/off settings (rumble, defaults for new gamepads, mouse look and invert,
+head source and invert) flip in either direction. A stepped value (deadzone,
+sensitivities, head scales) steps down on a right click and stops at its ends,
+as the left third of its box does. A right click needs its press and release on
+the same control, does not start the modifier capture, and is left to the
+capture while an input is being captured (the right button is then the input
+captured on the Mouse tab). Keyboard and controller keep their keys: Enter
+turns a value forward, Left and Right step a stepped setting; there is no
+reverse key for the curve button.
 
 The editor saves the explicitly loaded `--input-profile` file, or `input-v1.conf`
 in the [application data directory](DEVELOPMENT.md). It writes a canonical profile
@@ -1258,10 +1276,19 @@ list pickers. The player's wing never cycles below one. Right-click requires a
 matching press/release and cannot launch, cancel or select through a modal list.
 The ordnance view retains right-click quantity decrement.
 
+The same rule (left click next, right click back, wrapping; John, 2026-10-23)
+holds for every click-to-cycle value in the menus: the controls screen (see
+above), the Escape menu's Stability level, HUD colour and AI observation rate
+rows and its on/off rows in flight, and the respawn menu's Internal fuel row
+(a tenth a click, wrapping between a tenth and full). Rows that choose one of
+a set (Time, Damage, Enemy AI, the Graphics and Replays choice buttons) and
+commands are unchanged, and the keys still turn forward only.
+
 In Load Ordnance, drag a catalog weapon onto a compatible station to load it.
 Its picture follows the pointer. Drag a loaded station to another station to
 transfer ammunition, or back into the catalog area to empty it. Escape cancels
-a drag. Left-click a loaded station to add one, up to its capacity. Click an
+a drag. Left-click a loaded station to add one (a pair on a paired
+station), up to its capacity. Click an
 empty station to load the selected catalog weapon. Empty stations retain a red
 outline. See the
 [drag and quantity rules](spec/ordnance-presentation.md#dragging-and-empty-stations).

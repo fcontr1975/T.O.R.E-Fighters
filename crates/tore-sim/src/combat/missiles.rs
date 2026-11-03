@@ -4,6 +4,12 @@ use super::{EnginePhase, altitude_performance};
 use crate::attitude::{Basis, Vector, dot, unit};
 use tore_formats::weapons::{Movement, Weapon, Zone};
 
+pub mod decoys;
+pub mod energy;
+pub mod energy_estimate;
+pub mod energy_profile;
+pub mod energy_seeker;
+pub mod prediction;
 mod terrain;
 pub use terrain::launch_line_clear;
 
@@ -18,6 +24,13 @@ pub enum Rules {
     Compatibility,
     #[default]
     Spec,
+    /// Finite-energy rules selected by new worlds; historical tools retain Spec.
+    Energy,
+}
+impl Rules {
+    pub fn uses_seeker(self) -> bool {
+        self != Self::Compatibility
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -528,6 +541,7 @@ pub struct Motion {
     /// cannot carry it under the aim point. Every sagging missile opts in,
     /// as does surface guidance. See [`Motion::path`].
     pub holds_path: bool,
+    pub energy: Option<energy_profile::Motion>,
 }
 impl Motion {
     pub fn new(m: &Movement, velocity: Vector, altitude: f64) -> Self {
@@ -545,6 +559,7 @@ impl Motion {
             sags: false,
             cruise: None,
             holds_path: false,
+            energy: None,
         }
     }
     /// A release of `w`: the record's ejection, sag and cruise profile.
@@ -562,6 +577,67 @@ impl Motion {
                 || Guidance::air_to_ground(w).is_some(),
             ..Self::new(&w.movement, velocity, altitude)
         }
+    }
+    pub fn launch_rules(w: &Weapon, velocity: Vector, altitude: f64, rules: Rules) -> Self {
+        let mut motion = Self::launch(w, velocity, altitude);
+        if rules == Rules::Energy && w.movement.fuel_t > w.movement.ignite_t {
+            let mut velocity = velocity.map(|v| v * energy::FT);
+            if !surface_launched(&w.source) {
+                velocity[1] -= motion.sink * energy::FT;
+            }
+            motion.energy = Some(energy_profile::Motion {
+                body: energy_profile::body(w),
+                flight: energy::Flight::launch(
+                    [0., altitude * energy::FT, 0.],
+                    velocity,
+                    [0., 0., 1.],
+                ),
+                target: None,
+                observed: false,
+                wind: [0.; 3],
+                decoy: Default::default(),
+                tracking: Default::default(),
+            });
+            motion.velocity = velocity.map(|v| v / energy::FT);
+            motion.sink = 0.;
+            motion.sags = false;
+        }
+        motion
+    }
+    pub fn prepare(&mut self, position: Vector, axis: Vector, age: u64, wind: Vector) {
+        if let Some(e) = &mut self.energy {
+            e.flight.position = position.map(|v| v * energy::FT);
+            if age == 0 {
+                e.flight.axis = e.body.launch_axis(axis);
+            }
+            e.flight.age = age.min(u64::from(u32::MAX - 1)) as u32;
+            e.wind = wind.map(|v| v * energy::FT);
+            e.target = None;
+            e.observed = false;
+        }
+    }
+    pub fn track(&mut self, position: Vector, velocity: Vector) {
+        if let Some(e) = &mut self.energy {
+            e.observed = true;
+            e.target = Some(energy::Observation {
+                position: position.map(|v| v * energy::FT),
+                velocity: velocity.map(|v| v * energy::FT),
+            });
+        }
+    }
+    pub fn engine_phase(&self, m: &Movement, age: u64) -> EnginePhase {
+        self.energy.map_or_else(
+            || phase(m, age),
+            |e| {
+                if age < u64::from(e.body.ignition) {
+                    EnginePhase::BeforeIgnition
+                } else if e.body.motor(age as u32).is_some() {
+                    EnginePhase::Powered
+                } else {
+                    EnginePhase::Coast
+                }
+            },
+        )
     }
     /// The way the missile is travelling, for steering. Its velocity, and
     /// for a missile that holds its path the sag as well: the sag moves it
@@ -588,6 +664,9 @@ impl Motion {
     /// Steering rotates inherited velocity and applies fitted maneuver loss. No change of rail direction
     /// means full inherited climb/side-slip survives the unsteered boost.
     pub fn turn(&mut self, old: Vector, new: Vector) {
+        if self.energy.is_some() {
+            return;
+        }
         let axis = crate::attitude::cross(old, new);
         let angle = length(axis).atan2(dot(old, new));
         if angle > 1e-12 {
@@ -607,6 +686,23 @@ impl Motion {
         }
     }
     pub fn step(&mut self, m: &Movement, age: u64, forward: Vector) -> Vector {
+        self.step_over_terrain(m, age, forward, &|_, _| 0.)
+    }
+    pub fn step_over_terrain(
+        &mut self,
+        m: &Movement,
+        age: u64,
+        forward: Vector,
+        ground: &impl Fn(f64, f64) -> f64,
+    ) -> Vector {
+        if let Some(e) = &mut self.energy {
+            let before = e.flight.position;
+            e.flight.step_terrain(e.body, e.wind, e.target, &|x, z| {
+                ground(x / energy::FT, z / energy::FT) * energy::FT
+            });
+            self.velocity = e.flight.velocity.map(|v| v / energy::FT);
+            return std::array::from_fn(|i| (e.flight.position[i] - before[i]) / energy::FT);
+        }
         match phase(m, age) {
             EnginePhase::Powered => {
                 let gain =
@@ -774,6 +870,7 @@ struct FlyOut {
     vectors: [[u64; 3]; 4],
     age: u64,
     lifetime: u64,
+    energy: Option<energy_profile::Motion>,
 }
 
 type KeptSolutions = (Vec<(FlyOut, Option<Solution>)>, usize);
@@ -810,6 +907,7 @@ pub fn intercept_kept(
         sags,
         cruise,
         holds_path,
+        energy,
     } = motion;
     let key = FlyOut {
         movement: *m,
@@ -824,6 +922,7 @@ pub fn intercept_kept(
         vectors: [bits(position), bits(forward), bits(target), bits(velocity)],
         age,
         lifetime,
+        energy,
     };
     if let Some(kept) = SOLUTIONS.with(|kept| {
         kept.borrow()

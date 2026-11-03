@@ -13,6 +13,8 @@ use tore_sim::combat::{
 };
 use tore_world::mission::{LoadoutSpec, MissionSpec};
 
+mod store_pairs;
+
 /// What the audit must find: a short count of anything fails the run, so a
 /// partial import cannot pass with fewer checks. Raise these on purpose, and
 /// record why in `docs/baselines/ordnance-availability.md`, when the supported
@@ -134,6 +136,7 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
                 .cloned()
                 .ok_or_else(|| std::io::Error::other(format!("ordnance audit missing {name}")))
         })?;
+        store_pairs::audit(&standard, &aircraft, data)?;
         extra_stations(&standard, &aircraft, data)?;
         let rows = standard.editable_stations();
         if !rows
@@ -168,7 +171,8 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
                 0
             };
             if source.store.as_deref() != Some(station.weapon.source.as_str())
-                || count != i32::from(station.count)
+                || loading::StorePairs::of(station.rack, station.mount).maximum(count)
+                    != i32::from(station.count)
             {
                 return Err(format!("{} default weapon or quantity changed", id.pt()).into());
             }
@@ -180,7 +184,9 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
                 .as_deref()
                 .filter(|name| name.ends_with(".GAS"));
             if tank.store.as_ref().map(|s| s.source.as_str()) != default
-                || i32::from(tank.quantity) != if default.is_some() { source.count } else { 0 }
+                || i32::from(tank.quantity)
+                    != loading::StorePairs::of(tank.rack, tank.mount)
+                        .maximum(if default.is_some() { source.count } else { 0 })
             {
                 return Err(format!("{} default tank or quantity changed", id.pt()).into());
             }
@@ -318,6 +324,7 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
                             weapon.source
                         )
                     })?;
+                let expected = standard.store_pairs(slot).maximum(expected);
                 if standard.capacity(slot, weapon) != expected {
                     return Err(format!(
                         "{} source station {} capacity differs for {}",
@@ -351,7 +358,7 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
                         .and_then(|r| r.weapon)
                     {
                         let mut overlap = draft.clone();
-                        overlap.quantities[weapon] = 1;
+                        overlap.quantities[weapon] = overlap.store_pairs(weapon).step(1) as u16;
                         overlap.refresh_equipment()?;
                         if !overlap
                             .validate()
@@ -440,6 +447,16 @@ pub fn validate(data: &BTreeMap<String, Vec<u8>>) -> AppResult<()> {
         "ordnance audit: {} novelty records, {novelty_cases} Cheat-only placements, refused without Cheat loading, listed only in the Cheat catalog; passed",
         novelty.len()
     );
+    // The selectable concept shares F22N's source records, but runs the
+    // shared capacity rules with its own runtime identity as flight does.
+    let mut concept = Aircraft::parse(&data[AircraftId::Faxx.pt()])?;
+    concept.id = AircraftId::Faxx;
+    let load = Loadout::new(&concept, |name| {
+        data.get(name)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other(format!("missing {name}")))
+    })?;
+    store_pairs::audit(&load, &concept, data)?;
     Ok(())
 }
 
@@ -506,6 +523,16 @@ fn check_pods(
                 return Err(format!("{pt} station {slot} did not take {}", pod.source).into());
             }
             assert_roundtrip(&draft, standard, aircraft, data)?;
+            let mut malformed = LoadoutSpec::of(&draft);
+            malformed.stations[slot].count = malformed.stations[slot].count.saturating_add(2);
+            let error = malformed
+                .check_for_plane(aircraft, data, false)
+                .err()
+                .ok_or("malformed designator layout accepted")?
+                .to_string();
+            if error != "Loadout capacity must match the current loadout." {
+                return Err(format!("non-pairing loadout error differs: {error}").into());
+            }
             // A weapon taking the station back removes the pod.
             let weapon = draft.configuration.stations[slot].weapon.clone();
             let mut back = draft.clone();
@@ -584,8 +611,9 @@ fn check_novelty(standard: &Loadout, novelty: &[Weapon], pt: &str) -> AppResult<
             let mut draft = cheat.clone();
             draft.select(slot, weapon.clone())?;
             draft.fuel_lbs = 0.;
-            for count in &mut draft.quantities {
-                *count = (*count).min(1);
+            for index in 0..draft.quantities.len() {
+                draft.quantities[index] =
+                    draft.quantities[index].min(draft.store_pairs(index).step(1) as u16);
             }
             draft.refresh_equipment()?;
             draft.validate()?;
@@ -878,7 +906,9 @@ fn gun_pod_row(
     let mut armed = standard.clone();
     armed.select(slot, pod.clone())?;
     let pod_lbs = f64::from(armed.configuration.gun_pods[0].weight_lbs);
-    let swapped_out = f64::from(standard.configuration.stations[slot].weapon.weight)
+    let swapped_out = standard.configuration.stations[slot]
+        .weapon
+        .carried_weight_lb()
         * f64::from(standard.quantities[slot]);
     if armed.quantities[slot] != 1
         || armed.configuration.gun_pod(slot).map(|p| p.quantity) != Some(1)
@@ -998,10 +1028,9 @@ fn gun_pod_row(
 }
 
 /// The F-16C wingtip pair (stations 1 and 9) takes the AIM-120 as well as the
-/// AIM-9, one a tip, and nothing else changes: every other supported weapon
-/// keeps exactly the source row's mask and weight rule, the AIM-120 loads,
-/// saves, restores and leaves like any other store, and the other rows are
-/// untouched.
+/// AIM-9, one a tip. Other supported weapons keep source compatibility and
+/// weight arithmetic followed by the shared store-pair policy. The AIM-120
+/// loads, saves, restores and leaves like any other store.
 fn check_f16_tip(
     standard: &Loadout,
     aircraft: &Aircraft,
@@ -1037,6 +1066,7 @@ fn check_f16_tip(
             expected
         };
         let capacity = standard.capacity(slot, &weapon);
+        let expected = standard.store_pairs(slot).maximum(expected);
         if capacity != expected {
             return Err(
                 format!("F-16C wingtip {name}: capacity {capacity}, expected {expected}").into(),
@@ -1115,16 +1145,16 @@ fn check_f16_tip(
         )
         .into());
     }
-    // The AIM-9 stays at its old count, and one step down leaves one.
+    // The AIM-9 stays at its old maximum; one step unloads the pair.
     let sidewinder = Weapon::parse("AIM9M.JT", &data["AIM9M.JT"])?;
     if standard.capacity(slot, &sidewinder) != 2 {
         return Err("F-16C wingtip AIM-9 capacity changed".into());
     }
     tips.change(slot, -1);
-    if tips.quantities[slot] != 1 {
+    if tips.quantities[slot] != 0 {
         return Err("F-16C wingtip AIM-120 quantity step".into());
     }
-    // Other aircraft and the F-16C's other rows are untouched.
+    // Other rows retain their masks with the same physical pair policy.
     for row in 0..aircraft.hardpoints.len() {
         if row == F16_TIP {
             continue;
@@ -1138,13 +1168,13 @@ fn check_f16_tip(
                     h.store.as_deref() == Some("AIM120.JT"),
                 )
                 .max(0);
-            if standard.capacity(other, &amraam) != want {
+            if standard.capacity(other, &amraam) != standard.store_pairs(other).maximum(want) {
                 return Err(format!("F-16C row {row} AIM-120 capacity changed").into());
             }
         }
     }
     println!(
-        "F-16C wingtip AIM-120: two a load (one a tip), saved, restored and fired guided from each tip edge; every other tip store unchanged"
+        "F-16C wingtip AIM-120: two a load (one a tip), saved, restored and fired guided from each tip edge; pair-sized editing checked"
     );
     Ok(())
 }
@@ -1187,11 +1217,13 @@ fn assert_roundtrip(
     // state above, then validate a lightweight instance through the lobby rule.
     let mut light = restored;
     light.fuel_lbs = 0.;
-    for count in &mut light.quantities {
-        *count = (*count).min(1);
+    for slot in 0..light.quantities.len() {
+        light.quantities[slot] = light.quantities[slot].min(light.store_pairs(slot).step(1) as u16);
     }
     for tank in &mut light.configuration.tanks {
-        tank.quantity = tank.quantity.min(1);
+        tank.quantity = tank
+            .quantity
+            .min(loading::StorePairs::of(tank.rack, tank.mount).step(1) as u16);
     }
     light.refresh_equipment()?;
     light.validate()?;

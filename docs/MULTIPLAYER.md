@@ -34,6 +34,22 @@ The client now prepares received missions on a background worker and shows a
 keepalives continue while it builds. Escape during mission preparation cancels
 the join. Host and join content checks are polled too. Remaining validation is listed in that spec.
 
+Loadout requests must obey the [even-paired-load rule](spec/stores-on-pylons.md#even-paired-loads).
+The lobby's Load Ordnance page starts from the standard load, or the page
+already edited in this session, so there is no saved multiplayer load to
+migrate. Live requests, and plane loadouts written
+into a server's mission text, with odd paired quantities or obsolete
+capacities are rejected (an odd paired count says `Paired stores must be
+loaded in pairs.`). The stores event layout is unchanged, but peers need the
+same capacity and validation rules.
+
+Bridge HP and destruction use the existing authoritative surface snapshots and
+recorded surface HP. The [bridge correction](spec/bridges.md) changes shared
+world geometry, including geometry rebuilt for old recordings, without adding
+wire fields or changing replay/checkpoint layouts. Bridge END generated ruins
+are selected at zero HP and use the same deterministic collapse on every client
+and replay; span types retain their retail broken art.
+
 ## Contents
 
 - [Goals](#goals)
@@ -101,6 +117,27 @@ suffix: "Viper" and "Viper_2".
 
 **Rejoin token.** On first join the server issues a token that the game saves in
 the background. Tokens are specific to one server and expire after 24 hours.
+
+Vehicle placement and canonical airfield ranking follow the deterministic rules
+in [surface defenses](spec/surface-defenses.md#jitter). The creator offers only
+the distances a fixed table gives for the theater, target and start, and a host
+moves a mission's distance that the table leaves out the same way, with a log
+line ([keeping the enemy on the map](spec/quick-mission-menu.md#keeping-the-enemy-on-the-map)).
+A distance that still does not fit is refused at mission build instead of shortened. CAP checkpoints now include the optional map rectangle
+that clips their region. These changes alter surface digests, scene positions and
+checkpoint bytes; the release integration must handle the protocol/replay version
+bump together with the other 0.2.2-rc1 changes.
+
+The launcher, gun and added-radar footing limit is now a fitted 20%, matching
+other vehicles; tanks keep 30% (John requested loosening on 2026-10-26). With a
+ground target and a player ground start, the creator offers every distance because
+the target determines the enemy position.
+
+Hosts try at most sixteen consecutive seeds after a placement refusal, then send
+only the successfully built seed. Startup, King's mission changes, restart and
+rotation share this rule; clients never choose their own replacement. Each
+successful choice is logged. Distance errors and missing resources do not trigger
+seed retries. See [the server seed policy](DEDICATED-SERVER.md#surface-placement-seeds).
 
 ## Lobby and Quick Mission flow
 
@@ -584,10 +621,15 @@ also asked for 75 on the **separation**.*
   A trip back from 150 nm takes about 15 to 20 minutes at cruise.
 - **Separation** (the Quick Mission creator's field 17, `separation-nm` in a
   mission file): now 1, 2, 5, 10, 20, 50, **75**, 100, 150, 200 and 300 nm.
-  Where a long separation does not fit a small theater, the enemy is placed as
-  far as the map allows; multiplayer's lobby does not yet say so, as single
-  player does. At 150 nm the sides still meet, about 10 minutes in, so a
+  The creator, the King's included, lists only the distances that fit the
+  theater, ground target and start, from a fixed table; a host moves a
+  distance the table leaves out to the nearest offered one below it and logs
+  it ([keeping the enemy on the map](spec/quick-mission-menu.md#keeping-the-enemy-on-the-map)).
+  At 150 nm the sides still meet, about 10 minutes in, so a
   10-minute time limit can end a game first.
+- **Situation** (the creator's field 16, `situation` in a mission file):
+  advantage, neutral or disadvantage, carried in the mission since 2026-10-28
+  and shown in the read-only creator ([situation](spec/quick-mission-menu.md#situation)).
 
 ### Lead hold
 
@@ -1228,6 +1270,15 @@ after the loss when the old host's own player is lost with it); a handover
 takes 20 ms and the players have snapshots again within a quarter of a
 second. The game runs it from slice K7a.
 
+*Changed 2026-10-24 (agent decision, 0.2.2):* a player whose game is slow to
+send its kept inputs after a takeover (the new host's own game on a busy
+machine, say) no longer loses its snapshots for the rest of the flight, and a
+standby that needed one fresh checkpoint gets one, rather than one every 10
+seconds that it refused, and a takeover that takes seconds to catch up no
+longer drops every player the moment it is done: the 5 seconds the players
+have to come back count from when the new host can answer them
+([architecture](ARCHITECTURE.md#host-migration-and-rejoin)).
+
 The [architecture](ARCHITECTURE.md#host-migration-and-rejoin) has the design
 and its slices, the [wire protocol](formats/net-protocol.md#host-migration-and-rejoin-stage-k)
 the bytes.
@@ -1327,7 +1378,10 @@ the [master's wire](formats/master-protocol.md) and
   sent; the relay carries only pairs it introduced, at most 128 KB/s each way
   per pair and within a monthly allowance ([numbers](formats/master-protocol.md#limits)).
 - **When it is down,** the Internet Lobby is empty. Local games, Direct
-  Connection and joining by address never use the master.
+  Connection and joining by address never use the master. A listed game or
+  server keeps asking, round the master's addresses, and is listed again
+  within 15 seconds of the master answering, with no restart (0.2.2,
+  [finding the master again](formats/master-protocol.md#finding-the-master-again)).
 
 ### Connection path
 
@@ -2015,7 +2069,9 @@ reservation ends (the King's Release).
 
 With `respawn revive`, the flight continues beneath a menu while waiting, using the in-flight
 Escape menu widget. Loadout lists stations in Load Ordnance display order, then
-internal fuel, Standard load and Done. Select a station to open its compatible
+internal fuel (a click raises it a tenth and wraps from full to a tenth; a
+right click lowers it a tenth and wraps from a tenth to full), Standard load and
+Done. Select a station to open its compatible
 stores and quantities, grouped and ordered like the pre-flight Load Ordnance
 catalog. Player Choice slots have one complete Aircraft list in creator/lobby
 order. Both lists have a red scroll bar and a case-insensitive search by name
@@ -2063,3 +2119,5 @@ Cancel, Escape cancels, and the controller can type through an on-screen
 keyboard. See [replay flags and export](REPLAYS.md#player-feedback-flags) and
 [server settings](DEDICATED-SERVER.md#recording-and-feedback). Protocol 67
 carries the operator's flag and reliable feedback messages.
+
+The unreleased protocol-75 ordnance readout appends the optional contiguous-region minimum to the estimates field. HUD clients use this minimum with the published maximum for the range scale. The lead owns the eventual protocol bump.

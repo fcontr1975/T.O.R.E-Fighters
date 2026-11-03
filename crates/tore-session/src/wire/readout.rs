@@ -1053,6 +1053,7 @@ impl QReadout {
             i64::from(e.hit_percent),
         ])
         .chain(option_pair(e.solution_seconds.map(|t| q(t, SECONDS))))
+        .chain(option_pair(e.min_range.map(|r| q(r, COARSE_FT))))
         .collect();
         let t = &readout.targets;
         let view_mode = match (&t.view, &t.display) {
@@ -1472,6 +1473,7 @@ impl QReadout {
             guidance_available: pick(es, 1) != 0,
             can_lock: pick(es, 2) != 0,
             observation: observation(list::ESTIMATE_OBSERVATION)?,
+            min_range: opt(es, 12).map(|r| v(r, COARSE_FT)),
             max_range: opt(es, 3).map(|r| v(r, COARSE_FT)),
             band: (pick(es, 5) != 0).then(|| FiringBand {
                 minimum: v(pick(es, 6), COARSE_FT),

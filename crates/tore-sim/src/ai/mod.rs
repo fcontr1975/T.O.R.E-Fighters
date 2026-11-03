@@ -31,6 +31,7 @@ pub mod fitted;
 pub mod formation;
 pub mod geometry;
 pub mod gunnery;
+pub mod helicopter_ahead;
 pub mod helicopter_defense;
 pub mod helicopter_threat;
 pub mod incoming_fire;

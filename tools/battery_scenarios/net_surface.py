@@ -8,7 +8,7 @@ launches).
 
 `net-surface-pvp`: the same mission in PvP with one bot on each side. Redfor defends the target: the Blue bot's
 debrief has the Destroy line, the Red bot's the Protect line; Redfor's own radars never paint the Red bot (Blue's may). Blue's
-capture converts into a format 3 replay with the ground target, its seed and the surface units named.
+capture converts into a format 4 replay with the ground target, its seed and the surface units named.
 
 `net-redfor-ground-start`: the same PvP mission with `enemy-start ground auto` (slice CL-R): the Red bot takes
 Enemy Wing 1's lead parked at the Redfor field the world picks and starts there on the ground (the bot's start
@@ -126,7 +126,7 @@ def drive_pvp(d: Drive) -> None:
         bot.forbid(NET_BAD, "a network problem")
         bot.forbid(r"places this mission's ground target differently", "a surface digest refusal")
     server.forbid(NET_BAD, "a network problem")
-    # Blue's capture converts into a format 3 replay with the surface tracks (replay slice RP1's hooks).
+    # Blue's capture converts into a format 4 replay with the surface tracks (replay slice RP1's hooks).
     if not capture.exists():
         d.problem("the Blue bot wrote no capture")
         return
@@ -138,7 +138,7 @@ def drive_pvp(d: Drive) -> None:
         return
     info = d.run("info", [d.app, "--recording-info", replay], timeout=60)
     info.expect(r"^State +finished normally", "a finished replay")
-    info.expect(r"^Game +.*, format 3,", "a format 3 recording")
+    info.expect(r"^Game +.*, format 4,", "a format 4 recording")
     info.expect(r"^Ground +target QUCOL with AAA 3 and SAM 3, surface seed [1-9]", "the ground target and its seed")
     info.expect(r"^Surface +[1-9]\d* units named", "the surface units named")
     info.forbid(r"INCOMPLETE|^Problem", "damage")

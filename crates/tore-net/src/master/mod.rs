@@ -99,8 +99,8 @@ pub use packet::{
 };
 pub use relay::{Channels, HostRelays, RelayCounters, RelayFraming, RelayFramings};
 pub use rendezvous::{
-    HostListing, HostRendezvous, HostTally, ListingState, Rendezvous, RendezvousCounters,
-    RendezvousEvent,
+    HostListing, HostRendezvous, HostTally, ListingState, MasterSwitch, Rendezvous,
+    RendezvousCounters, RendezvousEvent,
 };
 pub use routed::{Routed, channel_of, is_relayed, relayed_address};
 

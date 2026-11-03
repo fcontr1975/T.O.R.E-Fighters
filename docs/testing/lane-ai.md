@@ -54,7 +54,7 @@ minutes cost about 4 minutes.
 | Long runs | `ai-long-*` | 30 simulated minutes (216,000 ticks) of 1 v 1, 5 v 5, 15 v 15, hold, guns and a ground landing |
 | Recordings | `ai-record-*` | `--record-mission --verify-render` must say PASS |
 | Determinism | `ai-determinism-*` | the same arguments run twice on fresh profile copies give identical output; `ai-determinism-recordings` records a 5 v 5 twice and `--recording-diff` must say they match |
-| Regressions | `ai-regress-*` | one per defect fixed below, checked strictly |
+| Regressions | `ai-regress-*` | one per defect fixed below, checked strictly; `ai-regress-missile-inert-end` requires active defense to end on the exact tick of post-burn defeat and decoy passage; two deterministic IR seeds retain a decoy-passage event with the two-second burst cadence |
 | Acceptance probes | `ai-roster-probe`, `ai-probe-matrix` | the fixed roster and 1,008-encounter probes |
 | Other theaters | `ai-theater-*` | all 16 base theaters: a 4 v 4 fight, an 8 v 8 without the leader attacking, wing-of-3 takeoffs at airports 1 and 3, and a pair ordered to land at airport 1 |
 | Every aircraft's takeoff | `ai-takeoff-*` | all 14 aircraft as a ground-started pair at Zaporizhzhya (UKR 1), Ras Al Khaimah (PGU 2), Chateaudun (FRA 3) and Nuchon Ni (NSK 5) |
@@ -284,14 +284,27 @@ record with what changed (see "Sixth round" above).
 
 1. **Dithering between gun and missile.** Fixed in the fifth round from B13
    (timed motions run to their deadline); left here for the record.
-2. **Notch side on a head-on shot.** The notch turns 90 degrees toward the
-   smaller turn with a tie break; with the radar source dead ahead the side
-   flipped after one second (heading 288, then 108), wasting the roll-in.
-3. **Missile defense that dives and turns at once.** The fitted pitch law
-   pushes negative G to reach a 20 degree dive while banked, which turns the
-   aircraft the other way: a wingman asked to turn 90 degrees achieved 2 degrees
-   in 3.5 s and was hit. Steep and inverted tracking is a documented
-   approximation of the input-only controller.
+2. **Notch side on a head-on shot.** Resolved by the fitted
+   [missile defense policy](../spec/ai.md#missile-defense-flown-by-ai): the side
+   stays committed unless terrain makes it unsafe and the other side safe.
+3. **Missile defense that dives and turns at once.** Resolved by positive-G
+   defensive steering with a shallow descent and terrain recovery. The headless
+   `ai-regress-missile-positive-g-standard` and `-hybrid` scenarios fly an
+   AIM-9M tail shot against an Ace and check positive G, at least 20 degrees of
+   heading change, stable beam requests and no wrong-class devices.
+   `ai-regress-missile-head-on-break` also checks that a missile directly ahead
+   produces a hard crossing break instead of a straightening command. The
+   `ai-regress-missile-bank-low-{standard,hybrid}` cases check bank at 3,000 ft;
+   `ai-regress-missile-chaff-{novice,average}` requires chaff during the notch,
+   before the break. `ai-regress-missile-pull-*` requires useful G within 1.25 s
+   of turn entry at every skill. `ai-regress-missile-radar-memory-*` checks AIM-7
+   break continuity and zero flares across ranges and aspects.
+   These checks use traces and release timing, not hit rates:
+   the current study repeats its fixed decoy stream across seeds. The unit
+   tests cover skill limits, the 1.3x Ace/Novice turn requirement, phase sequencing,
+   terrain, opening-range confirmation, classification across gaps, the second
+   missile reserve and return to ordinary control. A missing motion estimate
+   alone is not passage. Missile flight and decoy outcomes are separate.
 4. **Leaderless wingmen after a fight.** Changed (John, 2026-09-29): leader
    succession (`7366700`), and after the fight the wing returns to base
    (`475cafc`). Later (John, 2026-09-29): in the multiplayer work this succession was replaced by
@@ -767,3 +780,38 @@ scripted jet leader's straight departure. Spassk's northern map edge is too
 close for that long jet departure. The 264,000-tick run leaves time for the
 last aircraft to taxi back from the far end of a 12,000 ft runway. The
 existing taxi/landing checker requires every AI member to park.
+
+## Missile prediction admission and launch counts
+
+`ai-missile-launch-regression` uses the natural fight mode of the release
+`missile_energy_cost` example. Build it with
+`cargo build --locked --release -p tore-world --example missile_energy_cost`.
+It reads the battery's isolated imported pack. Four F-16C 4v4 worlds run for
+120 seconds. John's Phase 2.6 decision compares guided launch counts within
+30% of the reviewed Phase 2.5 counts: 13 in each theater and 26 in the 60-second
+23-AI fight. A separate one-sided floor retains at least 70% of the independent
+review's pre-overhaul Spec counts: UKR 11, BAL/SPA/GRE 12 and the large fight 24.
+An increase over Spec is allowed within the Phase 2.5 band. These are regression
+bounds, not assertions of identical combat outcomes. Synthetic driver tests
+cover both bounds, the historical floor and failed admission.
+Every fight must have zero refused prediction requests and
+zero clients waiting over ten simulated seconds for admission. The example
+also prints cost percentiles and maximums; use a sequential release run for
+performance acceptance, since concurrent battery jobs can perturb wall time.
+
+`ai-missile-player-cue` measures the actual launcher-view HUD consumer in the
+opening 20 seconds of natural 4v4 and 23-AI fights. It requires answered hit or
+miss forecasts on 75% of all ticks and 90% of ticks with a sensor observation.
+`ai-missile-turning-cue` prescribes level player circles at 3 and 10 degrees/s
+in the same big fight, with at least 31 prediction clients, 600 observed ticks
+and 90% answers on observed ticks. The aircraft pose is scripted; enemy flying
+and sensor observations remain the normal world simulation. Missing tracks
+are reported separately from prediction latency. Use `--player-turn=3` or
+`--player-turn=10` with the example's `--natural --big` flags to repeat it.
+
+`surface-moving-hit-sa2a-*`, `surface-moving-hit-sa3-*` and
+`surface-moving-hit-sa6-*` require hits on straight, vulnerable jets at
+10,000 and 20,000 ft. They complement `surface-battery-sa2`, which checks
+battery coordination with invulnerability enabled.
+
+`ai-missile-envelope-gaps` runs the release cost example with `--gap-witness` against the isolated imported pack. It verifies R27ER hit/miss/hit points at 25/35/45 km: 25 km is in the first region (maximum between 26 and 27 km) and IN RNG, the 35 km gap advises the first region without IN RNG, and the 45 km hit advises the far region and is IN RNG; it also checks bounded queue work and completion without starvation. Synthetic combat and employment tests verify that the failed exact point cannot authorize an AI launch.

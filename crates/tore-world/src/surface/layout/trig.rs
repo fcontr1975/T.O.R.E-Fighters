@@ -72,6 +72,21 @@ pub fn along(bearing: i32, length: i64) -> [i64; 2] {
     ]
 }
 
+/// Whole-foot vector for an authored fractional-degree lane. Linear
+/// interpolation of the integer table avoids platform trigonometry; the
+/// error is below one foot over a 12,000-foot runway.
+pub fn along_millidegrees(bearing: i32, length: i64) -> [i64; 2] {
+    let degrees = bearing.div_euclid(1000);
+    let fraction = i64::from(bearing.rem_euclid(1000));
+    let interpolate = |table: fn(i32) -> i64| {
+        (table(degrees) * (1000 - fraction) + table(degrees + 1) * fraction) / 1000
+    };
+    [
+        unscale(length * interpolate(sin)),
+        unscale(length * interpolate(cos)),
+    ]
+}
+
 /// `[x, z]` turned clockwise (seen from above) by `degrees`, whole feet.
 /// A unit facing north turned by `d` faces heading `d`.
 pub fn rotate(point: [i64; 2], degrees: i32) -> [i64; 2] {

@@ -11,6 +11,18 @@
 One page. What is specified, what is built, what is next. Milestones live in
 [ROADMAP.md](ROADMAP.md); how agents work is in [AGENTS.md](../AGENTS.md).
 
+**Missile energy overhaul, 2026-10-26.** New worlds use one finite-energy
+model and physical decoy pursuit for supported powered guided weapons.
+Public/class masses, sourced range anchors and measured A2A envelopes are
+recorded with per-store motors and paired fitted conditions. John's round-3
+decision removes the geometry drag multiplier while retaining the newer-Sparrow
+refit and turning-player advice. Drag returns to the round-2 fits. Regenerated
+measurements match round 2 outside Sparrow; Linux checks and all 35 battery
+scenarios pass, with current prediction costs in the baseline.
+Phase 3 remains stopped pending lead review; its old results are invalidated.
+This is John's opinionated extension, not a retail parity claim.
+[Behaviour](spec/missile-energy.md), [baseline](baselines/missile-energy.md).
+
 **Air-to-ground weapons, 2026-10-11.** A player can now designate ground
 targets (the A-G radar page, the FLIR, the targeting sight, the HARM page), use
 CCIP and level-release bomb sights with John's "T" guide, fire rocket pods, guided

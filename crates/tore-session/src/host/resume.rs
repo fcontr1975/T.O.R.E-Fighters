@@ -219,6 +219,9 @@ struct Active {
     /// The old house when the host was lost (no handover), by join order:
     /// its game was the host, so the resume window does not wait for it.
     lost_house: Option<u64>,
+    /// When an absent player is dropped: [`DROP_AFTER`] from the new host's
+    /// first update since the takeover, set by it.
+    drop_at: Option<Duration>,
 }
 
 /// The migration's state on the host.
@@ -426,6 +429,7 @@ impl Host {
             clock,
             handed_house,
             lost_house,
+            drop_at: None,
         });
         host.resuming.notes.push(ResumeNote::TookOver {
             tick,
@@ -958,10 +962,18 @@ impl Host {
             // A host that handed over steps no more.
             return true;
         }
-        let Some(active) = &self.resuming.active else {
+        let Some(active) = &mut self.resuming.active else {
             return false;
         };
-        if now >= active.started + DROP_AFTER && !active.absent.is_empty() {
+        // The drop timeout counts from the new host's first update, when it
+        // can first answer anyone: a standby that took seconds to restore
+        // and replay (a cold one, or a warm one far behind on a busy machine)
+        // had spent them before it, and every player was dropped at once
+        // (agent decision, 2026-10-24, found by `net-window-migrate-smoke`).
+        // The resume window still counts from the takeover: once it is over
+        // the host goes on, and players resume with it live.
+        let drop_at = *active.drop_at.get_or_insert(now + DROP_AFTER);
+        if now >= drop_at && !active.absent.is_empty() {
             self.drop_absent();
         }
         let Some(active) = &self.resuming.active else {
@@ -1017,7 +1029,18 @@ impl Host {
         let present = active.present;
         let after = now.saturating_sub(active.started);
         let fast_forward = active.fast_forward;
-        let flushed: Vec<ConnectionId> = active.stores.keys().copied().collect();
+        // A player whose Backlog is still on its way keeps its store: the
+        // Backlog finds it, and its Inputs meanwhile are kept and fed from it
+        // tick by tick, as for a player resumed after the host went live
+        // (the battery's planned handover, 2026-10-24: dropped here, the late
+        // Backlog was refused, the player was never done resuming, and no
+        // snapshot went to it again).
+        let flushed: Vec<ConnectionId> = active
+            .stores
+            .iter()
+            .filter(|(_, store)| store.backlog)
+            .map(|(connection, _)| *connection)
+            .collect();
         for connection in flushed {
             self.flush_store(connection);
         }

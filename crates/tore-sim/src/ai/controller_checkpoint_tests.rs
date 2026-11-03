@@ -160,6 +160,7 @@ fn station_view(
         employment_fit: None,
         minimum_range_ft: range.0,
         maximum_range_ft: range.1,
+        energy_target: None,
         infrared_envelope: None,
         requires_radar: false,
         requires_sensor: false,
@@ -357,6 +358,7 @@ impl Scripted {
                 heading_deg: 200.,
                 pitch_deg: -10.,
                 rotorcraft: false,
+                extend: false,
             })),
             1_560 => controller.set_defense_motion(None),
             1_680 => controller.set_search_contact(Some(SearchContact {

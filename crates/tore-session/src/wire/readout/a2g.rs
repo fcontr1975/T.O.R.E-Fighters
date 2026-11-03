@@ -549,6 +549,7 @@ pub(super) fn guided_of(values: &[i64]) -> WireResult<Option<GuidedSight>> {
     };
     let range = |at: usize| (x[at] != 0).then(|| v(x[at + 1], COARSE_FT));
     Ok(Some(GuidedSight {
+        energy_intercept: None,
         kind: guidance_of(x[0])?,
         aim: (x[1] != 0).then(|| point_of(x, 2, COARSE_FT)),
         buddy: x[5] != 0,

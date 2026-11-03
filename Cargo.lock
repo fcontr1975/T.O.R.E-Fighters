@@ -1017,8 +1017,6 @@ dependencies = [
 [[package]]
 name = "naga"
 version = "27.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "066cf25f0e8b11ee0df221219010f213ad429855f57c494f995590c861a9a7d8"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -2082,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "tore-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cpal",
  "log",
@@ -2112,11 +2110,11 @@ dependencies = [
 
 [[package]]
 name = "tore-codec"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "tore-diagnostics-native"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "objc2 0.5.2",
  "objc2-app-kit",
@@ -2125,29 +2123,29 @@ dependencies = [
 
 [[package]]
 name = "tore-extract"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-formats",
 ]
 
 [[package]]
 name = "tore-formats"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "tore-import"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-formats",
 ]
 
 [[package]]
 name = "tore-input"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "tore-input-native"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dispatch2",
  "libc",
@@ -2161,21 +2159,21 @@ dependencies = [
 
 [[package]]
 name = "tore-master"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-net",
 ]
 
 [[package]]
 name = "tore-net"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-codec",
 ]
 
 [[package]]
 name = "tore-realtime-native"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",
@@ -2184,11 +2182,11 @@ dependencies = [
 
 [[package]]
 name = "tore-replay"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "tore-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-formats",
  "tore-import",
@@ -2202,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "tore-session"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-codec",
  "tore-formats",
@@ -2218,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "tore-sim"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "tore-codec",
  "tore-formats",
@@ -2228,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "tore-workers"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rayon",
  "tore-realtime-native",
@@ -2236,10 +2234,12 @@ dependencies = [
 
 [[package]]
 name = "tore-world"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
+ "rustix 1.1.4",
  "tore-codec",
  "tore-formats",
+ "tore-import",
  "tore-input",
  "tore-sim",
 ]

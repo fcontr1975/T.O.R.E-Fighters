@@ -9,6 +9,7 @@
 use crate::input_catalog::{self as catalog, ENTRIES, Entry, Group, Kind as Row};
 use crate::{hud::Paint, menu::Canvas};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 use tore_formats::font::Font;
 use tore_formats::text::GlyphCodes;
 use tore_input::profile_text::action_name;
@@ -229,6 +230,35 @@ struct Capture {
     rest: BTreeMap<String, f64>,
 }
 
+/// Where the pointer rests and since when. A tooltip shows once the pointer
+/// has stayed on one control for [`TOOLTIP_DELAY`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Hover {
+    point: Option<(f64, f64)>,
+    hit: Option<Hit>,
+    since: Option<Instant>,
+}
+
+/// How long the pointer rests on a control before its tooltip shows.
+const TOOLTIP_DELAY: Duration = Duration::from_millis(400);
+/// The invert box's tooltip (John, 2026-10-23): the box has no room for a label.
+const INVERT_TIP: &str = "INV: invert this axis";
+/// The response curve button's values, which a click turns through.
+const CURVES: [f64; 4] = [1., 1.5, 2., 3.];
+
+/// The response curve after (or before) `curve`, wrapping at both ends. A
+/// value off the list (an edited profile) counts as the listed value it is
+/// nearest to, rounding up at the halfway points of 1.25, 1.75 and 2.5.
+pub(crate) fn turn_curve(curve: f64, forward: bool) -> f64 {
+    let at = match curve {
+        x if x < 1.25 => 0,
+        x if x < 1.75 => 1,
+        x if x < 2.5 => 2,
+        _ => 3,
+    };
+    CURVES[(at + if forward { 1 } else { CURVES.len() - 1 }) % CURVES.len()]
+}
+
 pub(crate) type Rect = (i32, i32, i32, i32);
 const LEFT: Rect = (6, 24, 150, 412);
 const TAB_TOP: i32 = 42;
@@ -259,6 +289,10 @@ pub(crate) const PANEL: [u8; 4] = [36, 52, 72, 255];
 pub(crate) const TITLE: [u8; 4] = [240, 233, 194, 255];
 pub(crate) const PALE: [u8; 4] = [201, 210, 222, 255];
 pub(crate) const PALE_ALT: [u8; 4] = [190, 200, 214, 255];
+/// The tooltip's colours: the menu bar's hint strip and its outline.
+const TIP_FILL: [u8; 4] = [22, 31, 43, 255];
+const TIP_EDGE: [u8; 4] = [145, 161, 180, 255];
+const TIP_TEXT: [u8; 4] = [235, 239, 243, 255];
 const GROUP: [u8; 4] = [150, 166, 188, 255];
 pub(crate) const FOCUS: [u8; 4] = [62, 86, 118, 255];
 pub(crate) const WHITE: [u8; 4] = [247, 250, 255, 255];
@@ -281,6 +315,10 @@ pub struct Editor {
     scroll: usize,
     collapsed: BTreeSet<Option<Group>>,
     pressed: Option<Hit>,
+    /// The control a right press went down on, which turns it back on release.
+    right_pressed: Option<Hit>,
+    /// What the pointer rests on, for the hover tooltip.
+    hover: Hover,
     /// Latest raw value of every native control seen, for held modifiers.
     held: BTreeMap<(String, String), f64>,
     search: Search,
@@ -395,6 +433,8 @@ impl Editor {
             scroll: 0,
             collapsed: BTreeSet::new(),
             pressed: None,
+            right_pressed: None,
+            hover: Hover::default(),
             held: BTreeMap::new(),
             search: Search {
                 find: Find::Actions,
@@ -429,22 +469,39 @@ impl Editor {
     }
     /// Snapshot helper: `""` keeps the opening tab; `keyboard`, `mouse` and
     /// `head` select those tabs. `search` searches the opening tab's actions
-    /// for "fire"; `search-keys` finds the keyboard actions on Shift keys.
+    /// for "fire"; `search-keys` finds the keyboard actions on Shift keys;
+    /// `inv` rests the pointer on the first axis row's invert box long enough
+    /// for its tooltip to show.
     pub fn preview(&mut self, tab: &str) -> Result<(), String> {
         let tabs = self.tabs();
         self.tab = match tab {
-            "" | "search" => self.tab,
+            "" | "search" | "inv" => self.tab,
             "keyboard" | "search-keys" => 0,
             "mouse" => 1,
             "head" => tabs.len() - 1,
             _ => {
                 return Err(
-                    "controls snapshot tab must be keyboard, mouse, head, search or search-keys"
+                    "controls snapshot tab must be keyboard, mouse, head, search, search-keys or inv"
                         .into(),
                 );
             }
         };
         self.focus = Focus::Tab(self.tab);
+        if tab == "inv" {
+            let lines = self.lines();
+            let row = (0..LIST_LINES.min(lines.len()))
+                .find(|row| self.columns(self.scroll + row).contains(&2))
+                .ok_or("the controls snapshot has no axis row for its invert box")?;
+            let point = (
+                (RIGHT_X + COLUMNS[2].0 + 8) as f64,
+                (Self::line_rect(row).1 + 6) as f64,
+            );
+            self.hover = Hover {
+                point: Some(point),
+                hit: self.hit(point),
+                since: Instant::now().checked_sub(TOOLTIP_DELAY * 2),
+            };
+        }
         if let Some(text) = match tab {
             "search" => Some("fire"),
             "search-keys" => Some("shift"),
@@ -1073,7 +1130,10 @@ impl Editor {
         self.keep_visible();
         self.changed()
     }
-    fn axis_option(&mut self, index: usize, invert: bool) -> ResultAction {
+    /// The invert box (a toggle, so either direction flips it) or the response
+    /// curve button, which turns to its next value forward or its previous
+    /// one back, wrapping at both ends.
+    fn axis_option(&mut self, index: usize, invert: bool, forward: bool) -> ResultAction {
         let tab = self.current();
         let bindings: Vec<usize> = self
             .slots(index, &tab)
@@ -1092,12 +1152,7 @@ impl Editor {
             if invert {
                 c.scale = -c.scale;
             } else {
-                c.curve = match c.curve {
-                    x if x < 1.25 => 1.5,
-                    x if x < 1.75 => 2.,
-                    x if x < 2.5 => 3.,
-                    _ => 1.,
-                };
+                c.curve = turn_curve(c.curve, forward);
             }
         }
         self.changed()
@@ -1472,8 +1527,8 @@ impl Editor {
                             self.begin(Target::Slot(i, column.min(filled)));
                             ResultAction::Changed
                         }
-                        2 => self.axis_option(i, true),
-                        3 => self.axis_option(i, false),
+                        2 => self.axis_option(i, true, true),
+                        3 => self.axis_option(i, false, true),
                         _ => self.clear_slot(i, None),
                     },
                     None => ResultAction::None,
@@ -1664,6 +1719,8 @@ impl Editor {
         }
         let max = self.lines().len().saturating_sub(LIST_LINES);
         self.scroll = (self.scroll as i32 - notches * 3).clamp(0, max as i32) as usize;
+        // Another control may now rest under the pointer.
+        self.moved(self.hover.point);
         ResultAction::None
     }
     /// Native samples: tracks held modifiers and completes a device capture.
@@ -1988,6 +2045,8 @@ impl Editor {
             .map(Hit::Footer)
     }
     pub fn pointer(&mut self, point: Option<(f64, f64)>, down: bool) -> ResultAction {
+        // A click starts the tooltip's wait over.
+        self.hover.since = Some(Instant::now());
         let hit = point.and_then(|p| self.hit(p));
         if down {
             self.pressed = hit;
@@ -1998,6 +2057,130 @@ impl Editor {
             return ResultAction::None;
         }
         hit.map_or(ResultAction::None, |h| self.activate(h))
+    }
+    /// The right button: it turns a value the left button turns forward back
+    /// one (a click and a release on the same control, as the left button
+    /// needs), wrapping at both ends. It does nothing on a control that does
+    /// not cycle, and while an input is being captured the host sends it to
+    /// [`Self::mouse`] instead.
+    pub fn right_pointer(&mut self, point: Option<(f64, f64)>, down: bool) -> ResultAction {
+        self.hover.since = Some(Instant::now());
+        let hit = point.and_then(|p| self.hit(p));
+        if down {
+            self.pressed = None;
+            self.right_pressed = hit;
+            return ResultAction::None;
+        }
+        let pressed = self.right_pressed.take();
+        if pressed != hit || self.capture.is_some() {
+            return ResultAction::None;
+        }
+        hit.map_or(ResultAction::None, |h| self.turn_back(h))
+    }
+    /// What a right click on `hit` does: the previous value of a setting row
+    /// (a toggle flips), of the response curve, or the invert box flipped.
+    fn turn_back(&mut self, hit: Hit) -> ResultAction {
+        match hit {
+            Hit::Setting(i, _) => {
+                let Some(setting) = self.settings().get(i).copied() else {
+                    return ResultAction::None;
+                };
+                // Modifiers starts a capture, which has no direction.
+                if setting == Setting::Modifiers {
+                    return ResultAction::None;
+                }
+                self.focus = Focus::Setting(i);
+                self.adjust(setting, -1)
+            }
+            Hit::Cell(line, column @ (2 | 3)) => {
+                let Some(Line::Entry(i)) = self.lines().get(line).copied() else {
+                    return ResultAction::None;
+                };
+                self.focus = Focus::Cell(line, column);
+                self.axis_option(i, column == 2, false)
+            }
+            _ => ResultAction::None,
+        }
+    }
+
+    // ---- tooltips -------------------------------------------------------
+
+    /// The tooltip for the control under the pointer, if it has one.
+    fn tip(&self, hit: Hit) -> Option<&'static str> {
+        match hit {
+            Hit::Cell(line, 2) => {
+                Some(INVERT_TIP).filter(|_| matches!(self.lines().get(line), Some(Line::Entry(_))))
+            }
+            _ => None,
+        }
+    }
+    /// The pointer moved to `point` (the 640x480 layer) or left the window.
+    /// True when the picture changes: a tooltip that was showing goes away, or
+    /// the pointer came to rest on a control that has one (whose delay the
+    /// host must keep redrawing for, see [`Self::tooltip_pending`]).
+    pub fn moved(&mut self, point: Option<(f64, f64)>) -> bool {
+        self.moved_at(point, Instant::now())
+    }
+    fn moved_at(&mut self, point: Option<(f64, f64)>, now: Instant) -> bool {
+        let before = self.tooltip_shown(now);
+        let hit = point.and_then(|p| self.hit(p));
+        self.hover.point = point;
+        if hit != self.hover.hit {
+            self.hover.hit = hit;
+            self.hover.since = Some(now);
+            return before.is_some() || hit.and_then(|h| self.tip(h)).is_some();
+        }
+        false
+    }
+    /// Whether the pointer rests on a control with a tooltip that is not
+    /// showing yet, so the host redraws until it does.
+    pub fn tooltip_pending(&self) -> bool {
+        self.tooltip_shown(Instant::now()).is_none()
+            && self.hover.hit.and_then(|h| self.tip(h)).is_some()
+            && self.pressed.is_none()
+    }
+    /// The tooltip showing at `now` and the control it belongs to.
+    fn tooltip_shown(&self, now: Instant) -> Option<(&'static str, Hit)> {
+        let hit = self.hover.hit?;
+        let since = self.hover.since?;
+        // A press, a capture or a scroll since the pointer last moved hides it.
+        if self.pressed.is_some() || self.capture.is_some() {
+            return None;
+        }
+        if self.hit(self.hover.point?) != Some(hit) {
+            return None;
+        }
+        let tip = self.tip(hit)?;
+        (now.saturating_duration_since(since) >= TOOLTIP_DELAY).then_some((tip, hit))
+    }
+    /// The tooltip's box: below its control and as far right as the screen
+    /// allows, or above when there is no room below, never over the control.
+    fn tooltip_rect(font: &Font, text: &str, control: Rect) -> Rect {
+        let w = text_width(font, text) + 8;
+        let h = 14;
+        let x = (control.0 + control.2 - w).clamp(2, 638 - w);
+        let below = control.1 + control.3 + 2;
+        let y = if below + h <= 436 {
+            below
+        } else {
+            control.1 - 2 - h
+        };
+        (x, y, w, h)
+    }
+    fn draw_tooltip(&self, pixels: &mut [u8], font: &Font, now: Instant) {
+        let Some((text, hit)) = self.tooltip_shown(now) else {
+            return;
+        };
+        let Hit::Cell(line, column) = hit else {
+            return;
+        };
+        let Some(row) = line.checked_sub(self.scroll).filter(|r| *r < LIST_LINES) else {
+            return;
+        };
+        let r = Self::tooltip_rect(font, text, Self::cell_rect(row, column));
+        Canvas(pixels).rect(r, TIP_FILL);
+        Canvas(pixels).outline(r, TIP_EDGE);
+        Self::text(pixels, font, r, TIP_TEXT, text, (r.0 + 4, r.1 + 3));
     }
 
     // ---- drawing --------------------------------------------------------
@@ -2047,6 +2230,7 @@ impl Editor {
                 self.focus == Focus::Footer(i),
             );
         }
+        self.draw_tooltip(pixels, font, Instant::now());
     }
     fn draw_tabs(&self, pixels: &mut [u8], font: &Font) {
         Canvas(pixels).rect(LEFT, PANEL);
@@ -2955,6 +3139,215 @@ mod tests {
         e.focus = Focus::Tab(e.tab);
         e.key("f", false, true, false);
         assert_eq!(e.focus, Focus::Tab(e.tab));
+    }
+    /// A synthetic font: every byte a 5 pixel advance with one dot.
+    fn font() -> Font {
+        Font {
+            height: 8,
+            glyphs: (0..256)
+                .map(|_| tore_formats::font::Glyph {
+                    advance: 5,
+                    pixels: vec![(1, 3)],
+                })
+                .collect(),
+        }
+    }
+    fn center(r: Rect) -> (f64, f64) {
+        ((r.0 + r.2 / 2) as f64, (r.1 + r.3 / 2) as f64)
+    }
+    /// An editor with the roll axis bound, and the roll row's visible index.
+    fn with_roll() -> (Editor, usize, usize) {
+        let mut e = Editor::new(Profile::default(), vec![pad()], "Main menu");
+        let roll = line(&e, "Roll (bank left/right)");
+        e.activate(Hit::Cell(roll, 0));
+        event(&mut e, "axis:0", 90.);
+        let row = roll - e.scroll;
+        (e, roll, row)
+    }
+    fn right_click(e: &mut Editor, at: (f64, f64)) -> ResultAction {
+        e.right_pointer(Some(at), true);
+        e.right_pointer(Some(at), false)
+    }
+    #[test]
+    fn the_curve_turns_forward_and_back_and_wraps_at_both_ends() {
+        let forward: Vec<f64> = std::iter::successors(Some(1.), |c| Some(turn_curve(*c, true)))
+            .take(6)
+            .collect();
+        assert_eq!(forward, [1., 1.5, 2., 3., 1., 1.5]);
+        let back: Vec<f64> = std::iter::successors(Some(1.), |c| Some(turn_curve(*c, false)))
+            .take(6)
+            .collect();
+        assert_eq!(back, [1., 3., 2., 1.5, 1., 3.]);
+        // A value an edited profile left between the listed ones counts as
+        // the one it is nearest to.
+        assert_eq!(turn_curve(1.2, true), 1.5);
+        assert_eq!(turn_curve(1.2, false), 3.);
+        assert_eq!(turn_curve(2.4, true), 3.);
+        assert_eq!(turn_curve(2.4, false), 1.5);
+        assert_eq!(turn_curve(9., true), 1.);
+        assert_eq!(turn_curve(9., false), 2.);
+    }
+    #[test]
+    fn left_click_turns_the_curve_forward_and_right_click_back() {
+        let (mut e, _, row) = with_roll();
+        let curve = center(Editor::cell_rect(row, 3));
+        let shown = |e: &Editor| e.profile.bindings[0].calibration.curve;
+        assert_eq!(shown(&e), 1.);
+        for want in [1.5, 2., 3., 1.] {
+            e.pointer(Some(curve), true);
+            assert_eq!(e.pointer(Some(curve), false), ResultAction::Changed);
+            assert_eq!(shown(&e), want);
+        }
+        for want in [3., 2., 1.5, 1., 3.] {
+            assert_eq!(right_click(&mut e, curve), ResultAction::Changed);
+            assert_eq!(shown(&e), want);
+        }
+        // Forward again from the wrapped value.
+        e.pointer(Some(curve), true);
+        e.pointer(Some(curve), false);
+        assert_eq!(shown(&e), 1.);
+        assert!(e.dirty);
+    }
+    #[test]
+    fn a_right_click_flips_the_invert_box_and_needs_a_matching_release() {
+        let (mut e, _, row) = with_roll();
+        let invert = center(Editor::cell_rect(row, 2));
+        assert!(e.profile.bindings[0].calibration.scale > 0.);
+        right_click(&mut e, invert);
+        assert!(e.profile.bindings[0].calibration.scale < 0.);
+        right_click(&mut e, invert);
+        assert!(e.profile.bindings[0].calibration.scale > 0.);
+        // Pressed on the box and released elsewhere does nothing.
+        e.right_pointer(Some(invert), true);
+        e.right_pointer(Some((1., 470.)), false);
+        assert!(e.profile.bindings[0].calibration.scale > 0.);
+        // A right click on an unassigned axis row says so, as a left one does.
+        let pitch = line(&e, "Pitch (nose up/down)") - e.scroll;
+        right_click(&mut e, center(Editor::cell_rect(pitch, 3)));
+        assert_eq!(e.message, "Assign an axis first");
+    }
+    #[test]
+    fn a_right_click_steps_a_setting_back_or_flips_a_toggle_and_leaves_the_rest() {
+        let (mut e, _, _) = with_roll();
+        let at = |e: &Editor, setting: Setting| {
+            let i = e.settings().iter().position(|s| *s == setting).unwrap();
+            // The right end of the value box is a forward click for the left button.
+            let r = Editor::value_rect(Editor::setting_rect(i));
+            ((r.0 + r.2 - 4) as f64, (r.1 + 2) as f64)
+        };
+        let deadzone = e.deadzone(&e.current());
+        let p = at(&e, Setting::Deadzone);
+        right_click(&mut e, p);
+        assert!((e.deadzone(&e.current()) - (deadzone - 0.01)).abs() < 1e-9);
+        // The left click on the right of the box steps up again.
+        let p = at(&e, Setting::Deadzone);
+        e.pointer(Some(p), true);
+        e.pointer(Some(p), false);
+        assert!((e.deadzone(&e.current()) - deadzone).abs() < 1e-9);
+        let rumble = e.profile.rumble;
+        let p = at(&e, Setting::Rumble);
+        right_click(&mut e, p);
+        assert_ne!(e.profile.rumble, rumble);
+        let p = at(&e, Setting::Rumble);
+        right_click(&mut e, p);
+        assert_eq!(e.profile.rumble, rumble);
+        // The modifier row starts a capture on a left click only.
+        let p = at(&e, Setting::Modifiers);
+        right_click(&mut e, p);
+        assert!(!e.capturing());
+        // Nothing else is turned: a tab, or a mapping cell.
+        let tab = e.current();
+        right_click(&mut e, center(Editor::tab_rect(0)));
+        assert_eq!(e.current(), tab);
+    }
+    #[test]
+    fn a_right_click_while_capturing_is_left_to_the_mouse_capture() {
+        let (mut e, _, row) = with_roll();
+        e.activate(Hit::Cell(row + e.scroll, 0));
+        assert!(e.capturing());
+        let curve = center(Editor::cell_rect(row, 3));
+        let before = e.profile.bindings[0].calibration.curve;
+        right_click(&mut e, curve);
+        assert_eq!(e.profile.bindings[0].calibration.curve, before);
+        assert!(e.capturing());
+    }
+    #[test]
+    fn the_invert_box_shows_its_tooltip_after_a_short_hover() {
+        let (mut e, roll, row) = with_roll();
+        let cell = Editor::cell_rect(row, 2);
+        let at = center(cell);
+        let now = Instant::now();
+        assert!(e.tooltip_shown(now).is_none());
+        // Coming to rest on the box is a change to redraw for, but nothing shows yet.
+        assert!(e.moved_at(Some(at), now));
+        assert!(e.tooltip_shown(now + Duration::from_millis(100)).is_none());
+        assert_eq!(
+            e.tooltip_shown(now + TOOLTIP_DELAY),
+            Some((INVERT_TIP, Hit::Cell(roll, 2)))
+        );
+        // Moving within the box keeps it; leaving it takes it away.
+        assert!(!e.moved_at(Some((at.0, at.1 - 1.)), now + TOOLTIP_DELAY));
+        assert!(e.tooltip_shown(now + TOOLTIP_DELAY).is_some());
+        assert!(e.moved_at(None, now + TOOLTIP_DELAY));
+        assert!(e.tooltip_shown(now + TOOLTIP_DELAY * 2).is_none());
+        // Other controls have none: the curve button, a mapping cell.
+        for column in [0, 3, 4] {
+            let p = center(Editor::cell_rect(row, column));
+            assert!(!e.moved_at(Some(p), now));
+            assert!(e.tooltip_shown(now + TOOLTIP_DELAY * 4).is_none());
+        }
+        // A press hides it and starts the wait again.
+        e.moved_at(Some(at), now);
+        e.pressed = Some(Hit::Cell(roll, 2));
+        assert!(e.tooltip_shown(now + TOOLTIP_DELAY * 4).is_none());
+        e.pressed = None;
+        // A tooltip does not stay where a scroll moved another row's box.
+        assert!(e.tooltip_shown(now + TOOLTIP_DELAY * 4).is_some());
+        e.scroll += 1;
+        assert!(e.tooltip_shown(now + TOOLTIP_DELAY * 4).is_none());
+    }
+    #[test]
+    fn the_tooltip_sits_clear_of_its_box_and_inside_the_screen() {
+        let font = font();
+        let width = text_width(&font, INVERT_TIP) + 8;
+        for row in 0..LIST_LINES {
+            let cell = Editor::cell_rect(row, 2);
+            let r = Editor::tooltip_rect(&font, INVERT_TIP, cell);
+            assert_eq!(r.2, width);
+            assert!(r.0 >= 0 && r.0 + r.2 <= 640, "row {row} is off the sides");
+            assert!(
+                r.1 >= 0 && r.1 + r.3 <= 438,
+                "row {row} reaches the status bar"
+            );
+            let apart = r.1 >= cell.1 + cell.3 || r.1 + r.3 <= cell.1 || r.0 + r.2 <= cell.0;
+            assert!(apart, "row {row}: {r:?} covers {cell:?}");
+        }
+        // A box near the right edge is clipped in, not pushed off.
+        let r = Editor::tooltip_rect(&font, INVERT_TIP, (630, 200, 16, 13));
+        assert!(r.0 + r.2 <= 638);
+    }
+    #[test]
+    fn drawing_adds_the_tooltip_only_while_it_shows() {
+        let (mut e, _, row) = with_roll();
+        let font = font();
+        let at = center(Editor::cell_rect(row, 2));
+        let now = Instant::now();
+        let frame = |e: &Editor, when: Instant| {
+            let mut pixels = vec![0u8; 640 * 480 * 4];
+            e.draw(&mut pixels, &font);
+            e.draw_tooltip(&mut pixels, &font, when);
+            pixels
+        };
+        e.moved_at(Some(at), now);
+        let early = frame(&e, now);
+        let late = frame(&e, now + TOOLTIP_DELAY);
+        assert_ne!(early, late);
+        // The box itself is untouched by it.
+        let cell = Editor::cell_rect(row, 2);
+        let px = |p: &[u8], x: i32, y: i32| p[((y * 640 + x) * 4) as usize..][..4].to_vec();
+        for (x, y) in [(cell.0 + 3, cell.1 + 2), (cell.0 + 11, cell.1 + 10)] {
+            assert_eq!(px(&early, x, y), px(&late, x, y));
+        }
     }
     #[test]
     fn pointer_requires_matching_release() {

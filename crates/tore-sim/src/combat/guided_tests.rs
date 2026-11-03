@@ -178,6 +178,7 @@ fn a_missile_reach_is_its_zone_with_no_fly_out() {
 /// the T at `steering` radians and 760 ft/s.
 fn tee(range: f64, steering: f64, in_reach: bool) -> GuidedSight {
     GuidedSight {
+        energy_intercept: None,
         kind: Guidance::Coordinate,
         aim: Some([0., 0., range]),
         buddy: false,

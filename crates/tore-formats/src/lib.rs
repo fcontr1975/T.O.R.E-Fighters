@@ -8,6 +8,8 @@ pub mod esa;
 pub mod executable;
 pub mod font;
 pub mod hud;
+pub mod missile_data;
+pub mod missile_motors;
 pub mod mission;
 pub mod mission_text;
 pub mod module;

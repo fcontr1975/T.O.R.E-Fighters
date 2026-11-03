@@ -1525,8 +1525,8 @@ degrees or more that needs more than a 1 G push rolls inverted and pulls
 held off while the lift is more than 45 degrees from its bank. **Planned dive**:
 the terrain floor is the dive's planned pull-out (the physical pull-out arc at
 the AI's G limit plus 1 s of sink, bottoming out 1,000 ft over the highest
-ground ahead) instead of the floor above. Every other motion, air combat
-included, is flown exactly as described here.
+ground ahead) instead of the floor above. Other motions use the plain handling
+above except for the [missile defensive turn policy](#missile-defense-flown-by-ai).
 Invert the model's loaded stick-to-G mapping, with low-speed authority floored
 at 0.01 only for division, and clamp pitch input to [-1, 1]. Rudder stays zero.
 For the researched model, this includes its flap-adjusted minimum speed,
@@ -1543,7 +1543,10 @@ Imported AI stores use the same payload convention as player live combat:
 external equipment plus non-internal remaining rounds times nonnegative source
 weapon weight. A release subtracts only the mass of ammunition actually debited.
 Remaining health still reduces requested G and roll authority linearly as a
-fitted controller restriction. Actual axis-specific faults and regional damage
+fitted controller restriction, but never asks for less than 1.25 G, or the
+healthy limit where that is lower: a hit aircraft must still hold its flight
+path (fitted, review 2026-10-25; a fault-free but hit F/A-18 on a heavy final
+was held below 1 G and flew into the ground short of the runway). Actual axis-specific faults and regional damage
 also act through the shared flight model. [Fault responses](systems-damage.md#ai-pilot-response-to-faults)
 end offensive engagement when recovery is needed and add protective power,
 speed and maneuver requests. These never overwrite achieved flight motion.
@@ -1615,6 +1618,114 @@ retail short takeoff and the runway landing for a jet that needs more than 90%
 throttle to hover (slice H2, [vertical takeoff and
 landing](ai-airfield.md#vertical-takeoff-and-landing)).
 
+## Missile defense flown by AI
+
+John requested effective missile defense on 2026-10-25. The following policy
+is **fitted, agent-authored**, not measured retail behavior. It uses only the
+actor's observed threats. Missile energy is unknown in that observation API;
+time to closest approach is a timing estimate, not an energy estimate.
+
+After first observing a threat in an encounter, Novice, Average, Experienced
+and Ace pilots wait
+1.5, 0.75, 0.25 and 0 seconds respectively. Sensor warning delays still apply.
+With more than 18 seconds to closest approach for radar, or 14 for IR, turn
+cold and extend at maximum dry speed. At shorter times beam the missile, or
+notch the supporting radar bearing when known. A drag enters the beam at 14
+seconds for radar and 10 for IR. Do not return to drag during that encounter.
+At 1.5, 2.5, 3.5 and 4.5 seconds respectively, commit to a hard break toward
+the missile's side while it is closing, requesting at least a 90-degree
+heading change. Within 15 degrees of the nose, keep the current turn side when
+bank exceeds 5 degrees; otherwise keep the committed beam side, or turn right
+if no side is established. This avoids straightening at a head-on missile.
+A missing estimate or one non-closing closest-approach projection does not end
+an established break. Keep its heading and queued pair while passage is uncertain.
+Confirm passage from fresh, non-stale observations showing opening range over
+at least 0.75 seconds, at least 500 ft of separation gained, and a current range
+of at least 1,500 ft. A renewed closing estimate or decreasing range resets that
+confirmation. A gap longer than 0.5 seconds between range observations also
+restarts the confirmation window. Re-reading a frozen report is not new evidence. These thresholds
+are fitted agent decisions. Confirmed passage ends the motion and bursts;
+another closing missile retains priority. Remember each missile's break heading
+across switches and reacquisition. An observed renewed closure can reactivate it.
+
+Choose the shorter beam turn. Add up to 30 degrees of cost for pointing toward
+other observed threats, and 360 degrees for insufficient terrain clearance
+along the turn. Hold the chosen side as the bearing moves. Only an unsafe
+terrain path with a safe opposite path can reverse it. Threats classified as passive
+use alternating 45 degree jinks. Each leg lasts at least 4 seconds,
+or the estimated 90 degree turn plus roll-in and a skill-dependent dwell of
+3, 2.5, 2 or 1.5 seconds, whichever is longer. Do not reverse before reaching
+within 15 degrees of the leg's heading.
+
+Missile defensive fixed-wing turns use bank and positive pull. The usable positive G
+limit is the existing aircraft/pilot limit multiplied by 0.85, 0.90, 1.0 or
+1.0 by skill (lead decision, 2026-10-25), with a 1 G floor where available. Bank is bounded by the aircraft
+and the coordinated bank for that load, up to 85 degrees. Defensive roll closes
+bank error over 0.10 seconds, bounded by aircraft roll authority. For aircraft
+with measured control acceleration, release roll at the calculated stopping
+angle, including one tick of travel and a 0.5-degree margin. For lag-response
+aircraft subtract the roll still expected during the response time before
+commanding the remaining error. These are fitted agent control choices.
+For defensive bank commands of at least 35 degrees, blend from 1 G to the
+skill limit over the first 30 degrees of bank toward the turn, then request the
+full limit. Do not scale that pull down to 85 percent for a descent target.
+The aircraft still owns achieved G and roll. Small bank corrections use flight
+path feedback. No negative-G push is requested. The terrain
+floor overrides the turn and levels the wings for recovery. Before descending,
+check the current and requested headings and intermediate turn directions over
+5 seconds, retaining at least 1,000 ft above sampled ground. Repeated horizontal sample positions share a terrain read within that decision.
+After selecting a beam side, only that side is checked unless it becomes unsafe;
+then the opposite side is checked before switching. The active path is still
+sampled every tick with the same points and clearance. This sampling
+cannot guarantee clearance over unresolved narrow terrain. No defense unload
+is currently needed. Ordinary pursuit and formation control are unchanged.
+
+Radar beams dispense two chaff at most every 6, 4, 3 or 3 seconds by skill,
+once the turn is established (at least 5 degrees of bank toward its requested
+heading), already within 20 degrees of that heading, or within 6 seconds of
+closest approach, whichever comes first. These are fitted turn-start thresholds;
+the all-skill release rule is the lead's decision of 2026-10-25.
+Beams and breaks cut afterburner and cap throttle at 65 percent for a visually
+seen missile unless radar evidence has classified it as radar-guided. Known IR
+threats also request this heat reduction. Below 1.3 times minimum speed, preserve
+needed throttle. This visual-threat policy is the lead's decision in the second
+review. A missile already associated with radar guidance never requests the cut.
+IR flares begin inside 2, 3, 5 or 6 seconds to closest approach.
+
+All missile defense shares an eight-device request budget per encounter. One
+missile can spend at most six. Keep the final pair of the budget and each
+dispenser for a different missile's last-ditch break. Its first break burst can
+use that reserve before the ordinary beam cooldown expires, within the
+eight-device total, but never less than two seconds after the preceding pair. This six-plus-two allocation is an agent decision
+implementing the lead's second-missile reserve requirement. Subsequent break
+pairs start at least 2.0 seconds apart for every skill (John, 2026-10-27),
+including across a threat switch. Earlier skill-dependent reaction times and
+ordinary beam intervals remain. Devices in a pair
+are 0.25 seconds apart. Queued defensive releases survive uncertain passage
+and a brief lost observation; confirmed passage cancels them. Compatibility
+warning releases keep their independent schedule.
+
+Known radar threats get only chaff, known IR threats only flares. Keep learned
+classification for the encounter even while the missile is absent from the
+threat picture, including electronic-to-visual handoff. Unclassified visual
+threats get precautionary flares and the heat cut; this does not claim knowledge
+of their seeker. Unclassified electronic warnings use chaff. Stale observations
+request no new bursts.
+
+Switches retain reaction progress, cooldown, budget and the completed drag phase.
+A lost observation can support the committed motion and queued pair for two
+seconds (240 simulation ticks). An explicit combat notice that a store is
+inert ends that store's threat and defense immediately, including during this
+grace. It does not clear other threats or reset encounter reaction progress,
+release cooldown or the device budget. This follows John's 2026-10-27
+[inert-store policy](missile-energy.md#motion); a missing observation alone
+is not such a notice. Encounter memory, including class and per-missile break heading,
+lasts until 30 seconds without a fresh observation of a missile aimed at this
+aircraft, a fitted agent choice. The aircraft's own missiles in flight and
+missiles seen going elsewhere do not keep an encounter open. A longer quiet
+spell starts a new encounter. When defense ends, resume existing orders,
+formation or combat without changing aggression or launch gates.
+
 ## Live integration and authored boundaries
 
 Implementation repairs on 2026-09-17 connect pursuit, delayed warnings, weapon
@@ -1647,12 +1758,15 @@ are behavior fixes, not evidence of retail combat parity. Validation lives in
   shares the combat segment query, which samples eight intervals and refines a
   crossing ten times. Very narrow intervening terrain can remain unresolved by
   that host sampling rule. The score receives pointing error, never angular margin.
-- Device debits occur individually at 30-tick intervals. Each released device
-  rolls independently against matching missiles targeting its owner, using the
-  imported susceptibility and dispenser effectiveness. Fitted visual feedback is
-  a camera-facing glint lasting 45 ticks, growing from 2 ft by 0.15 ft per tick.
-  Fitted decoy consequence: clear guidance and coast for the record's remaining
-  lifetime. Original lifetime shortening remains unknown.
+- Device debits and the defensive dispense schedule are unchanged. Energy
+  rules evaluate physical devices once per missile per two-second episode and
+  pursue a successful decoy, as specified in the
+  [energy countermeasure contract](missile-energy.md#countermeasure-contract).
+  The preserved Spec adapter rolls per device and clears guidance to coast for
+  the record's remaining lifetime. Original lifetime shortening remains unknown.
+  Model timing is available through the additive
+  `State::missile_time_to_impact` interface for already perceived threats;
+  this missile change does not replace the separately owned defensive policy.
 - AI movement follows the [input-only control contract](#input-only-aircraft-control).
   B44 remains a reference for requested limits, not a post-step pose override.
 - Wing-assignment penalties count other live attackers on the same side and in

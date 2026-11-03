@@ -1080,6 +1080,55 @@ fn a_forced_mismatch_resyncs_the_warm_standby() {
     rig.holds_the_hosts_world(0);
 }
 
+/// The battery's planned handover (2026-10-24): a status sent while a resync
+/// checkpoint was still on its way asked for it again, and the host sent a
+/// second one 2 seconds after the first. The warm copy, restored from the
+/// first and stepped on, refused the second as a checkpoint its journal does
+/// not continue, asked again, and every checkpoint after was refused the same
+/// way. One resync is one checkpoint, and a warm copy in good standing never
+/// refuses one.
+#[test]
+fn a_resync_sends_one_checkpoint_and_nothing_is_refused() {
+    let mut rig = Rig::new();
+    rig.join("Viper", 0, Platform::current());
+    rig.join("Hawk", 1, Platform::current());
+    rig.fly();
+    assert!(rig.run_until(Duration::from_secs(8), |r| {
+        r.figures(0).is_some_and(|f| f.checks_equal >= 1)
+    }));
+    let viper = rig.lobby_id(0);
+    let before = rig.figures(0).unwrap().bytes.checkpoint_count;
+    rig.host.standbys.spoil_next_check = true;
+    assert!(
+        rig.run_until(Duration::from_secs(8), |r| r
+            .figures(0)
+            .is_some_and(|f| f.mismatches == 1)),
+        "the standby reports the mismatch"
+    );
+    // Long enough for the resync, a redundant one after it, and that one's
+    // refusal.
+    rig.run(Duration::from_secs(25));
+    let figures = rig.figures(0).unwrap();
+    assert_eq!(
+        figures.bytes.checkpoint_count - before,
+        1,
+        "one checkpoint for one mismatch: {:?}",
+        rig.begun
+            .iter()
+            .filter(|b| b.player == viper)
+            .collect::<Vec<_>>()
+    );
+    let refused: Vec<&Note> = rig.players[0]
+        .notes
+        .iter()
+        .map(|(_, n)| n)
+        .filter(|n| matches!(n, Note::Refused(_)))
+        .collect();
+    assert!(refused.is_empty(), "refused: {refused:?}");
+    assert!(figures.warm);
+    assert_eq!(figures.status.unwrap().state, StandbyState::Warm);
+}
+
 #[test]
 fn a_standby_failing_its_checks_twice_goes_cold() {
     let mut rig = Rig::new();
