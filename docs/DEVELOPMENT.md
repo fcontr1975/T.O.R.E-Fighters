@@ -255,8 +255,8 @@ and give the packaging script the same target.
 | --- | --- | --- |
 | Linux | `tools/package/package-linux.sh` | `dist/*.tar.gz` and `dist/*.AppImage` |
 | macOS | `tools/package/package-macos.sh` | `dist/*.dmg` holding `T.O.R.E-Fighters.app` |
-| Windows | `pwsh tools/package/package-windows.ps1` | `dist/*-windows-x86_64.msi` |
-| Windows 32-bit, local builds only | `pwsh tools/package/package-windows.ps1 -Target i686-pc-windows-msvc` | `dist/*-windows-x86.msi` |
+| Windows | `pwsh tools/package/package-windows.ps1` | `dist/*-windows-x86_64.msi` and `dist/*-windows-x86_64-portable.zip` |
+| Windows 32-bit, local builds only | `pwsh tools/package/package-windows.ps1 -Target i686-pc-windows-msvc` | `dist/*-windows-x86.msi` and `dist/*-windows-x86-portable.zip` |
 | Dedicated server, any of the three | `python3 tools/package/package_server.py [--max-glibc 2.35]` after `cargo build --release --locked -p tore-server` | `dist/server/tore-server-<version>-<platform>.tar.gz` (`.zip` on Windows) and its `.sha256` |
 
 What each package contains:
@@ -280,6 +280,12 @@ What each package contains:
   The 32-bit MSI installs into `%ProgramFiles(x86)%\T.O.R.E-Fighters`
   instead; the two share the `UpgradeCode`, so installing either replaces the
   other. The installer's pages and its shortcut choices are described below.
+- **Portable zip**: one folder named like the archive, holding the same files
+  as the MSI. Unpack anywhere and run `tore-app.exe`; delete the folder to
+  remove it. It adds no shortcuts or uninstall entry and no Event Viewer source.
+  Settings, the media import and logs stay in the player's profile
+  (`%APPDATA%` and `%LOCALAPPDATA%`), shared with an installed copy, so the
+  folder itself does not carry them to another computer.
 - **Dedicated server archive**: one folder named like the archive, holding
   `tore-server` (`tore-server.exe`), `server.conf` and `mission.txt` (the
   samples in `crates/tore-server/samples/`, which a `tore-server` test parses),
@@ -466,7 +472,7 @@ errors and main/worker panics without media, using isolated paths with spaces.
 On Windows it also crashes the executable on purpose and checks the native crash
 report; elsewhere it checks that those modes say they are Windows only.
 Packaging runs it on staged binaries and on the actual payload recovered from
-the MSI, DMG, tar.gz and AppImage. MSI administrative extraction validates the
+the MSI, portable zip, DMG, tar.gz and AppImage. MSI administrative extraction validates the
 payload without changing an installed product. Source and package asset scans
 remain required.
 

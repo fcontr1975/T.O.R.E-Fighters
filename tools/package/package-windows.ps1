@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build the unsigned per-machine MSI with WiX v3.
+    Build the unsigned per-machine MSI with WiX v3 and the portable zip.
 
 .DESCRIPTION
     Run after building the release binaries:
@@ -14,11 +14,13 @@
         pwsh tools/package/package-windows.ps1 -Target i686-pc-windows-msvc
 
     The MSI lands in dist\ as ...-windows-x86_64.msi or ...-windows-x86.msi,
-    the names the download page looks for. The staged directory stays in
-    dist\stage\windows\ (dist\stage\windows-x86\ for 32-bit) so the asset
-    guard can scan real files rather than a compressed blob. Nothing is
-    signed: the first launch shows SmartScreen, where the player picks More
-    info, then Run anyway.
+    the names the download page looks for. The portable zip lands beside it as
+    ...-windows-x86_64-portable.zip (...-windows-x86-portable.zip for 32-bit):
+    the same files in one folder, for a player who does not want to install.
+    The staged directory stays in dist\stage\windows\ (dist\stage\windows-x86\
+    for 32-bit) so the asset guard can scan real files rather than a compressed
+    blob. Nothing is signed: the first launch shows SmartScreen, where the
+    player picks More info, then Run anyway.
 
     WiX v3 (candle.exe and light.exe) ships on the windows-2022 runner image.
     Locally, install the WiX Toolset v3.14 or later, or pass -WixBin. Both
@@ -196,5 +198,32 @@ $apps = @(Get-ChildItem $unpacked -Recurse -Filter tore-app.exe)
 if ($apps.Count -ne 1) { throw "Expected one application in the extracted MSI." }
 & python (Join-Path $root "tools\check_startup_diagnostics.py") $apps[0].FullName
 if ($LASTEXITCODE -ne 0) { throw "Extracted MSI diagnostics check failed." }
+
+# The portable zip: the MSI's files in one folder named like the archive, less
+# LICENSE.rtf, which only the installer's license page reads. It has no
+# shortcuts or Event Viewer source; the game finds its data the same way as an
+# installed copy.
+$portableName = "T.O.R.E-Fighters-$version-windows-$platform-portable"
+$portableStage = Join-Path $dist "stage\portable$suffix\$portableName"
+if (Test-Path $portableStage) { Remove-Item -Recurse -Force $portableStage }
+New-Item -ItemType Directory -Force -Path $portableStage | Out-Null
+foreach ($file in @("tore-app.exe", "tore-extract.exe", "tore.ico", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md")) {
+    Copy-Item (Join-Path $stage $file) (Join-Path $portableStage $file)
+}
+$zip = Join-Path $dist "$portableName.zip"
+if (Test-Path $zip) { Remove-Item -Force $zip }
+Compress-Archive -LiteralPath $portableStage -DestinationPath $zip
+Write-Host "Wrote $zip"
+& python (Join-Path $root "tools\check_assets.py") $zip
+if ($LASTEXITCODE -ne 0) { throw "Asset check failed on the portable zip." }
+
+# Run the copy a player would unpack, from a path with spaces.
+$unpacked = Join-Path $dist "stage\zip check with spaces$suffix"
+if (Test-Path $unpacked) { Remove-Item -Recurse -Force $unpacked }
+Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
+$portableApp = Join-Path $unpacked "$portableName\tore-app.exe"
+if (-not (Test-Path $portableApp)) { throw "Expected $portableName\tore-app.exe in the portable zip." }
+& python (Join-Path $root "tools\check_startup_diagnostics.py") $portableApp
+if ($LASTEXITCODE -ne 0) { throw "Unpacked zip diagnostics check failed." }
 
 Write-Host "Windows $platform packaging complete for version $version"

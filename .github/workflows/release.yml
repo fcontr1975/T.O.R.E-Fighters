@@ -203,6 +203,7 @@ jobs:
           name: packages-${{ matrix.os }}${{ matrix.target && format('-{0}', matrix.target) || '' }}
           if-no-files-found: error
           path: |
+            dist/*.zip
             dist/*.tar.gz
             dist/*.AppImage
             dist/*.dmg

@@ -337,6 +337,7 @@
           <span class="platform-code" aria-hidden="true">WIN / 64</span><h3>Windows</h3>
           <p class="platform-detail">64-bit Intel / AMD</p><p class="download-meta">MSI installer</p>
           <a class="button download-button" href="https://github.com/john-overton/T.O.R.E-Fighters/releases" aria-label="View Windows releases on GitHub"><span>View releases</span><span aria-hidden="true">↗</span></a>
+          <a id="windows-portable" class="download-extra" href="https://github.com/john-overton/T.O.R.E-Fighters/releases" hidden>Also available as a portable zip</a>
           <a id="windows-x86" class="download-extra" href="https://github.com/john-overton/T.O.R.E-Fighters/releases" hidden>Also available as 32-bit MSI</a>
         </article>
         <article class="download-card" id="download-macos-arm">
@@ -513,6 +514,14 @@
           let asset = findAsset(platform.suffix);
           let format = platform.format;
           if (platform.id === 'windows') {
+            const portable = findAsset('-windows-x86_64-portable.zip');
+            if (portable) {
+              const extra = document.getElementById('windows-portable');
+              extra.href = portable.browser_download_url;
+              extra.textContent = 'Or portable zip · ' + size(portable);
+              extra.setAttribute('aria-label', 'Download ' + release.tag_name + ' for Windows 64-bit (portable zip, no installer)');
+              extra.hidden = false;
+            }
             const x86 = findAsset('-windows-x86.msi');
             if (x86) {
               const extra = document.getElementById('windows-x86');
